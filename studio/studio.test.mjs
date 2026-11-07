@@ -105,7 +105,7 @@ test("HTTP requires session authorization and same origin; actual engine simulat
       dataRoot: store.root,
       cli,
       port: 0,
-      templatePack: "/unused",
+    templatePack: join(store.root, "missing-template"),
       development: true,
     });
   t.after(() => studio.close());
@@ -161,15 +161,18 @@ test("HTTP requires session authorization and same origin; actual engine simulat
     })
   ).json();
   assert.equal(queued.revision, d.meta.revision);
-  // Invalid factory path deliberately fails before launching an app build.
+  // The missing template must fail at template verification on every OS.
   const deadline = Date.now() + 10000;
+  let finished;
   while (Date.now() < deadline) {
-    const jobs = await studio.jobs.list(d.meta.id);
-    if (jobs[0].status === "failed") {
-      assert.match(jobs[0].error, /unused|manifest|No such file/);
+    const [job] = await studio.jobs.list(d.meta.id);
+    if (job.finishedAt) {
+      finished = job;
       break;
     }
     await new Promise((r) => setTimeout(r, 30));
   }
-  assert.equal((await studio.jobs.list(d.meta.id))[0].status, "failed");
+  assert.equal(finished?.status, "failed");
+  assert.match(finished.error, /^verify-template\r?$/m);
+  assert.doesNotMatch(finished.error, /^configure-product\r?$/m);
 });
