@@ -1,0 +1,14 @@
+[package]
+name = "buddy-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+buddy-project = { path = "../buddy-project" }
+serde.workspace = true
+schemars.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

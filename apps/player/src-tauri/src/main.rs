@@ -1,0 +1,1221 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod display;
+mod edit;
+mod navigation;
+mod preferences;
+use buddy_platform::{InputOptions, InputSession, WakeSignal};
+use buddy_project::{Anchor, LoadedProject, Point};
+use buddy_runtime::*;
+use display::Display;
+use edit::EditSession;
+use fs2::FileExt;
+use preferences::PreferencesStore;
+use std::{
+    fs::{self, File, OpenOptions},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+use tauri::{
+    image::Image,
+    ipc::Channel,
+    menu::{CheckMenuItem, Menu, MenuItem},
+    tray::TrayIconBuilder,
+    Manager, State, WebviewUrl, WebviewWindow,
+};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Normal,
+    Editing,
+    Hidden,
+}
+#[derive(Clone)]
+struct Controller {
+    timing: buddy_project::Timing,
+    mode: Mode,
+    settings_open: bool,
+    paused: bool,
+    keyboard: bool,
+    mouse: bool,
+    movement: bool,
+    scale: f64,
+    always_on_top: bool,
+    revision: u64,
+    edit: Option<EditSession>,
+}
+struct TrayControls {
+    status: MenuItem<tauri::Wry>,
+    visible: CheckMenuItem<tauri::Wry>,
+    pause: CheckMenuItem<tauri::Wry>,
+    keyboard: CheckMenuItem<tauri::Wry>,
+    mouse: CheckMenuItem<tauri::Wry>,
+    movement: CheckMenuItem<tauri::Wry>,
+}
+struct Host {
+    loaded: LoadedProject,
+    render_paths: std::collections::BTreeMap<String, String>,
+    runtime: Mutex<Runtime>,
+    controller: Mutex<Controller>,
+    preferences: Mutex<PreferenceOverrides>,
+    store: Mutex<PreferencesStore>,
+    input_status: Mutex<InputStatus>,
+    channel: Mutex<Option<Channel<WireState>>>,
+    sequence: AtomicU32,
+    wake: WakeSignal,
+    started: Instant,
+    data_directory: PathBuf,
+    exiting: AtomicBool,
+    display: Mutex<Display>,
+    monitors: Mutex<Vec<Display>>,
+    _instance_lock: File,
+    edit_operation: Mutex<()>,
+}
+impl Host {
+    fn now(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+    fn size(&self, scale: f64) -> Point {
+        self.display
+            .lock()
+            .unwrap()
+            .character_size(&self.loaded.data.character, scale)
+    }
+    fn base_position(&self, size: Point) -> Point {
+        let bounds = self.display.lock().unwrap().bounds;
+        let defaults = &self.loaded.data.project.defaults.position;
+        let margin = defaults.margin_dip;
+        let x = match defaults.anchor {
+            Anchor::TopLeft | Anchor::BottomLeft => bounds.x + margin,
+            _ => bounds.x + bounds.width - size.x - margin,
+        };
+        let y = match defaults.anchor {
+            Anchor::TopLeft | Anchor::TopRight => bounds.y + margin,
+            _ => bounds.y + bounds.height - size.y - margin,
+        };
+        bounds.clamp(x, y, size)
+    }
+    fn refresh_preferences(&self) {
+        let defaults = &self.loaded.data.project.defaults;
+        let prefs = self.preferences.lock().unwrap().clone();
+        let mut c = self.controller.lock().unwrap();
+        c.timing = prefs.timing.unwrap_or(defaults.timing);
+        c.scale = prefs.scale.unwrap_or(defaults.scale);
+        c.always_on_top = prefs.always_on_top.unwrap_or(defaults.always_on_top);
+        c.keyboard = prefs.keyboard.unwrap_or(defaults.input.keyboard);
+        c.mouse = prefs.mouse.unwrap_or(defaults.input.mouse);
+        c.movement = prefs.movement_enabled.unwrap_or(defaults.movement_enabled);
+        c.revision += 1;
+        drop(c);
+        self.wake.wake();
+    }
+    fn save(&self, prefs: PreferenceOverrides) -> Result<(), String> {
+        self.store.lock().unwrap().save(&prefs)?;
+        *self.preferences.lock().unwrap() = prefs;
+        self.refresh_preferences();
+        Ok(())
+    }
+    fn send_state(&self) {
+        let c = self.controller.lock().unwrap().clone();
+        let size = self.size(c.scale);
+        let mut channel = self.channel.lock().unwrap();
+        let Some(sender) = channel.as_ref() else {
+            return;
+        };
+        let seq = self
+            .sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let state = {
+            let mut runtime = self.runtime.lock().unwrap();
+            runtime.advance(self.now());
+            let state = runtime.state();
+            runtime.prepare_frame(seq, &state, c.mode != Mode::Hidden);
+            state
+        };
+        let wire = WireState {
+            seq,
+            state,
+            editing: c.mode == Mode::Editing,
+            visible: c.mode != Mode::Hidden,
+            edit_session_id: c.edit.as_ref().map(|session| session.id.clone()),
+            width: size.x,
+            height: size.y,
+        };
+        if sender.send(wire).is_err() {
+            self.runtime.lock().unwrap().frame_send_failed(seq);
+            *channel = None;
+        }
+    }
+    fn begin_edit(&self, app: &tauri::AppHandle) -> Result<(), String> {
+        let _operation = self.edit_operation.lock().unwrap();
+        let position = self.runtime.lock().unwrap().state().position;
+        {
+            let mut c = self.controller.lock().unwrap();
+            if c.mode == Mode::Editing {
+                return Ok(());
+            }
+            if c.mode == Mode::Hidden {
+                return Err("숨김을 해제한 뒤 이동하세요.".into());
+            }
+            c.edit = Some(EditSession::new(position, c.scale));
+            c.mode = Mode::Editing;
+            c.revision += 1;
+        }
+        if let Some(settings) = app.get_webview_window("settings") {
+            let _ = settings.close();
+        }
+        if let Some(window) = app.get_webview_window("overlay") {
+            window
+                .set_ignore_cursor_events(false)
+                .map_err(|e| e.to_string())?;
+        }
+        self.wake.wake();
+        Ok(())
+    }
+    fn finish_edit(
+        &self,
+        app: &tauri::AppHandle,
+        commit: bool,
+        session_id: Option<&str>,
+    ) -> Result<(), String> {
+        let _operation = self.edit_operation.lock().unwrap();
+        let c = self.controller.lock().unwrap().clone();
+        if c.mode != Mode::Editing {
+            return Err("유효한 편집 세션이 없습니다.".into());
+        }
+        let session = c.edit.as_ref().ok_or("유효한 편집 세션이 없습니다.")?;
+        if let Some(id) = session_id {
+            session.require(id)?;
+        }
+        if commit {
+            let mut prefs = self.preferences.lock().unwrap().clone();
+            prefs.scale = Some(c.scale);
+            let monitor_hint = self.display.lock().unwrap().id.clone();
+            let position = self.runtime.lock().unwrap().state().position;
+            prefs.base_placement = Some(BasePlacement {
+                monitor_hint,
+                position,
+            });
+            self.save(prefs)?;
+        } else {
+            self.controller.lock().unwrap().scale = session.scale;
+            self.runtime.lock().unwrap().place(
+                self.now(),
+                session.origin,
+                self.size(session.scale),
+                self.display.lock().unwrap().bounds,
+            );
+        }
+        {
+            let mut c = self.controller.lock().unwrap();
+            c.mode = Mode::Normal;
+            c.edit = None;
+            c.revision += 1;
+        }
+        if let Some(window) = app.get_webview_window("overlay") {
+            window
+                .set_ignore_cursor_events(false)
+                .map_err(|e| e.to_string())?;
+        }
+        self.wake.wake();
+        Ok(())
+    }
+    fn reset_preferences(&self, all: bool) -> Result<(), String> {
+        if all {
+            let prefs = self.store.lock().unwrap().reset()?;
+            *self.preferences.lock().unwrap() = prefs;
+            self.refresh_preferences();
+            let displays = self.monitors.lock().unwrap();
+            if let Some(primary) = display::choose(&displays, None) {
+                *self.display.lock().unwrap() = primary;
+            }
+        }
+        let scale = self.controller.lock().unwrap().scale;
+        let size = self.size(scale);
+        let position = self.base_position(size);
+        if !all {
+            let mut prefs = self.preferences.lock().unwrap().clone();
+            prefs.base_placement = Some(BasePlacement {
+                monitor_hint: self.display.lock().unwrap().id.clone(),
+                position,
+            });
+            self.save(prefs)?;
+        }
+        self.runtime.lock().unwrap().place(
+            self.now(),
+            position,
+            size,
+            self.display.lock().unwrap().bounds,
+        );
+        self.wake.wake();
+        Ok(())
+    }
+    fn refresh_displays(&self, app: &tauri::AppHandle) {
+        let Ok(monitors) = display::list(app) else {
+            return;
+        };
+        let current = self.display.lock().unwrap().clone();
+        let Some(selected) = display::choose(&monitors, Some(&current.id)) else {
+            return;
+        };
+        *self.monitors.lock().unwrap() = monitors;
+        if selected != current {
+            let removed = selected.id != current.id;
+            *self.display.lock().unwrap() = selected.clone();
+            let scale = self.controller.lock().unwrap().scale;
+            let size = self.size(scale);
+            let mut runtime = self.runtime.lock().unwrap();
+            let position = if removed {
+                self.base_position(size)
+            } else {
+                runtime.state().position
+            };
+            runtime.place(self.now(), position, size, selected.bounds);
+        }
+    }
+    fn toggle_source(&self, source: &str) -> Result<(), String> {
+        let mut prefs = self.preferences.lock().unwrap().clone();
+        let c = self.controller.lock().unwrap().clone();
+        match source {
+            "keyboard" => prefs.keyboard = Some(!c.keyboard),
+            "mouse" => prefs.mouse = Some(!c.mouse),
+            "movement" => prefs.movement_enabled = Some(!c.movement),
+            _ => return Err("지원하지 않는 입력 소스입니다.".into()),
+        }
+        self.save(prefs)
+    }
+    fn open_settings(&self, app: &tauri::AppHandle) -> Result<(), String> {
+        if self.controller.lock().unwrap().mode == Mode::Editing {
+            self.finish_edit(app, false, None)?;
+        }
+        if let Some(window) = app.get_webview_window("settings") {
+            window.unminimize().map_err(|e| e.to_string())?;
+            window.show().map_err(|e| e.to_string())?;
+            window.set_always_on_top(true).map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        self.controller.lock().unwrap().settings_open = true;
+        self.wake.wake();
+        let result =
+            tauri::WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+                .on_navigation(navigation::allow_player_navigation)
+                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+                .initialization_script("window.location.hash = 'settings';")
+                .title(format!("{} · 설정", self.loaded.data.project.product.name))
+                .inner_size(620.0, 680.0)
+                .min_inner_size(480.0, 560.0)
+                .resizable(true)
+                .always_on_top(true)
+                .visible(true)
+                .focused(true)
+                .center()
+                .build()
+                .map_err(|e| e.to_string());
+        if result.is_err() {
+            self.controller.lock().unwrap().settings_open = false;
+            self.wake.wake();
+        }
+        result.and_then(|window| {
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())
+        })
+    }
+}
+fn require(window: &WebviewWindow, label: &str) -> Result<(), String> {
+    if window.label() == label {
+        Ok(())
+    } else {
+        Err("이 창에서는 허용되지 않는 명령입니다.".into())
+    }
+}
+#[tauri::command]
+fn get_bootstrap(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+) -> Result<PlayerBootstrap, String> {
+    require(&window, "overlay")?;
+    let c = host.controller.lock().unwrap().clone();
+    let size = host.size(c.scale);
+    Ok(PlayerBootstrap {
+        character: host.loaded.data.character.clone(),
+        product: host.loaded.data.project.product.clone(),
+        image_paths: host.render_paths.clone(),
+        render_plan: host.loaded.data.render_plan.clone(),
+        width: size.x,
+        height: size.y,
+    })
+}
+#[tauri::command]
+fn subscribe_character_state(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    channel: Channel<WireState>,
+) -> Result<(), String> {
+    require(&window, "overlay")?;
+    {
+        let mut target = host.channel.lock().unwrap();
+        host.runtime.lock().unwrap().frame_reconnect();
+        *target = Some(channel);
+    }
+    host.send_state();
+    Ok(())
+}
+#[tauri::command]
+fn ack_character_frame(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    ack: FrameAck,
+) -> Result<(), String> {
+    require(&window, "overlay")?;
+    if !host.runtime.lock().unwrap().accepts_frame(&ack) {
+        host.runtime
+            .lock()
+            .unwrap()
+            .ack_frame(host.now(), &ack, false);
+        return Err("발행되지 않았거나 이미 처리된 프레임입니다.".into());
+    }
+    let visible = host.controller.lock().unwrap().mode != Mode::Hidden;
+    if visible && !window.is_visible().map_err(|e| e.to_string())? {
+        window.show().map_err(|e| e.to_string())?;
+    }
+    host.runtime
+        .lock()
+        .unwrap()
+        .ack_frame(host.now(), &ack, visible);
+    host.wake.wake();
+    Ok(())
+}
+#[tauri::command]
+fn get_runtime_status(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+) -> Result<RuntimeStatus, String> {
+    require(&window, "settings")?;
+    let c = host.controller.lock().unwrap().clone();
+    let mut input = host.input_status.lock().unwrap().clone();
+    if c.settings_open {
+        input.stop("설정 창을 닫으면 감지를 시작합니다.");
+    }
+    // Snapshot each owner separately; do not retain temporary mutex guards
+    // across struct fields and invert the runtime/display lock order.
+    let notice = host.store.lock().unwrap().notice.clone();
+    let diagnostics = host.runtime.lock().unwrap().diagnostics();
+    let performance = host.runtime.lock().unwrap().performance(host.now());
+    let monitors = host
+        .monitors
+        .lock()
+        .unwrap()
+        .iter()
+        .map(Display::choice)
+        .collect();
+    let selected = host.display.lock().unwrap().clone();
+    let saved = host.preferences.lock().unwrap().base_placement.clone();
+    let position = saved
+        .filter(|p| p.monitor_hint == selected.id)
+        .map(|p| p.position)
+        .unwrap_or_else(|| host.base_position(host.size(c.scale)));
+    Ok(RuntimeStatus {
+        timing: c.timing,
+        keyboard: c.keyboard,
+        mouse: c.mouse,
+        movement_enabled: c.movement,
+        always_on_top: c.always_on_top,
+        scale: c.scale,
+        input,
+        notice,
+        diagnostics,
+        performance,
+        monitors,
+        base_placement: BasePlacement {
+            monitor_hint: selected.id,
+            position,
+        },
+    })
+}
+#[tauri::command]
+fn reset_performance_session(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+) -> Result<(), String> {
+    require(&window, "settings")?;
+    let controller = host.controller.lock().unwrap();
+    if !controller.settings_open {
+        return Err("설정 창에서만 계측을 초기화할 수 있습니다.".into());
+    }
+    let now = host.now();
+    let mut runtime = host.runtime.lock().unwrap();
+    let mut controls = runtime.controls();
+    controls.active = false;
+    runtime.set_controls(now, controls);
+    runtime.reset(now);
+    runtime.reset_performance(now);
+    drop(runtime);
+    drop(controller);
+    host.send_state();
+    host.wake.wake();
+    Ok(())
+}
+#[tauri::command]
+fn export_runtime_diagnostics(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+) -> Result<String, String> {
+    require(&window, "settings")?;
+    let controller = host.controller.lock().unwrap().clone();
+    let display = host.display.lock().unwrap().clone();
+    let input = host.input_status.lock().unwrap().clone();
+    let mut runtime = host.runtime.lock().unwrap();
+    let report = serde_json::json!({
+        "schemaVersion": 1,
+        "engineVersion": env!("CARGO_PKG_VERSION"),
+        "protocolVersion": PROTOCOL_VERSION,
+        "projectHash": host.loaded.content_hash,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "debugBuild": cfg!(debug_assertions),
+        "previewBuild": cfg!(feature = "preview"),
+        "characterScale": controller.scale,
+        "displayScale": display.scale,
+        "workAreaDip": display.bounds,
+        "keyboard": { "permission": input.keyboard.permission, "capture": input.keyboard.capture },
+        "mouse": { "permission": input.mouse.permission, "capture": input.mouse.capture },
+        "diagnostics": runtime.diagnostics(),
+        "performance": runtime.performance(host.now()),
+        "latencyClock": "native-callback-entry-to-renderer-draw-ack",
+        "startupClock": "rust-main-entry-to-visible-character-draw-ack",
+        "histogram": { "resolutionMs": 1, "limitMs": 2000, "percentile": "nearest-rank" },
+    });
+    drop(runtime);
+    let path = host
+        .data_directory
+        .join(format!("diagnostics-{}.json", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
+    preferences::atomic_write(&path, &bytes)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+#[tauri::command]
+fn request_input_access(window: WebviewWindow, host: State<'_, Arc<Host>>) -> Result<(), String> {
+    require(&window, "settings")?;
+    buddy_platform::request_input_permission();
+    host.controller.lock().unwrap().revision += 1;
+    let c = host.controller.lock().unwrap().clone();
+    *host.input_status.lock().unwrap() = InputOptions {
+        keyboard: c.keyboard,
+        mouse: c.mouse,
+    }
+    .status(
+        buddy_platform::permission_state(),
+        CaptureState::Stopped,
+        Some("설정 창을 닫고 입력 감지 상태를 확인하세요.".into()),
+    );
+    host.wake.wake();
+    Ok(())
+}
+#[tauri::command]
+fn apply_user_preferences(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    update: PreferenceUpdate,
+) -> Result<(), String> {
+    require(&window, "settings")?;
+    let _operation = host.edit_operation.lock().unwrap();
+    if host.controller.lock().unwrap().mode == Mode::Editing {
+        return Err("편집을 마친 뒤 설정을 저장하세요.".into());
+    }
+    if !(0.25..=3.0).contains(&update.scale) {
+        return Err("배율은 25~300%여야 합니다.".into());
+    }
+    let mut prefs = host.preferences.lock().unwrap().clone();
+    if let Some(timing) = update.timing {
+        if !timing.is_valid() {
+            return Err("타이밍 값이 허용 범위를 벗어났습니다.".into());
+        }
+        prefs.timing = Some(timing);
+    }
+    prefs.keyboard = Some(update.keyboard);
+    prefs.mouse = Some(update.mouse);
+    prefs.scale = Some(update.scale);
+    prefs.movement_enabled = Some(update.movement_enabled);
+    prefs.always_on_top = Some(update.always_on_top);
+    let placement = if let Some(mut placement) = update.base_placement {
+        if !placement.position.x.is_finite()
+            || !placement.position.y.is_finite()
+            || placement.position.x.abs() > 1_000_000.0
+            || placement.position.y.abs() > 1_000_000.0
+        {
+            return Err("유효하지 않은 위치입니다.".into());
+        }
+        let display = host
+            .monitors
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.id == placement.monitor_hint)
+            .cloned()
+            .ok_or("선택한 디스플레이가 연결되어 있지 않습니다.")?;
+        let size = display.character_size(&host.loaded.data.character, update.scale);
+        placement.position = display
+            .bounds
+            .clamp(placement.position.x, placement.position.y, size);
+        prefs.base_placement = Some(placement.clone());
+        Some((display, placement.position, size))
+    } else {
+        None
+    };
+    host.save(prefs)?;
+    if let Some((display, position, size)) = placement {
+        *host.display.lock().unwrap() = display.clone();
+        host.runtime
+            .lock()
+            .unwrap()
+            .place(host.now(), position, size, display.bounds);
+        host.wake.wake();
+    }
+    Ok(())
+}
+#[tauri::command]
+fn set_runtime_mode(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    host: State<'_, Arc<Host>>,
+    mode: String,
+) -> Result<(), String> {
+    require(&window, "settings")?;
+    match mode.as_str() {
+        "editing" => host.begin_edit(&app),
+        _ => Err("지원하지 않는 모드입니다.".into()),
+    }
+}
+#[tauri::command]
+fn reset_user_preferences(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    all: bool,
+) -> Result<(), String> {
+    require(&window, "settings")?;
+    let _operation = host.edit_operation.lock().unwrap();
+    if host.controller.lock().unwrap().mode == Mode::Editing {
+        return Err("편집을 마친 뒤 초기화하세요.".into());
+    }
+    host.reset_preferences(all)
+}
+#[tauri::command]
+fn begin_character_drag(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    host: State<'_, Arc<Host>>,
+) -> Result<String, String> {
+    require(&window, "overlay")?;
+    host.begin_edit(&app)?;
+    host.controller
+        .lock()
+        .unwrap()
+        .edit
+        .as_ref()
+        .map(|s| s.id.clone())
+        .ok_or("이동을 시작하지 못했습니다.".into())
+}
+#[tauri::command]
+fn update_character_edit(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    session_id: String,
+    dx: f64,
+    dy: f64,
+    scale_factor: Option<f64>,
+) -> Result<(), String> {
+    require(&window, "overlay")?;
+    let _operation = host.edit_operation.lock().unwrap();
+    let mut c = host.controller.lock().unwrap().clone();
+    c.edit
+        .as_ref()
+        .ok_or("유효한 편집 세션이 없습니다.")?
+        .require(&session_id)?;
+    if c.mode != Mode::Editing
+        || !dx.is_finite()
+        || !dy.is_finite()
+        || dx.abs() > 4096.0
+        || dy.abs() > 4096.0
+        || scale_factor.is_some_and(|factor| !(0.8..=1.25).contains(&factor))
+    {
+        return Err("유효하지 않은 편집 요청입니다.".into());
+    }
+    if let Some(factor) = scale_factor {
+        c.scale = (c.scale * factor).clamp(0.25, 3.0);
+        host.controller.lock().unwrap().scale = c.scale;
+    }
+    let mut runtime = host.runtime.lock().unwrap();
+    let position = runtime.state().position;
+    runtime.place(
+        host.now(),
+        Point {
+            x: position.x + dx,
+            y: position.y + dy,
+        },
+        host.size(c.scale),
+        host.display.lock().unwrap().bounds,
+    );
+    drop(runtime);
+    host.wake.wake();
+    Ok(())
+}
+#[tauri::command]
+fn finish_character_edit(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    session_id: String,
+    host: State<'_, Arc<Host>>,
+) -> Result<(), String> {
+    require(&window, "overlay")?;
+    host.finish_edit(&app, true, Some(&session_id))
+}
+#[tauri::command]
+fn cancel_character_edit(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    session_id: String,
+    host: State<'_, Arc<Host>>,
+) -> Result<(), String> {
+    require(&window, "overlay")?;
+    host.finish_edit(&app, false, Some(&session_id))
+}
+
+fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
+    std::thread::Builder::new()
+        .name("buddy-runtime-host".into())
+        .spawn(move || {
+            let mut input: Option<InputSession> = None;
+            let mut input_revision = u64::MAX;
+            let mut last_state: Option<CharacterState> = None;
+            let mut last_sent = 0;
+            let mut last_mode = Mode::Normal;
+            let mut last_size = Point::default();
+            let mut sent_mode = None;
+            let mut sent_size = Point::default();
+            let mut sent_edit_id: Option<String> = None;
+            let mut last_top = None;
+            let mut last_display: Option<Display> = None;
+            let mut monitor_check = 0;
+            let mut last_menu = String::new();
+            while !host.exiting.load(Ordering::Acquire) {
+                let c = host.controller.lock().unwrap().clone();
+                let active = c.mode == Mode::Normal && !c.settings_open && !c.paused;
+                let now = host.now();
+                if now >= monitor_check {
+                    host.refresh_displays(&app);
+                    monitor_check = now + 2000;
+                }
+                let display = host.display.lock().unwrap().clone();
+                let display_changed = last_display.as_ref() != Some(&display);
+                let size = host.size(c.scale);
+                if input_revision != c.revision || !active {
+                    input = None;
+                    input_revision = c.revision;
+                }
+                if active && (c.keyboard || c.mouse) && input.is_none() {
+                    match InputSession::start_with_signal(
+                        InputOptions {
+                            keyboard: c.keyboard,
+                            mouse: c.mouse,
+                        },
+                        host.wake.clone(),
+                    ) {
+                        Ok(session) => input = Some(session),
+                        Err(error) => {
+                            *host.input_status.lock().unwrap() = InputOptions {
+                                keyboard: c.keyboard,
+                                mouse: c.mouse,
+                            }
+                            .status(
+                                buddy_platform::permission_state(),
+                                CaptureState::Failed,
+                                Some(error),
+                            );
+                        }
+                    }
+                }
+                if let Some(input) = &input {
+                    *host.input_status.lock().unwrap() = input.status();
+                }
+                if !active || (!c.keyboard && !c.mouse) {
+                    let reason = if c.mode == Mode::Hidden {
+                        "캐릭터를 숨겨 감지가 중지됐습니다."
+                    } else if c.mode == Mode::Editing {
+                        "위치 편집 중에는 감지가 중지됩니다."
+                    } else if c.settings_open {
+                        "설정 창을 닫으면 감지를 시작합니다."
+                    } else if c.paused {
+                        "입력 감지를 일시 정지했습니다."
+                    } else {
+                        "사용자 설정에서 감지를 껐습니다."
+                    };
+                    host.input_status.lock().unwrap().stop(reason);
+                }
+                let source_status = host.input_status.lock().unwrap().clone();
+                // Do not process a batch captured under a mode/source revision
+                // that changed while the native adapter was stopping/starting.
+                // Release this guard before making any window API calls.
+                let controller_guard = host.controller.lock().unwrap();
+                if controller_guard.revision != c.revision
+                    || controller_guard.mode != c.mode
+                    || controller_guard.settings_open != c.settings_open
+                {
+                    drop(controller_guard);
+                    continue;
+                }
+                let mut runtime = host.runtime.lock().unwrap();
+                runtime.set_timing(now, c.timing);
+                runtime.set_controls(
+                    now,
+                    Controls {
+                        active,
+                        keyboard: c.keyboard
+                            && source_status.keyboard.capture == CaptureState::Running,
+                        mouse: c.mouse && source_status.mouse.capture == CaptureState::Running,
+                        movement_enabled: c.movement,
+                    },
+                );
+                if size != last_size {
+                    let position = runtime.state().position;
+                    runtime.place(now, position, size, host.display.lock().unwrap().bounds);
+                }
+                if let Some(input) = &mut input {
+                    for _ in 0..1024 {
+                        let Some(captured) = input.poll_captured() else {
+                            break;
+                        };
+                        let received_at = captured
+                            .received_at
+                            .saturating_duration_since(host.started)
+                            .as_millis() as u64;
+                        let mut event = captured.event;
+                        if let InputEvent::CursorMove { x, y } = &mut event {
+                            let point = display.local_cursor(*x, *y, cfg!(target_os = "macos"));
+                            *x = point.x;
+                            *y = point.y;
+                        }
+                        runtime.handle_received(host.now(), received_at, event);
+                    }
+                }
+                runtime.handle(
+                    host.now(),
+                    if c.mode == Mode::Editing {
+                        InputEvent::DragStart
+                    } else {
+                        InputEvent::DragEnd
+                    },
+                );
+                runtime.advance(host.now());
+                let state = runtime.state();
+                let deadline = runtime.next_deadline_ms();
+                drop(runtime);
+                drop(controller_guard);
+                if let Some(window) = app.get_webview_window("overlay") {
+                    if last_mode != c.mode {
+                        let _ = window.set_ignore_cursor_events(false);
+                        if c.mode == Mode::Hidden {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.show();
+                        }
+                    }
+                    if size != last_size {
+                        let _ = window.set_size(tauri::LogicalSize::new(size.x, size.y));
+                    }
+                    if last_top != Some(c.always_on_top) {
+                        let _ = window.set_always_on_top(c.always_on_top);
+                        last_top = Some(c.always_on_top);
+                    }
+                    if display_changed
+                        || last_state
+                            .as_ref()
+                            .is_none_or(|old| old.position != state.position)
+                    {
+                        let _ = display.position_window(&window, state.position);
+                    }
+                }
+                let changed = last_state.as_ref().is_none_or(|old| {
+                    old.action_instance_id != state.action_instance_id
+                        || old.position != state.position
+                        || old.facing_left != state.facing_left
+                }) || sent_mode != Some(c.mode)
+                    || size != sent_size
+                    || sent_edit_id.as_deref()
+                        != c.edit.as_ref().map(|session| session.id.as_str());
+                let mut next = Some(deadline.map_or(monitor_check, |due| due.min(monitor_check)));
+                if changed && now.saturating_sub(last_sent) >= 34 {
+                    host.send_state();
+                    last_sent = now;
+                    last_state = Some(state);
+                    sent_mode = Some(c.mode);
+                    sent_size = size;
+                    sent_edit_id = c.edit.as_ref().map(|session| session.id.clone());
+                } else if changed {
+                    next = Some(next.map_or(last_sent + 34, |due| due.min(last_sent + 34)));
+                }
+                let capture = |enabled: bool, source: &InputSourceStatus| {
+                    if !enabled {
+                        "꺼짐"
+                    } else {
+                        match source.capture {
+                            CaptureState::Running => "감지 중",
+                            CaptureState::Failed => "실패 · 설정 확인",
+                            _ if source.permission != PermissionState::Granted
+                                && source.permission != PermissionState::NotRequired =>
+                            {
+                                "권한 필요"
+                            }
+                            _ => "감지 보류",
+                        }
+                    }
+                };
+                let text = format!(
+                    "키보드 {} · 마우스 {}",
+                    capture(c.keyboard, &source_status.keyboard),
+                    capture(c.mouse, &source_status.mouse)
+                );
+                let menu_key = format!(
+                    "{text}:{:?}:{}:{}:{}:{}",
+                    c.mode as u8, c.paused, c.keyboard, c.mouse, c.movement
+                );
+                if menu_key != last_menu {
+                    if let Some(menu) = app.try_state::<TrayControls>() {
+                        let _ = menu.status.set_text(text);
+                        let _ = menu.visible.set_checked(c.mode != Mode::Hidden);
+                        let _ = menu.pause.set_checked(c.paused);
+                        let _ = menu.keyboard.set_checked(c.keyboard);
+                        let _ = menu.mouse.set_checked(c.mouse);
+                        let _ = menu.movement.set_checked(c.movement);
+                    }
+                    last_menu = menu_key;
+                }
+                last_mode = c.mode;
+                last_size = size;
+                last_display = Some(display);
+                host.wake
+                    .wait(next.map(|due| Duration::from_millis(due.saturating_sub(host.now()))));
+            }
+        })
+        .expect("runtime worker creation");
+}
+
+fn project_path(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    #[cfg(feature = "preview")]
+    {
+        let mut args = std::env::args_os().skip(1);
+        if args.next().as_deref() != Some(std::ffi::OsStr::new("--project")) {
+            return Err("미리보기에는 --project 경로가 필요합니다.".into());
+        }
+        let path = args.next().ok_or("미리보기 프로젝트 경로가 필요합니다.")?;
+        if args.next().is_some() {
+            return Err("지원하지 않는 미리보기 인수입니다.".into());
+        }
+        let _ = app;
+        Ok(PathBuf::from(path))
+    }
+    #[cfg(not(feature = "preview"))]
+    {
+        if let Some(resource) = buddy_project::bundled_project_path(&app.path().resource_dir()?)? {
+            return Ok(resource);
+        }
+        if !cfg!(debug_assertions) {
+            return Err("Bundled project is missing".into());
+        }
+        Ok(std::env::var_os("BUDDY_PROJECT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../examples/typing-cat")
+            }))
+    }
+}
+
+fn main() {
+    let process_started = Instant::now();
+    let app = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            get_bootstrap,
+            subscribe_character_state,
+            ack_character_frame,
+            get_runtime_status,
+            reset_performance_session,
+            export_runtime_diagnostics,
+            request_input_access,
+            apply_user_preferences,
+            set_runtime_mode,
+            reset_user_preferences,
+            begin_character_drag,
+            update_character_edit,
+            finish_character_edit,
+            cancel_character_edit
+        ])
+        .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let project = project_path(app.handle())?;
+            let loaded = buddy_project::load_project(project)?;
+            let preview = cfg!(feature = "preview") || cfg!(debug_assertions);
+            let identity = buddy_runtime::preference_identity(
+                &loaded.data.project.product.identifier,
+                &loaded.data.project.project_id,
+                preview,
+            );
+            let directory = app
+                .path()
+                .app_data_dir()?
+                .join(buddy_project::sha256(identity.as_bytes()));
+            fs::create_dir_all(&directory)?;
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(directory.join("instance.lock"))?;
+            lock.try_lock_exclusive()
+                .map_err(|_| "이 앱은 이미 실행 중입니다.")?;
+            let (store, prefs) = PreferencesStore::open(&directory)?;
+            let monitors = display::list(app.handle())?;
+            let selected = display::choose(
+                &monitors,
+                prefs
+                    .base_placement
+                    .as_ref()
+                    .map(|p| p.monitor_hint.as_str()),
+            )
+            .ok_or("디스플레이를 찾지 못했습니다.")?;
+            let bounds = selected.bounds;
+            let defaults = &loaded.data.project.defaults;
+            let controller = Controller {
+                timing: prefs.timing.unwrap_or(defaults.timing),
+                mode: Mode::Normal,
+                settings_open: false,
+                paused: false,
+                keyboard: prefs.keyboard.unwrap_or(defaults.input.keyboard),
+                mouse: prefs.mouse.unwrap_or(defaults.input.mouse),
+                movement: prefs.movement_enabled.unwrap_or(defaults.movement_enabled),
+                scale: prefs.scale.unwrap_or(defaults.scale),
+                always_on_top: prefs.always_on_top.unwrap_or(defaults.always_on_top),
+                revision: 0,
+                edit: None,
+            };
+            let runtime = Runtime::new(
+                loaded.data.clone(),
+                bounds,
+                Point::default(),
+                Point { x: 256.0, y: 256.0 },
+            );
+            let media_directory = directory.join("render-cache").join(&loaded.content_hash);
+            fs::create_dir_all(&media_directory)?;
+            let mut render_paths = std::collections::BTreeMap::new();
+            for (name, bytes) in &loaded.render_assets {
+                let path = media_directory.join(name);
+                fs::write(&path, bytes)?;
+                app.asset_protocol_scope().allow_file(&path)?;
+                render_paths.insert(name.clone(), path.to_string_lossy().into_owned());
+            }
+            let host = Arc::new(Host {
+                loaded,
+                render_paths,
+                runtime: Mutex::new(runtime),
+                controller: Mutex::new(controller),
+                preferences: Mutex::new(prefs),
+                store: Mutex::new(store),
+                input_status: Mutex::new(InputOptions::default().status(
+                    buddy_platform::permission_state(),
+                    CaptureState::Stopped,
+                    None,
+                )),
+                channel: Mutex::new(None),
+                sequence: AtomicU32::new(0),
+                wake: WakeSignal::default(),
+                started: process_started,
+                data_directory: directory,
+                exiting: AtomicBool::new(false),
+                display: Mutex::new(selected),
+                monitors: Mutex::new(monitors),
+                _instance_lock: lock,
+                edit_operation: Mutex::new(()),
+            });
+            let scale = host.controller.lock().unwrap().scale;
+            let size = host.size(scale);
+            let position = host
+                .preferences
+                .lock()
+                .unwrap()
+                .base_placement
+                .as_ref()
+                .filter(|p| p.monitor_hint == host.display.lock().unwrap().id)
+                .map(|p| p.position)
+                .unwrap_or_else(|| host.base_position(size));
+            host.runtime
+                .lock()
+                .unwrap()
+                .place(0, position, size, bounds);
+            let window = tauri::WebviewWindowBuilder::new(
+                app,
+                "overlay",
+                WebviewUrl::App("index.html".into()),
+            )
+            .on_navigation(navigation::allow_player_navigation)
+            .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+            .title(&host.loaded.data.project.product.name)
+            .inner_size(size.x, size.y)
+            .visible(false)
+            .transparent(true)
+            .decorations(false)
+            .resizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .focusable(false)
+            .shadow(false)
+            .build()?;
+            window.set_ignore_cursor_events(false)?;
+            let menu = Menu::new(app)?;
+            let status =
+                MenuItem::with_id(app, "status", "입력 감지 준비 중", false, None::<&str>)?;
+            menu.append(&status)?;
+            menu.append(&MenuItem::with_id(
+                app,
+                "settings",
+                "설정 · 입력 권한",
+                true,
+                None::<&str>,
+            )?)?;
+            let visible =
+                CheckMenuItem::with_id(app, "visibility", "버디 표시", true, true, None::<&str>)?;
+            let pause =
+                CheckMenuItem::with_id(app, "pause", "입력 일시 정지", true, false, None::<&str>)?;
+            let keyboard = CheckMenuItem::with_id(
+                app,
+                "keyboard",
+                "키보드 감지",
+                true,
+                host.controller.lock().unwrap().keyboard,
+                None::<&str>,
+            )?;
+            let mouse = CheckMenuItem::with_id(
+                app,
+                "mouse",
+                "마우스 감지",
+                true,
+                host.controller.lock().unwrap().mouse,
+                None::<&str>,
+            )?;
+            let movement = CheckMenuItem::with_id(
+                app,
+                "movement",
+                "키 유지 이동",
+                true,
+                host.controller.lock().unwrap().movement,
+                None::<&str>,
+            )?;
+            for item in [&visible, &pause, &keyboard, &mouse, &movement] {
+                menu.append(item)?;
+            }
+            for (id, label) in [
+                ("reset-position", "위치 초기화"),
+                ("reset-all", "전체 설정 초기화 · 입력 끄기"),
+                ("quit", "종료"),
+            ] {
+                menu.append(&MenuItem::with_id(app, id, label, true, None::<&str>)?)?;
+            }
+            app.manage(TrayControls {
+                status,
+                visible,
+                pause,
+                keyboard,
+                mouse,
+                movement,
+            });
+            TrayIconBuilder::new()
+                .icon(Image::from_bytes(include_bytes!("../icons/icon.png"))?)
+                .tooltip(&host.loaded.data.project.product.name)
+                .menu(&menu)
+                .on_menu_event(|app, event| {
+                    let host = app.state::<Arc<Host>>();
+                    let result = match event.id.as_ref() {
+                        "settings" => host.open_settings(app),
+                        "edit" => host.begin_edit(app),
+                        "done" => host.finish_edit(app, true, None),
+                        "cancel" => host.finish_edit(app, false, None),
+                        "visibility" => {
+                            if host.controller.lock().unwrap().mode == Mode::Editing {
+                                let _ = host.finish_edit(app, false, None);
+                            }
+                            let mut c = host.controller.lock().unwrap();
+                            c.mode = if c.mode == Mode::Hidden {
+                                Mode::Normal
+                            } else {
+                                Mode::Hidden
+                            };
+                            c.revision += 1;
+                            drop(c);
+                            host.wake.wake();
+                            Ok(())
+                        }
+                        "keyboard" | "mouse" | "movement" => host.toggle_source(event.id.as_ref()),
+                        "reset-position" | "reset-all" => {
+                            if host.controller.lock().unwrap().mode == Mode::Editing {
+                                host.finish_edit(app, false, None).and_then(|_| {
+                                    host.reset_preferences(event.id.as_ref() == "reset-all")
+                                })
+                            } else {
+                                host.reset_preferences(event.id.as_ref() == "reset-all")
+                            }
+                        }
+                        "pause" => {
+                            if host.controller.lock().unwrap().mode == Mode::Editing {
+                                let _ = host.finish_edit(app, false, None);
+                            }
+                            let mut c = host.controller.lock().unwrap();
+                            c.paused = !c.paused;
+                            c.revision += 1;
+                            drop(c);
+                            host.wake.wake();
+                            Ok(())
+                        }
+                        "quit" => {
+                            host.exiting.store(true, Ordering::Release);
+                            host.wake.wake();
+                            app.exit(0);
+                            Ok(())
+                        }
+                        _ => Ok(()),
+                    };
+                    if let Err(error) = result {
+                        host.store.lock().unwrap().notice = Some(error);
+                    }
+                })
+                .build(app)?;
+            app.manage(host.clone());
+            start_worker(app.handle().clone(), host);
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "settings" && matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(host) = window.try_state::<Arc<Host>>() {
+                    let mut c = host.controller.lock().unwrap();
+                    c.settings_open = false;
+                    c.revision += 1;
+                    drop(c);
+                    host.wake.wake();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("Desktop Buddy Player startup");
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(host) = app.try_state::<Arc<Host>>() {
+                host.exiting.store(true, Ordering::Release);
+                host.wake.wake();
+            }
+        }
+    });
+}
