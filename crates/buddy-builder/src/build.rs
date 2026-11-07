@@ -247,6 +247,18 @@ pub fn build(
                 }
             }
             verify_bundled_project(&staged_app.join("Contents/Resources"), &snapshot)?;
+            let timestamp = Command::new("/bin/date")
+                .arg("+%Y-%m-%d_%H-%M-%S%z")
+                .env("LC_ALL", "C")
+                .output()
+                .map_err(|e| format!("Could not read DMG build time: {e}"))?;
+            if !timestamp.status.success() {
+                return Err(format!(
+                    "Could not read DMG build time: {}",
+                    timestamp.status
+                ));
+            }
+            let timestamp = String::from_utf8(timestamp.stdout).map_err(|e| e.to_string())?;
             copy_matching(
                 &bundle.join("dmg"),
                 &staged,
@@ -255,6 +267,7 @@ pub fn build(
                     "{}_{}_",
                     snapshot.data.project.product.name, snapshot.data.project.product.version
                 ),
+                &format!("_{}", timestamp.trim()),
             )?;
             process::run(
                 Command::new("codesign")
@@ -272,6 +285,7 @@ pub fn build(
                     "{}_{}_",
                     snapshot.data.project.product.name, snapshot.data.project.product.version
                 ),
+                "",
             )?;
         }
         let sign = match options.target {
@@ -556,18 +570,22 @@ fn copy_matching(
     destination: &Path,
     extension: &str,
     expected_prefix: &str,
+    suffix: &str,
 ) -> Result<(), String> {
     let mut count = 0;
     for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
         if path.extension().and_then(|s| s.to_str()) == Some(extension)
-            && path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s.starts_with(expected_prefix))
+            && stem.starts_with(expected_prefix)
         {
-            fs::copy(&path, destination.join(path.file_name().unwrap()))
-                .map_err(|e| e.to_string())?;
+            fs::copy(
+                &path,
+                destination.join(format!("{stem}{suffix}.{extension}")),
+            )
+            .map_err(|e| e.to_string())?;
             count += 1;
         }
     }
@@ -687,10 +705,20 @@ mod tests {
             "current product",
         )
         .unwrap();
-        copy_matching(&source, &destination, "dmg", "Click Mascot_0.1.0_").unwrap();
+        copy_matching(
+            &source,
+            &destination,
+            "dmg",
+            "Click Mascot_0.1.0_",
+            "_2026-11-08_02-15-00+0900",
+        )
+        .unwrap();
         assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
         assert_eq!(
-            fs::read_to_string(destination.join("Click Mascot_0.1.0_aarch64.dmg")).unwrap(),
+            fs::read_to_string(
+                destination.join("Click Mascot_0.1.0_aarch64_2026-11-08_02-15-00+0900.dmg"),
+            )
+            .unwrap(),
             "current product"
         );
     }

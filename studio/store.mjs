@@ -482,17 +482,18 @@ export class ProjectStore {
         force: true,
       });
       await fs.mkdir(join(path, "character", "resources"), { recursive: true });
-      for (const resource of Object.values(character.resources ?? {})) {
-        if (
-          !/^resources\/[a-f0-9]{64}\.(png|jpg|jpeg|gif|webp|bmp)$/.test(
-            resource.image,
-          )
-        )
+      const images = Object.values(character.resources ?? {}).map((resource) => resource.image);
+      const sounds = Object.values(character.sounds ?? {}).map((resource) => resource.audio);
+      for (const [paths, allowed] of [
+        [images, /^resources\/[a-f0-9]{64}\.(png|jpg|jpeg|gif|webp|bmp)$/],
+        [sounds, /^resources\/[a-f0-9]{64}\.(wav|mp3)$/],
+      ]) for (const relative of paths) {
+        if (!allowed.test(relative))
           throw new StudioError("업로드한 프로젝트 리소스를 선택하세요.");
-        const name = resource.image.slice("resources/".length);
+        const name = relative.slice("resources/".length);
         await fs.copyFile(
           await scopedFile(join(base, "resources"), name),
-          join(path, "character", resource.image),
+          join(path, "character", relative),
         );
       }
       if (payload.icon) {
@@ -642,9 +643,9 @@ export class ProjectStore {
     return this.exclusive(id, async () => {
       await this.metadata(id);
       const extension = extname(filename).slice(1).toLowerCase();
-      if (!["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(extension))
+      if (!["png", "jpg", "jpeg", "gif", "webp", "bmp", "wav", "mp3"].includes(extension))
         throw new StudioError(
-          "PNG · JPG · GIF · WebP · BMP 파일을 선택하세요.",
+          "PNG · JPG · GIF · WebP · BMP 이미지 또는 WAV · MP3 사운드를 선택하세요.",
         );
       if (!bytes.length || bytes.length > 16 * 1024 * 1024)
         throw new StudioError("리소스는 16 MiB 이하여야 합니다.");

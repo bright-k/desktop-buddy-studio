@@ -4,6 +4,7 @@ import type {
   WireState,
 } from "../../../packages/contracts/generated/index";
 import { CharacterRenderer } from "../../../packages/renderer/src/index";
+import { ReactionAudio } from "../../../packages/renderer/src/audio";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { installCharacterDrag } from "./drag";
 import { startSettings } from "./settings";
@@ -17,6 +18,13 @@ async function startOverlay() {
   const canvas = document.createElement("canvas");
   canvas.setAttribute("aria-label", bootstrap.product.name);
   app.append(canvas);
+  const sound = new ReactionAudio(
+    (resource) => {
+      const path = bootstrap.soundPaths[resource];
+      return path ? convertFileSrc(path) : undefined;
+    },
+    (error) => { canvas.title = `사운드를 재생하지 못했습니다: ${String(error)}`; },
+  );
   // The native window starts hidden until its first frame is ready. Allow that
   // first draw even if WebView reports document.hidden during bootstrap.
   let firstFramePending = true;
@@ -75,12 +83,14 @@ async function startOverlay() {
     height = message.height;
     resizeCanvas();
     renderer.update(message.state, message.seq);
+    sound.update(message.state, hostVisible && !document.hidden);
   };
   await invoke("subscribe_character_state", { channel });
   installCharacterDrag(canvas, invoke, (error) => { canvas.title = String(error); });
-  document.addEventListener("visibilitychange", () =>
-    renderer.setVisible(hostVisible && (firstFramePending || !document.hidden)),
-  );
+  document.addEventListener("visibilitychange", () => {
+    renderer.setVisible(hostVisible && (firstFramePending || !document.hidden));
+    if (document.hidden) sound.stop();
+  });
 }
 
 (settings ? startSettings({

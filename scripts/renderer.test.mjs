@@ -15,14 +15,44 @@ await writeFile(join(temp, 'renderer.mjs'), ts.transpileModule(source, {
 const { CharacterRenderer } = await import(pathToFileURL(join(temp, 'renderer.mjs')));
 const original = JSON.parse(await readFile(new URL('../examples/typing-cat/character/manifest.json', import.meta.url)));
 
-async function playerModule(name) {
-  const source = await readFile(new URL(`../apps/player/src/${name}.ts`, import.meta.url), 'utf8');
+async function transpileModule(name, directory = '../apps/player/src') {
+  const source = await readFile(new URL(`${directory}/${name}.ts`, import.meta.url), 'utf8');
   const file = join(temp, `${name}.mjs`);
   await writeFile(file, ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
   return import(pathToFileURL(file));
 }
-const { mergeSettings, settingsUpdate } = await playerModule('settings-model');
-const { installCharacterDrag } = await playerModule('drag');
+const { mergeSettings, settingsUpdate } = await transpileModule('settings-model');
+const { installCharacterDrag } = await transpileModule('drag');
+const { ReactionAudio } = await transpileModule('audio', '../packages/renderer/src');
+
+test('reaction audio plays once per action, stops on replacement or hiding, and plays on a restart', t => {
+  const originalAudio = globalThis.Audio;
+  const calls = [];
+  globalThis.Audio = class {
+    constructor(url) { this.url = url; }
+    async play() { calls.push(['play', this.url, this.volume]); }
+    pause() { calls.push(['pause', this.url]); }
+  };
+  t.after(() => {
+    if (originalAudio) globalThis.Audio = originalAudio;
+    else delete globalThis.Audio;
+  });
+  const audio = new ReactionAudio(resource => `/${resource}.wav`, error => assert.fail(error));
+  const state = { epoch: 1, actionInstanceId: 1, sound: { resource: 'ping', volume: 0.65 } };
+  audio.update(state);
+  audio.update({ ...state, facingLeft: true });
+  audio.update({ ...state, actionInstanceId: 2, sound: { resource: 'pop', volume: 1 } });
+  audio.update({ ...state, actionInstanceId: 2 }, false);
+  audio.update({ ...state, actionInstanceId: 2 }, true);
+  audio.update({ ...state, actionInstanceId: 3 });
+  assert.deepEqual(calls, [
+    ['play', '/ping.wav', 0.65],
+    ['pause', '/ping.wav'],
+    ['play', '/pop.wav', 1],
+    ['pause', '/pop.wav'],
+    ['play', '/ping.wav', 0.65],
+  ]);
+});
 
 function harness(t, options = {}) {
   let now = 0, next = 1, draws = 0, errors = 0;
@@ -170,7 +200,7 @@ test('pointer jitter does not start a drag; rapid motion is coalesced and cancel
     if (name === 'begin_character_drag') return 'session';
     if (name === 'update_character_edit' && calls.length === 2) { sent.resolve(); await gate.promise; }
   }, error => errors.push(error));
-  const event = (screenX) => ({ button: 0, pointerId: 1, screenX, screenY: 0 });
+  const event = (screenX) => ({ button: 0, pointerId: 1, screenX, screenY: 0, clientX: 12, clientY: 18 });
   canvas.onpointerdown(event(0)); canvas.onpointermove(event(2)); canvas.onpointerup(event(2));
   assert.equal(calls.length, 0);
   canvas.onpointerdown(event(0)); canvas.onpointermove(event(5));
@@ -178,7 +208,13 @@ test('pointer jitter does not start a drag; rapid motion is coalesced and cancel
   for (let i = 6; i <= 50; i++) canvas.onpointermove(event(i));
   canvas.onpointerup(event(50)); gate.resolve();
   await new Promise(setImmediate);
-  assert.deepEqual(calls, [['begin_character_drag', undefined], ['update_character_edit', { sessionId: 'session', dx: 5, dy: 0 }], ['update_character_edit', { sessionId: 'session', dx: 45, dy: 0 }], ['finish_character_edit', { sessionId: 'session' }]]);
+  assert.deepEqual(calls, [['begin_character_drag', { grab: { x: 12, y: 18 } }], ['update_character_edit', { sessionId: 'session' }], ['update_character_edit', { sessionId: 'session' }], ['finish_character_edit', { sessionId: 'session' }]]);
+  calls.length = 0;
+  canvas.onpointerdown(event(0)); canvas.onpointermove(event(5));
+  await new Promise(setImmediate);
+  canvas.onpointerup(event(10));
+  await new Promise(setImmediate);
+  assert.deepEqual(calls.map(([name]) => name), ['begin_character_drag', 'update_character_edit', 'update_character_edit', 'finish_character_edit']);
   calls.length = 0;
   canvas.onpointerdown(event(0)); canvas.onpointermove(event(10)); canvas.onpointercancel(event(10));
   await new Promise(setImmediate);

@@ -15,8 +15,24 @@
         "effect": {
           "$ref": "#/$defs/Effect"
         },
+        "followCursor": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
+        },
+        "sound": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SoundCue"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "trigger": {
           "$ref": "#/$defs/Trigger"
@@ -45,6 +61,24 @@
             "$ref": "#/$defs/Target"
           },
           "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "CursorPose": {
+      "additionalProperties": false,
+      "properties": {
+        "animation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mirror": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -114,6 +148,16 @@
                 "null"
               ]
             },
+            "interruption": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Interruption"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "priority": {
               "default": 50,
               "format": "uint8",
@@ -146,6 +190,15 @@
             "animation": {
               "type": "string"
             },
+            "priority": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "type": {
               "const": "sustainAnimation",
               "type": "string"
@@ -163,6 +216,15 @@
             "animation": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
                 "null"
               ]
             },
@@ -194,6 +256,42 @@
         {
           "additionalProperties": false,
           "properties": {
+            "directions": {
+              "additionalProperties": false,
+              "properties": {
+                "center": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "down": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "downLeft": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "downRight": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "left": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "right": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "up": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "upLeft": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "upRight": {
+                  "$ref": "#/$defs/CursorPose"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "type": {
               "const": "faceCursor",
               "type": "string"
@@ -238,6 +336,14 @@
         }
       },
       "type": "object"
+    },
+    "Interruption": {
+      "enum": [
+        "byPriority",
+        "replace",
+        "finish"
+      ],
+      "type": "string"
     },
     "KeyStep": {
       "additionalProperties": false,
@@ -324,6 +430,23 @@
           "default": "none"
         }
       },
+      "type": "object"
+    },
+    "SoundCue": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "type": "string"
+        },
+        "volume": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "resource",
+        "volume"
+      ],
       "type": "object"
     },
     "Target": {

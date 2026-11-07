@@ -19,6 +19,23 @@ const payload = (d) => ({
   character: d.character,
   license: d.license,
 });
+function wavFixture() {
+  const wav = Buffer.alloc(44 + 800);
+  wav.write("RIFF", 0);
+  wav.writeUInt32LE(wav.length - 8, 4);
+  wav.write("WAVEfmt ", 8);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(8000, 24);
+  wav.writeUInt32LE(8000, 28);
+  wav.writeUInt16LE(1, 32);
+  wav.writeUInt16LE(8, 34);
+  wav.write("data", 36);
+  wav.writeUInt32LE(wav.length - 44, 40);
+  wav.fill(128, 44);
+  return wav;
+}
 test("two projects isolate resources, save immutable revisions, reject stale writes, restore and clone with fresh identity", async (t) => {
   const store = await fixture(t),
     a = await store.create({ name: "First Buddy" }),
@@ -136,6 +153,39 @@ test("HTTP requires session authorization and same origin; actual engine simulat
     })
   ).json();
   const prefix = `/api/projects/${d.meta.id}`;
+  const uploaded = await request(prefix + "/resources?filename=blink.gif", {
+    method: "POST",
+    body: await fs.readFile("examples/media-resources/blink.gif"),
+  });
+  assert.equal(uploaded.status, 201);
+  const gif = await uploaded.json();
+  const first = await request(prefix + `/gif-frame/${gif.name}/0`);
+  const second = await request(prefix + `/gif-frame/${gif.name}/1`);
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(second.headers.get("content-type"), "image/png");
+  const firstPng = Buffer.from(await first.arrayBuffer());
+  const secondPng = Buffer.from(await second.arrayBuffer());
+  assert.notDeepEqual(firstPng, secondPng);
+  assert.equal(secondPng.subarray(1, 4).toString(), "PNG");
+  const wav = wavFixture();
+  const audioUpload = await request(prefix + "/resources?filename=ping.wav", {
+    method: "POST",
+    body: wav,
+  });
+  assert.equal(audioUpload.status, 201);
+  const sound = await audioUpload.json();
+  assert.equal(sound.kind, "audio");
+  d.character.sounds = { ping: { audio: `resources/${sound.name}` } };
+  d.project.bindings.find((b) => b.id === "jump").sound = { resource: "ping", volume: 0.7 };
+  const soundSave = await request(prefix, { method: "PUT", body: JSON.stringify(payload(d)) });
+  assert.equal(soundSave.status, 200);
+  const saved = await soundSave.json();
+  const response = await request(prefix + `/resources/${sound.name}`);
+  assert.equal(response.headers.get("content-type"), "audio/wav");
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), wav);
+  const inspect = await store.inspectPath(await store.currentPath(d.meta.id));
+  assert.equal(inspect.project.bindings.find((b) => b.id === "jump").sound.resource, "ping");
   const seq = await (
     await request(prefix + "/sequence", {
       method: "POST",
@@ -152,15 +202,16 @@ test("HTTP requires session authorization and same origin; actual engine simulat
       }),
     })
   ).json();
-  assert.ok(timeline.some((f) => f.state.animation === "jump"));
+  assert.deepEqual(timeline.find((f) => f.state.animation === "jump").state.sound, { resource: "ping", volume: 0.7 });
   assert.equal(timeline.at(-1).state.animation, "idle");
+  assert.equal(timeline.at(-1).state.sound, undefined);
   const queued = await (
     await request(prefix + "/builds", {
       method: "POST",
-      body: JSON.stringify({ revision: d.meta.revision, development: true }),
+      body: JSON.stringify({ revision: saved.meta.revision, development: true }),
     })
   ).json();
-  assert.equal(queued.revision, d.meta.revision);
+  assert.equal(queued.revision, saved.meta.revision);
   // The missing template must fail at template verification on every OS.
   const deadline = Date.now() + 10000;
   let finished;

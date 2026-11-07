@@ -182,6 +182,17 @@ pub struct Binding {
     pub id: String,
     pub trigger: Trigger,
     pub effect: Effect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_cursor: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<SoundCue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SoundCue {
+    pub resource: String,
+    pub volume: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -237,6 +248,8 @@ pub enum Effect {
         animation: String,
         #[serde(default = "default_priority")]
         priority: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interruption: Option<Interruption>,
         #[serde(default)]
         retrigger: Retrigger,
         #[serde(rename = "cooldownMs", default)]
@@ -252,6 +265,8 @@ pub enum Effect {
     },
     SustainAnimation {
         animation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
     },
     Move {
         x: f64,
@@ -260,11 +275,50 @@ pub enum Effect {
         speed_dip_per_second: f64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         animation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
     },
-    FaceCursor,
+    FaceCursor {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        directions: Option<BTreeMap<CursorDirection, CursorPose>>,
+    },
 }
 fn default_priority() -> u8 {
     50
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum Interruption {
+    #[default]
+    ByPriority,
+    Replace,
+    Finish,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, TS,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum CursorDirection {
+    UpLeft,
+    Up,
+    UpRight,
+    Left,
+    Center,
+    Right,
+    DownLeft,
+    Down,
+    DownRight,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CursorPose {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -313,6 +367,8 @@ pub struct Character {
     pub image: String,
     #[serde(default)]
     pub resources: BTreeMap<String, Resource>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sounds: BTreeMap<String, SoundResource>,
     pub sheet: Sheet,
     pub anchor: Point,
     pub default_animation: String,
@@ -389,6 +445,12 @@ pub struct RenderPlan {
     pub animations: BTreeMap<String, RenderAnimation>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SoundResource {
+    pub audio: String,
+}
+
 pub fn typescript_declarations() -> String {
     let declarations = [
         Project::decl(),
@@ -404,8 +466,12 @@ pub fn typescript_declarations() -> String {
         MacSigning::decl(),
         Target::decl(),
         Binding::decl(),
+        SoundCue::decl(),
         Trigger::decl(),
         Effect::decl(),
+        Interruption::decl(),
+        CursorDirection::decl(),
+        CursorPose::decl(),
         Retrigger::decl(),
         MouseButton::decl(),
         WheelDirection::decl(),
@@ -416,6 +482,7 @@ pub fn typescript_declarations() -> String {
         Point::decl(),
         Animation::decl(),
         Resource::decl(),
+        SoundResource::decl(),
         FrameRegion::decl(),
         RenderFrame::decl(),
         RenderAnimation::decl(),

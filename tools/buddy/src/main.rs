@@ -70,7 +70,13 @@ enum Command {
         timeline: bool,
     },
     /// Decode a resource under the same limits used by Player and Builder.
-    MediaInfo { path: PathBuf },
+    MediaInfo {
+        path: PathBuf,
+        #[arg(long, requires = "frame_output")]
+        frame: Option<usize>,
+        #[arg(long, requires = "frame")]
+        frame_output: Option<PathBuf>,
+    },
     /// Inspect a validated project and optionally export normalized render frames.
     Inspect {
         project: PathBuf,
@@ -181,7 +187,11 @@ fn run(cli: Cli) -> Result<(), String> {
             until_ms,
             timeline,
         } => commands::simulate(&project, &events, until_ms, timeline),
-        Command::MediaInfo { path } => {
+        Command::MediaInfo {
+            path,
+            frame,
+            frame_output,
+        } => {
             use std::io::Read;
             let mut bytes = Vec::new();
             fs::File::open(&path)
@@ -190,8 +200,27 @@ fn run(cli: Cli) -> Result<(), String> {
             if bytes.len() > 16 * 1024 * 1024 {
                 return Err("Resource exceeds 16 MiB".into());
             }
+            let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+            if matches!(extension, "wav" | "mp3") {
+                if frame.is_some() {
+                    return Err("Audio resources do not have image frames".into());
+                }
+                buddy_project::validate_sound(extension, &bytes)?;
+                println!(
+                    "{}",
+                    serde_json::json!({ "kind": "audio", "format": extension })
+                );
+                return Ok(());
+            }
             let mut assets = std::collections::BTreeMap::new();
             let media = buddy_project::decode_media(&bytes, &mut 0, &mut assets)?;
+            if let (Some(index), Some(output)) = (frame, frame_output) {
+                let frame = media
+                    .frames
+                    .get(index)
+                    .ok_or("frame index outside resource")?;
+                fs::write(output, &assets[&frame.image]).map_err(|e| e.to_string())?;
+            }
             println!(
                 "{}",
                 serde_json::json!({"width":media.width,"height":media.height,"frames":media.frames.len(),"animated":media.animated,"durationMs":media.frames.iter().map(|f|f.duration_ms).sum::<f64>()})

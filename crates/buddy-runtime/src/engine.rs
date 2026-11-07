@@ -3,11 +3,15 @@ use crate::{
     PerformanceSnapshot, ReactionEnd, Rect, PROTOCOL_VERSION,
 };
 use buddy_project::{
-    is_modifier, is_supported_key, Effect, MouseButton, Point, Retrigger, Trigger, ValidatedProject,
+    is_modifier, is_supported_key, CursorDirection, Effect, Interruption, MouseButton, Point,
+    Retrigger, SoundCue, Trigger, ValidatedProject,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeSet, VecDeque},
+};
 use ts_rs::TS;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -19,6 +23,8 @@ pub struct CharacterState {
     pub animation: String,
     pub animation_elapsed_ms: f64,
     pub source: AnimationSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<SoundCue>,
     pub facing_left: bool,
     pub position: Point,
     pub typing_band_id: Option<String>,
@@ -76,7 +82,10 @@ pub struct Runtime {
     dragging: bool,
     shot_release: Option<InputEvent>,
     cursor: Option<Point>,
+    drag_cursor: Option<Point>,
+    movement_facing_left: bool,
     facing_left: bool,
+    continuous_binding: Option<usize>,
     display: String,
     display_source: AnimationSource,
     display_binding: Option<usize>,
@@ -134,7 +143,10 @@ impl Runtime {
             dragging: false,
             shot_release: None,
             cursor: None,
+            drag_cursor: None,
+            movement_facing_left: false,
             facing_left: false,
+            continuous_binding: None,
             display: "idle".into(),
             display_source: AnimationSource::Idle,
             display_binding: None,
@@ -186,6 +198,7 @@ impl Runtime {
         self.shot_release = None;
         self.dragging = false;
         self.cursor = None;
+        self.continuous_binding = None;
         self.moving = false;
         self.sync_display(true);
     }
@@ -211,7 +224,10 @@ impl Runtime {
         self.bounds = bounds;
         self.size = size;
         self.position = bounds.clamp(position.x, position.y, size);
-        self.update_facing(0.0);
+        self.sync_display(false);
+    }
+    pub fn set_drag_cursor(&mut self, cursor: Point) {
+        self.drag_cursor = Some(cursor);
         self.sync_display(false);
     }
     pub fn handle(&mut self, now: u64, event: InputEvent) {
@@ -221,6 +237,9 @@ impl Runtime {
         self.advance(now);
         if matches!(event, InputEvent::DragStart | InputEvent::DragEnd) {
             self.dragging = matches!(event, InputEvent::DragStart);
+            if !self.dragging {
+                self.drag_cursor = None;
+            }
             self.sync_display(false);
             return;
         }
@@ -411,24 +430,27 @@ impl Runtime {
             retrigger_count,
             candidates.len().saturating_sub(1) as u32,
         );
-        candidates.sort_by_key(|index| (std::cmp::Reverse(self.priority(*index)), *index));
+        candidates.sort_by_key(|&index| Reverse(self.priority(index)));
         if let Some(index) = candidates.first() {
             self.try_start(*index, received_at.min(self.now));
             if self.one_shot.as_ref().is_some_and(|s| s.binding == *index) {
                 if let Effect::PlayAnimation {
                     stop_on_release: true,
+                    interruption,
                     ..
                 } = self.data.project.bindings[*index].effect
                 {
-                    self.shot_release = match &event {
-                        InputEvent::KeyDown { code, .. } => {
-                            Some(InputEvent::KeyUp { code: code.clone() })
-                        }
-                        InputEvent::MouseDown { button } => {
-                            Some(InputEvent::MouseUp { button: *button })
-                        }
-                        _ => None,
-                    };
+                    if interruption != Some(Interruption::Finish) {
+                        self.shot_release = match &event {
+                            InputEvent::KeyDown { code, .. } => {
+                                Some(InputEvent::KeyUp { code: code.clone() })
+                            }
+                            InputEvent::MouseDown { button } => {
+                                Some(InputEvent::MouseUp { button: *button })
+                            }
+                            _ => None,
+                        };
+                    }
                 }
             }
         }
@@ -436,7 +458,6 @@ impl Runtime {
             self.moving = false;
         }
         self.evaluate_rate();
-        self.update_facing(0.0);
         self.sync_display(false);
     }
     pub fn advance(&mut self, now: u64) {
@@ -469,9 +490,12 @@ impl Runtime {
                 ReactionEnd::Completed,
             );
             self.one_shot = None;
+            self.shot_release = None;
         }
         self.evaluate_rate();
-        self.update_facing(dx);
+        if dx.abs() > f64::EPSILON {
+            self.movement_facing_left = dx < 0.0;
+        }
         self.sync_display(false);
     }
     fn movement_vector(&self) -> Point {
@@ -505,22 +529,51 @@ impl Runtime {
             y: y / length * speed,
         }
     }
-    fn priority(&self, index: usize) -> u8 {
-        if let Effect::PlayAnimation { priority, .. } = self.data.project.bindings[index].effect {
-            priority
-        } else {
-            0
+    fn priority(&self, index: usize) -> (i16, Reverse<usize>) {
+        let binding = &self.data.project.bindings[index];
+        // Unconfigured continuous reactions retain their previous precedence.
+        let priority = match binding.effect {
+            Effect::PlayAnimation { priority, .. } => i16::from(priority),
+            Effect::SustainAnimation { priority, .. } => priority.map_or_else(
+                || {
+                    if matches!(binding.trigger, Trigger::WhileKeyDown { .. }) {
+                        -1
+                    } else {
+                        -2
+                    }
+                },
+                i16::from,
+            ),
+            Effect::Move {
+                priority,
+                ref animation,
+                ..
+            } => priority.map_or(if animation.is_some() { -3 } else { -4 }, i16::from),
+            Effect::FaceCursor { .. } => -5,
+        };
+        (priority, Reverse(index))
+    }
+    fn can_interrupt(&self, incoming: usize, current: usize) -> bool {
+        let Effect::PlayAnimation { interruption, .. } = self.data.project.bindings[current].effect
+        else {
+            return true;
+        };
+        match interruption.unwrap_or_default() {
+            Interruption::Finish => false,
+            Interruption::Replace => true,
+            Interruption::ByPriority => self.priority(incoming) >= self.priority(current),
         }
     }
     fn try_start(&mut self, index: usize, received_at: u64) {
-        if let Some(current) = &self.one_shot {
-            if self.priority(index) < self.priority(current.binding)
-                || (self.priority(index) == self.priority(current.binding)
-                    && index > current.binding)
-            {
-                self.performance.priority_rejected();
-                return;
-            }
+        let allowed = if let Some(current) = &self.one_shot {
+            self.can_interrupt(index, current.binding)
+        } else {
+            self.continuous_display()
+                .is_none_or(|(active, _)| self.priority(index) >= self.priority(active))
+        };
+        if !allowed {
+            self.performance.priority_rejected();
+            return;
         }
         if let Effect::PlayAnimation {
             animation,
@@ -632,119 +685,154 @@ impl Runtime {
             None
         };
     }
-    fn update_facing(&mut self, dx: f64) {
-        if self.controls.active
-            && self.controls.mouse
-            && self
-                .data
-                .project
-                .bindings
-                .iter()
-                .any(|binding| matches!(binding.effect, Effect::FaceCursor))
-        {
-            if let Some(cursor) = self.cursor {
-                let difference = cursor.x - (self.position.x + self.size.x / 2.0);
-                if difference.abs() > 1.0 {
-                    self.facing_left = difference < 0.0;
-                }
-                return;
-            }
-        }
-        if dx.abs() > f64::EPSILON {
-            self.facing_left = dx < 0.0;
-        }
-    }
     fn reset_matchers(&mut self) {
         for matcher in self.matchers.iter_mut().flatten() {
             matcher.reset();
         }
     }
-    fn sync_display(&mut self, force: bool) {
-        let sustained = self
-            .data
+    fn continuous_display(&self) -> Option<(usize, AnimationSource)> {
+        self.data
             .project
             .bindings
             .iter()
             .enumerate()
-            .find_map(|(i, b)| {
-                if let Effect::SustainAnimation { animation } = &b.effect {
-                    if self.dragging && matches!(b.trigger, Trigger::Drag) {
-                        return Some((animation.clone(), AnimationSource::Drag, Some(i)));
+            .filter_map(|(index, binding)| {
+                let source = match (&binding.trigger, &binding.effect) {
+                    (Trigger::WhileKeyDown { code }, Effect::SustainAnimation { .. })
+                        if self.controls.active
+                            && self.controls.keyboard
+                            && self.held.contains(code) =>
+                    {
+                        AnimationSource::HeldKey
                     }
-                    if !self.dragging && self.controls.active && self.controls.keyboard {
-                        if let Trigger::WhileKeyDown { code } = &b.trigger {
-                            if self.held.contains(code) {
-                                return Some((
-                                    animation.clone(),
-                                    AnimationSource::HeldKey,
-                                    Some(i),
-                                ));
-                            }
-                        }
+                    (Trigger::TypingRate { .. }, Effect::SustainAnimation { .. })
+                        if self.rate_band == Some(index) =>
+                    {
+                        AnimationSource::TypingRate
                     }
-                }
-                None
-            });
-        let (animation, source, binding) = if self.dragging {
-            sustained.unwrap_or_else(|| ("idle".into(), AnimationSource::Drag, None))
+                    (Trigger::WhileKeyDown { code }, Effect::Move { .. })
+                        if self.moving
+                            && self.held.contains(code)
+                            && !self.move_blocked.contains(code) =>
+                    {
+                        AnimationSource::Movement
+                    }
+                    _ => return None,
+                };
+                Some((index, source))
+            })
+            .max_by_key(|(index, _)| self.priority(*index))
+    }
+
+    fn cursor_direction(&self, cursor: Point) -> CursorDirection {
+        use CursorDirection::*;
+        let axis = |point: f64, start: f64, size: f64| {
+            if point < start + size / 3.0 {
+                0
+            } else if point > start + 2.0 * size / 3.0 {
+                2
+            } else {
+                1
+            }
+        };
+        let column = axis(cursor.x, self.position.x, self.size.x);
+        let row = axis(cursor.y, self.position.y, self.size.y);
+        [
+            [UpLeft, Up, UpRight],
+            [Left, Center, Right],
+            [DownLeft, Down, DownRight],
+        ][row][column]
+    }
+
+    fn sync_display(&mut self, force: bool) {
+        let continuous = self.continuous_display();
+        let continuous_binding = continuous.map(|(index, _)| index);
+        let newly_active =
+            continuous_binding.filter(|index| Some(*index) != self.continuous_binding);
+        self.continuous_binding = continuous_binding;
+        // A held key or rate band can interrupt on activation, not on every tick.
+        // A continuous condition that arrived with a one-shot is resolved at its start.
+        if !force
+            && self.one_shot.as_ref().is_some_and(|shot| {
+                newly_active.is_some_and(|incoming| self.can_interrupt(incoming, shot.binding))
+            })
+        {
+            self.performance.end(
+                self.now,
+                self.epoch,
+                self.action_instance,
+                ReactionEnd::Interrupted,
+            );
+            self.one_shot = None;
+            self.shot_release = None;
+        }
+        let (binding, source) = if self.dragging {
+            let drag = self
+                .data
+                .project
+                .bindings
+                .iter()
+                .position(|binding| matches!(binding.trigger, Trigger::Drag));
+            (drag, AnimationSource::Drag)
         } else if let Some(shot) = &self.one_shot {
-            if let Effect::PlayAnimation { animation, .. } =
-                &self.data.project.bindings[shot.binding].effect
-            {
-                (
-                    animation.clone(),
-                    AnimationSource::OneShot,
-                    Some(shot.binding),
-                )
-            } else {
-                unreachable!()
-            }
-        } else if let Some(held) = sustained {
-            held
-        } else if let Some(index) = self.rate_band {
-            if let Effect::SustainAnimation { animation } =
-                &self.data.project.bindings[index].effect
-            {
-                (animation.clone(), AnimationSource::TypingRate, Some(index))
-            } else {
-                unreachable!()
-            }
-        } else if self.moving {
-            let movement =
-                self.data
+            (Some(shot.binding), AnimationSource::OneShot)
+        } else if let Some((index, source)) = continuous {
+            (Some(index), source)
+        } else {
+            (None, AnimationSource::Idle)
+        };
+        let mut animation = binding
+            .and_then(|index| match &self.data.project.bindings[index].effect {
+                Effect::PlayAnimation { animation, .. }
+                | Effect::SustainAnimation { animation, .. } => Some(animation.as_str()),
+                Effect::Move { animation, .. } => animation.as_deref(),
+                Effect::FaceCursor { .. } => None,
+            })
+            .unwrap_or("idle");
+        let mut mirror = self.movement_facing_left;
+        let cursor = if self.dragging {
+            self.drag_cursor
+        } else {
+            self.cursor
+                .filter(|_| self.controls.active && self.controls.mouse)
+        };
+        if let Some(cursor) = cursor {
+            if let Some(index) = binding {
+                if self.data.project.bindings[index].follow_cursor == Some(true) {
+                    mirror = cursor.x < self.position.x + self.size.x / 2.0;
+                }
+            } else if source == AnimationSource::Idle {
+                if let Some(Effect::FaceCursor { directions }) = self
+                    .data
                     .project
                     .bindings
                     .iter()
-                    .enumerate()
-                    .find_map(|(index, binding)| {
-                        if let (
-                            Trigger::WhileKeyDown { code },
-                            Effect::Move {
-                                animation: Some(name),
-                                ..
-                            },
-                        ) = (&binding.trigger, &binding.effect)
-                        {
-                            if self.held.contains(code) && !self.move_blocked.contains(code) {
-                                return Some((
-                                    name.clone(),
-                                    AnimationSource::Movement,
-                                    Some(index),
-                                ));
-                            }
-                        }
-                        None
+                    .map(|binding| &binding.effect)
+                    .find(|effect| matches!(effect, Effect::FaceCursor { .. }))
+                {
+                    let direction = self.cursor_direction(cursor);
+                    let pose = directions.as_ref().and_then(|poses| poses.get(&direction));
+                    animation = pose
+                        .and_then(|pose| pose.animation.as_deref())
+                        .unwrap_or(animation);
+                    mirror = pose.and_then(|pose| pose.mirror).unwrap_or({
+                        matches!(
+                            direction,
+                            CursorDirection::UpLeft
+                                | CursorDirection::Left
+                                | CursorDirection::DownLeft
+                        )
                     });
-            movement.unwrap_or_else(|| ("idle".into(), AnimationSource::Idle, None))
-        } else {
-            ("idle".into(), AnimationSource::Idle, None)
-        };
+                }
+            }
+        }
+        self.facing_left = mirror;
         if force
             || self.display != animation
             || self.display_source != source
             || self.display_binding != binding
         {
-            self.display = animation;
+            self.display = animation.into();
             self.display_source = source;
             self.display_binding = binding;
             self.animation_started_at = self.now;
@@ -784,6 +872,9 @@ impl Runtime {
             animation: self.display.clone(),
             animation_elapsed_ms: self.now.saturating_sub(self.animation_started_at) as f64,
             source: self.display_source,
+            sound: self
+                .display_binding
+                .and_then(|index| self.data.project.bindings[index].sound.clone()),
             facing_left: self.facing_left,
             position: self.position,
             typing_band_id: self

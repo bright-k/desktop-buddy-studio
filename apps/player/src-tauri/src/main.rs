@@ -13,7 +13,7 @@ use fs2::FileExt;
 use preferences::PreferencesStore;
 use std::{
     fs::{self, File, OpenOptions},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
@@ -59,6 +59,7 @@ struct TrayControls {
 struct Host {
     loaded: LoadedProject,
     render_paths: std::collections::BTreeMap<String, String>,
+    sound_paths: std::collections::BTreeMap<String, String>,
     runtime: Mutex<Runtime>,
     controller: Mutex<Controller>,
     preferences: Mutex<PreferenceOverrides>,
@@ -85,8 +86,7 @@ impl Host {
             .unwrap()
             .character_size(&self.loaded.data.character, scale)
     }
-    fn base_position(&self, size: Point) -> Point {
-        let bounds = self.display.lock().unwrap().bounds;
+    fn base_position(&self, bounds: Rect, size: Point) -> Point {
         let defaults = &self.loaded.data.project.defaults.position;
         let margin = defaults.margin_dip;
         let x = match defaults.anchor {
@@ -98,6 +98,22 @@ impl Host {
             _ => bounds.y + bounds.height - size.y - margin,
         };
         bounds.clamp(x, y, size)
+    }
+    fn place_on_display(
+        &self,
+        display: Display,
+        position: Point,
+        size: Point,
+        drag_cursor: Option<Point>,
+    ) {
+        let mut runtime = self.runtime.lock().unwrap();
+        runtime.place(self.now(), position, size, display.bounds);
+        if let Some(cursor) = drag_cursor {
+            runtime.set_drag_cursor(cursor);
+        }
+        *self.display.lock().unwrap() = display;
+        drop(runtime);
+        self.wake.wake();
     }
     fn refresh_preferences(&self) {
         let defaults = &self.loaded.data.project.defaults;
@@ -121,7 +137,6 @@ impl Host {
     }
     fn send_state(&self) {
         let c = self.controller.lock().unwrap().clone();
-        let size = self.size(c.scale);
         let mut channel = self.channel.lock().unwrap();
         let Some(sender) = channel.as_ref() else {
             return;
@@ -130,12 +145,12 @@ impl Host {
             .sequence
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
-        let state = {
+        let (state, size) = {
             let mut runtime = self.runtime.lock().unwrap();
             runtime.advance(self.now());
             let state = runtime.state();
             runtime.prepare_frame(seq, &state, c.mode != Mode::Hidden);
-            state
+            (state, self.size(c.scale))
         };
         let wire = WireState {
             seq,
@@ -151,7 +166,7 @@ impl Host {
             *channel = None;
         }
     }
-    fn begin_edit(&self) -> Result<String, String> {
+    fn begin_edit(&self, grab: Point) -> Result<String, String> {
         let _operation = self.edit_operation.lock().unwrap();
         let position = self.runtime.lock().unwrap().state().position;
         let mut controller = self.controller.lock().unwrap();
@@ -161,7 +176,12 @@ impl Host {
         if let Some(session) = &controller.edit {
             return Ok(session.id.clone());
         }
-        let session = EditSession::new(position, controller.scale);
+        let display = self.display.lock().unwrap();
+        let size = display.character_size(&self.loaded.data.character, controller.scale);
+        if !(0.0..=size.x).contains(&grab.x) || !(0.0..=size.y).contains(&grab.y) {
+            return Err("버디 안에서 드래그를 시작하세요.".into());
+        }
+        let session = EditSession::new(position, display.id.clone(), grab, controller.scale);
         let id = session.id.clone();
         controller.edit = Some(session);
         controller.mode = Mode::Editing;
@@ -169,6 +189,38 @@ impl Host {
         drop(controller);
         self.wake.wake();
         Ok(id)
+    }
+    fn drag_to_cursor(&self, session_id: &str, cursor: Point, macos: bool) -> Result<(), String> {
+        let _operation = self.edit_operation.lock().unwrap();
+        let c = self.controller.lock().unwrap().clone();
+        let session = c.edit.as_ref().ok_or("유효한 편집 세션이 없습니다.")?;
+        session.require(session_id)?;
+        let monitors = self.monitors.lock().unwrap();
+        // Tauri reports macOS cursor coordinates in the primary screen's pixels.
+        let cursor_scale = if macos {
+            monitors
+                .iter()
+                .find(|monitor| monitor.primary)
+                .map_or(1.0, |monitor| monitor.scale)
+        } else {
+            1.0
+        };
+        let cursor = Point {
+            x: cursor.x / cursor_scale,
+            y: cursor.y / cursor_scale,
+        };
+        let Some(display) = display::at_cursor(&monitors, cursor).cloned() else {
+            return Ok(());
+        };
+        drop(monitors);
+        let cursor = display.local_cursor(cursor.x, cursor.y, macos);
+        let size = display.character_size(&self.loaded.data.character, c.scale);
+        let position = Point {
+            x: cursor.x - session.grab.x,
+            y: cursor.y - session.grab.y,
+        };
+        self.place_on_display(display, position, size, Some(cursor));
+        Ok(())
     }
     fn finish_edit(&self, commit: bool, session_id: Option<&str>) -> Result<(), String> {
         let _operation = self.edit_operation.lock().unwrap();
@@ -195,12 +247,16 @@ impl Host {
         };
         if !commit || result.is_err() {
             self.controller.lock().unwrap().scale = session.scale;
-            let size = self.size(session.scale);
-            let bounds = self.display.lock().unwrap().bounds;
-            self.runtime
-                .lock()
-                .unwrap()
-                .place(self.now(), session.origin, size, bounds);
+            let display = display::choose(&self.monitors.lock().unwrap(), Some(&session.monitor));
+            if let Some(display) = display {
+                let size = display.character_size(&self.loaded.data.character, session.scale);
+                let origin = if display.id == session.monitor {
+                    session.origin
+                } else {
+                    self.base_position(display.bounds, size)
+                };
+                self.place_on_display(display, origin, size, None);
+            }
         }
         if let Err(error) = &result {
             self.store.lock().unwrap().notice = Some(format!(
@@ -217,56 +273,48 @@ impl Host {
         result
     }
     fn reset_preferences(&self, all: bool) -> Result<(), String> {
-        if all {
+        let display = if all {
             let prefs = self.store.lock().unwrap().reset()?;
             *self.preferences.lock().unwrap() = prefs;
             self.refresh_preferences();
-            let displays = self.monitors.lock().unwrap();
-            if let Some(primary) = display::choose(&displays, None) {
-                *self.display.lock().unwrap() = primary;
-            }
+            display::choose(&self.monitors.lock().unwrap(), None)
+        } else {
+            None
         }
+        .unwrap_or_else(|| self.display.lock().unwrap().clone());
         let scale = self.controller.lock().unwrap().scale;
-        let size = self.size(scale);
-        let position = self.base_position(size);
+        let size = display.character_size(&self.loaded.data.character, scale);
+        let position = self.base_position(display.bounds, size);
         if !all {
             let mut prefs = self.preferences.lock().unwrap().clone();
             prefs.base_placement = Some(BasePlacement {
-                monitor_hint: self.display.lock().unwrap().id.clone(),
+                monitor_hint: display.id.clone(),
                 position,
             });
             self.save(prefs)?;
         }
-        self.runtime.lock().unwrap().place(
-            self.now(),
-            position,
-            size,
-            self.display.lock().unwrap().bounds,
-        );
-        self.wake.wake();
+        self.place_on_display(display, position, size, None);
         Ok(())
     }
     fn refresh_displays(&self, app: &tauri::AppHandle) {
         let Ok(monitors) = display::list(app) else {
             return;
         };
+        let _operation = self.edit_operation.lock().unwrap();
         let current = self.display.lock().unwrap().clone();
         let Some(selected) = display::choose(&monitors, Some(&current.id)) else {
             return;
         };
         *self.monitors.lock().unwrap() = monitors;
         if selected != current {
-            let removed = selected.id != current.id;
-            *self.display.lock().unwrap() = selected.clone();
             let scale = self.controller.lock().unwrap().scale;
-            let size = self.size(scale);
-            let mut runtime = self.runtime.lock().unwrap();
-            let position = if removed {
-                self.base_position(size)
+            let size = selected.character_size(&self.loaded.data.character, scale);
+            let position = if selected.id != current.id {
+                self.base_position(selected.bounds, size)
             } else {
-                runtime.state().position
+                self.runtime.lock().unwrap().state().position
             };
-            runtime.place(self.now(), position, size, selected.bounds);
+            self.place_on_display(selected, position, size, None);
         }
     }
     fn toggle_source(&self, source: &str) -> Result<(), String> {
@@ -338,6 +386,7 @@ fn get_bootstrap(
         character: host.loaded.data.character.clone(),
         product: host.loaded.data.project.product.clone(),
         image_paths: host.render_paths.clone(),
+        sound_paths: host.sound_paths.clone(),
         render_plan: host.loaded.data.render_plan.clone(),
         width: size.x,
         height: size.y,
@@ -412,7 +461,7 @@ fn get_runtime_status(
     let position = saved
         .filter(|p| p.monitor_hint == selected.id)
         .map(|p| selected.bounds.clamp(p.position.x, p.position.y, size))
-        .unwrap_or_else(|| host.base_position(host.size(c.scale)));
+        .unwrap_or_else(|| host.base_position(selected.bounds, size));
     Ok(RuntimeStatus {
         product_name: host.loaded.data.project.product.name.clone(),
         visible: c.mode != Mode::Hidden,
@@ -580,12 +629,7 @@ fn apply_user_preferences(
     };
     host.save(prefs)?;
     if let Some((display, position, size)) = placement {
-        *host.display.lock().unwrap() = display.clone();
-        host.runtime
-            .lock()
-            .unwrap()
-            .place(host.now(), position, size, display.bounds);
-        host.wake.wake();
+        host.place_on_display(display, position, size, None);
     }
     Ok(())
 }
@@ -606,53 +650,27 @@ fn reset_user_preferences(
 fn begin_character_drag(
     window: WebviewWindow,
     host: State<'_, Arc<Host>>,
+    grab: Point,
 ) -> Result<String, String> {
     require(&window, "overlay")?;
-    host.begin_edit()
+    host.begin_edit(grab)
 }
 #[tauri::command]
 fn update_character_edit(
     window: WebviewWindow,
     host: State<'_, Arc<Host>>,
     session_id: String,
-    dx: f64,
-    dy: f64,
-    scale_factor: Option<f64>,
 ) -> Result<(), String> {
     require(&window, "overlay")?;
-    let _operation = host.edit_operation.lock().unwrap();
-    let mut c = host.controller.lock().unwrap().clone();
-    c.edit
-        .as_ref()
-        .ok_or("유효한 편집 세션이 없습니다.")?
-        .require(&session_id)?;
-    if c.mode != Mode::Editing
-        || !dx.is_finite()
-        || !dy.is_finite()
-        || dx.abs() > 4096.0
-        || dy.abs() > 4096.0
-        || scale_factor.is_some_and(|factor| !(0.8..=1.25).contains(&factor))
-    {
-        return Err("유효하지 않은 편집 요청입니다.".into());
-    }
-    if let Some(factor) = scale_factor {
-        c.scale = (c.scale * factor).clamp(0.25, 3.0);
-        host.controller.lock().unwrap().scale = c.scale;
-    }
-    let mut runtime = host.runtime.lock().unwrap();
-    let position = runtime.state().position;
-    runtime.place(
-        host.now(),
+    let cursor = window.cursor_position().map_err(|e| e.to_string())?;
+    host.drag_to_cursor(
+        &session_id,
         Point {
-            x: position.x + dx,
-            y: position.y + dy,
+            x: cursor.x,
+            y: cursor.y,
         },
-        host.size(c.scale),
-        host.display.lock().unwrap().bounds,
-    );
-    drop(runtime);
-    host.wake.wake();
-    Ok(())
+        cfg!(target_os = "macos"),
+    )
 }
 #[tauri::command]
 fn finish_character_edit(
@@ -687,7 +705,7 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
             let mut sent_size = Point::default();
             let mut sent_edit_id: Option<String> = None;
             let mut last_top = None;
-            let mut last_display: Option<Display> = None;
+            let mut last_window_placement: Option<(Display, Point)> = None;
             let mut monitor_check = 0;
             let mut last_menu = String::new();
             while !host.exiting.load(Ordering::Acquire) {
@@ -698,9 +716,6 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                     host.refresh_displays(&app);
                     monitor_check = now + 2000;
                 }
-                let display = host.display.lock().unwrap().clone();
-                let display_changed = last_display.as_ref() != Some(&display);
-                let size = host.size(c.scale);
                 if input_revision != c.revision || !active {
                     input = None;
                     input_revision = c.revision;
@@ -757,6 +772,8 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                     continue;
                 }
                 let mut runtime = host.runtime.lock().unwrap();
+                let display = host.display.lock().unwrap().clone();
+                let size = display.character_size(&host.loaded.data.character, c.scale);
                 runtime.set_timing(now, c.timing);
                 runtime.set_controls(
                     now,
@@ -770,7 +787,7 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                 );
                 if size != last_size {
                     let position = runtime.state().position;
-                    runtime.place(now, position, size, host.display.lock().unwrap().bounds);
+                    runtime.place(now, position, size, display.bounds);
                 }
                 if let Some(input) = &mut input {
                     for _ in 0..1024 {
@@ -819,12 +836,13 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                         let _ = window.set_always_on_top(c.always_on_top);
                         last_top = Some(c.always_on_top);
                     }
-                    if display_changed
-                        || last_state
-                            .as_ref()
-                            .is_none_or(|old| old.position != state.position)
+                    if last_window_placement.as_ref().is_none_or(
+                        |(placed_display, placed_position)| {
+                            placed_display != &display || *placed_position != state.position
+                        },
+                    ) && display.position_window(&window, state.position).is_ok()
                     {
-                        let _ = display.position_window(&window, state.position);
+                        last_window_placement = Some((display, state.position));
                     }
                 }
                 let changed = last_state.as_ref().is_none_or(|old| {
@@ -884,7 +902,6 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                 }
                 last_mode = c.mode;
                 last_size = size;
-                last_display = Some(display);
                 host.wake
                     .wait(next.map(|due| Duration::from_millis(due.saturating_sub(host.now()))));
             }
@@ -1004,9 +1021,22 @@ fn main() {
                 app.asset_protocol_scope().allow_file(&path)?;
                 render_paths.insert(name.clone(), path.to_string_lossy().into_owned());
             }
+            let mut sound_paths = std::collections::BTreeMap::new();
+            for (id, name) in &loaded.sound_files {
+                let asset = &loaded.files[name];
+                let extension = Path::new(name)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap();
+                let path = media_directory.join(format!("{}.{}", asset.hash, extension));
+                fs::write(&path, &asset.bytes)?;
+                app.asset_protocol_scope().allow_file(&path)?;
+                sound_paths.insert(id.clone(), path.to_string_lossy().into_owned());
+            }
             let host = Arc::new(Host {
                 loaded,
                 render_paths,
+                sound_paths,
                 runtime: Mutex::new(runtime),
                 controller: Mutex::new(controller),
                 preferences: Mutex::new(prefs),
@@ -1037,7 +1067,7 @@ fn main() {
                 .as_ref()
                 .filter(|p| p.monitor_hint == host.display.lock().unwrap().id)
                 .map(|p| p.position)
-                .unwrap_or_else(|| host.base_position(size));
+                .unwrap_or_else(|| host.base_position(bounds, size));
             host.runtime
                 .lock()
                 .unwrap()
@@ -1056,6 +1086,7 @@ fn main() {
             .decorations(false)
             .resizable(false)
             .always_on_top(true)
+            .visible_on_all_workspaces(cfg!(target_os = "macos"))
             .skip_taskbar(true)
             .focused(false)
             .focusable(false)
@@ -1207,9 +1238,16 @@ fn main() {
 mod drag_tests {
     use super::*;
 
-    #[test]
-    fn failed_position_save_restores_the_buddy_and_ends_the_drag() {
-        let temp = tempfile::tempdir().unwrap();
+    const START: Point = Point { x: 100.0, y: 100.0 };
+    const GRAB: Point = Point { x: 32.0, y: 40.0 };
+    // The second screen is above and to the left of a 2× primary screen.
+    const CURSOR_ON_EXTERNAL: Point = Point {
+        x: -2200.0,
+        y: 520.0,
+    };
+    const DROP_ON_EXTERNAL: Point = Point { x: 308.0, y: 320.0 };
+
+    fn drag_host(directory: &Path, read_only: bool) -> Host {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../examples/typing-cat");
         let loaded = buddy_project::load_project(source).unwrap();
         let defaults = &loaded.data.project.defaults;
@@ -1237,17 +1275,35 @@ mod drag_tests {
             name: "Test display".into(),
             primary: true,
             origin: Point::default(),
+            scale: 2.0,
+            bounds,
+            desktop_area: bounds,
+        };
+        let external = Display {
+            id: "external".into(),
+            name: "External display".into(),
+            primary: false,
+            origin: Point {
+                x: -1440.0,
+                y: -100.0,
+            },
             scale: 1.0,
             bounds,
+            desktop_area: Rect {
+                x: -1440.0,
+                y: -100.0,
+                width: 1440.0,
+                height: 900.0,
+            },
         };
-        let origin = Point { x: 100.0, y: 100.0 };
         let size = display.character_size(&loaded.data.character, 1.0);
-        let runtime = Runtime::new(loaded.data.clone(), bounds, origin, size);
-        let (mut store, prefs) = PreferencesStore::open(temp.path()).unwrap();
-        store.read_only = true;
-        let host = Host {
+        let runtime = Runtime::new(loaded.data.clone(), bounds, START, size);
+        let (mut store, prefs) = PreferencesStore::open(directory).unwrap();
+        store.read_only = read_only;
+        Host {
             loaded,
             render_paths: Default::default(),
+            sound_paths: Default::default(),
             runtime: Mutex::new(runtime),
             controller: Mutex::new(controller),
             preferences: Mutex::new(prefs),
@@ -1261,20 +1317,45 @@ mod drag_tests {
             sequence: AtomicU32::new(0),
             wake: WakeSignal::default(),
             started: Instant::now(),
-            data_directory: temp.path().to_path_buf(),
+            data_directory: directory.to_path_buf(),
             exiting: AtomicBool::new(false),
             display: Mutex::new(display.clone()),
-            monitors: Mutex::new(vec![display]),
-            _instance_lock: File::create(temp.path().join("instance.lock")).unwrap(),
+            monitors: Mutex::new(vec![display, external]),
+            _instance_lock: File::create(directory.join("instance.lock")).unwrap(),
             edit_operation: Mutex::new(()),
-        };
-        let session = host.begin_edit().unwrap();
-        host.runtime
-            .lock()
-            .unwrap()
-            .place(0, Point { x: 200.0, y: 300.0 }, size, bounds);
+        }
+    }
+
+    #[test]
+    fn cross_display_drop_persists_the_new_monitor_and_local_position() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = drag_host(temp.path(), false);
+        let session = host.begin_edit(GRAB).unwrap();
+        host.drag_to_cursor(&session, CURSOR_ON_EXTERNAL, true)
+            .unwrap();
+        assert_eq!(host.display.lock().unwrap().id, "external");
+        assert_eq!(
+            host.runtime.lock().unwrap().state().position,
+            DROP_ON_EXTERNAL
+        );
+        host.finish_edit(true, Some(&session)).unwrap();
+        let (_, prefs) = PreferencesStore::open(temp.path()).unwrap();
+        let placement = prefs.base_placement.unwrap();
+        assert_eq!(placement.monitor_hint, "external");
+        assert_eq!(placement.position, DROP_ON_EXTERNAL);
+    }
+
+    #[test]
+    fn failed_position_save_restores_the_buddy_and_ends_the_drag() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = drag_host(temp.path(), true);
+        let session = host.begin_edit(GRAB).unwrap();
+        host.drag_to_cursor(&session, CURSOR_ON_EXTERNAL, true)
+            .unwrap();
+        assert_eq!(host.display.lock().unwrap().id, "external");
         assert!(host.finish_edit(true, Some(&session)).is_err());
-        assert_eq!(host.runtime.lock().unwrap().state().position, origin);
+        assert_eq!(host.display.lock().unwrap().id, "test-display");
+        assert_eq!(host.runtime.lock().unwrap().state().position, START);
         assert!(host.controller.lock().unwrap().mode == Mode::Normal);
         assert!(host.controller.lock().unwrap().edit.is_none());
         assert!(host
@@ -1285,6 +1366,6 @@ mod drag_tests {
             .as_deref()
             .unwrap()
             .contains("이전 위치"));
-        assert_ne!(host.begin_edit().unwrap(), session);
+        assert_ne!(host.begin_edit(Point::default()).unwrap(), session);
     }
 }

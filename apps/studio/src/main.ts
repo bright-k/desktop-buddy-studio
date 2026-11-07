@@ -3,12 +3,17 @@ import type {
   Character,
   Binding,
   Animation,
+  CursorDirection,
+  Effect,
+  Interruption,
   FrameRegion,
   CharacterState,
   RenderPlan,
   Resource,
+  SoundResource,
 } from "../../../packages/contracts/generated/index";
 import { CharacterRenderer } from "../../../packages/renderer/src/index";
+import { ReactionAudio } from "../../../packages/renderer/src/audio";
 import { readRoute, writeRoute, type StudioRoute } from "./route";
 import "./style.css";
 type Meta = {
@@ -31,8 +36,9 @@ type ResourceFile = {
   frames?: number;
   animated?: boolean;
 };
-type StudioCharacter = Omit<Character, "resources" | "animations"> & {
+type StudioCharacter = Omit<Character, "resources" | "sounds" | "animations"> & {
   resources: Record<string, Resource>;
+  sounds: Record<string, SoundResource>;
   animations: Record<string, Animation & { regions: FrameRegion[] }>;
 };
 type Document = {
@@ -145,6 +151,7 @@ const api = async <T = any>(
     Boolean,
   )) {
     character.resources ??= {};
+    character.sounds ??= {};
     for (const a of Object.values(character.animations) as Animation[])
       a.regions ??= [];
   }
@@ -408,7 +415,7 @@ function editor() {
   ]
     .map(
       ([id, label]) =>
-        `<button data-action="tab" data-id="${id}" class="${tab === id ? "active" : ""}">${label}${id === "resources" ? ` <span>${Object.keys(doc!.character.resources ?? {}).length + 1}</span>` : ""}</button>`,
+        `<button data-action="tab" data-id="${id}" class="${tab === id ? "active" : ""}">${label}${id === "resources" ? ` <span>${Object.keys(doc!.character.resources ?? {}).length + Object.keys(doc!.character.sounds).length + 1}</span>` : ""}</button>`,
     )
     .join(
       "",
@@ -424,13 +431,32 @@ function resourceReferences(id: string) {
   const used = Object.entries(doc!.character.animations).filter(([, a]) => (a.resource ?? "sheet") === id);
   return `<div class="usage-links"><span>사용 동작 ${used.length}</span>${used.map(([name]) => `<button class="chip" data-action="reference-clip" data-id="${esc(name)}">${esc(name)} →</button>`).join("") || '<small>아직 연결된 동작이 없습니다.</small>'}</div>`;
 }
+function usesAnimation(effect: Effect, name: string) {
+  return effect.type === "faceCursor"
+    ? Object.values(effect.directions ?? {}).some((pose) => pose.animation === name)
+    : effect.animation === name;
+}
 function animationReferences(name: string) {
-  const used = doc!.project.bindings.map((b, i) => ({ b, i })).filter(({ b }) => (b.effect as any).animation === name);
+  const used = doc!.project.bindings.map((b, i) => ({ b, i })).filter(({ b }) => usesAnimation(b.effect, name));
   return `<div class="usage-links"><span>연결 이벤트 ${used.length}</span>${used.map(({ b, i }) => `<button class="chip" data-action="reference-binding" data-id="${i}">${esc(b.id)} →</button>`).join("") || `<small>${name === "idle" ? "입력이 없을 때 기본으로 표시합니다." : "아직 연결된 이벤트가 없습니다."}</small>`}</div>`;
+}
+const isAudio = (filename: string) => /\.(mp3|wav)$/i.test(filename);
+function soundName(id: string, file: string) {
+  return doc!.library[file]?.originalName ?? id;
+}
+function soundCards() {
+  const sounds = Object.entries(doc!.character.sounds);
+  if (!sounds.length) return "";
+  return `<div class="card"><h3>사운드 <span class="count">${sounds.length}</span></h3>${sounds.map(([id, sound]) => {
+    const file = sound.audio.slice(10);
+    const bindings = doc!.project.bindings.map((binding, index) => ({ binding, index }))
+      .filter(({ binding }) => binding.sound?.resource === id);
+    return `<div class="sound-resource"><div class="card-heading"><strong>${esc(soundName(id, file))}</strong><button class="text-button danger" data-action="remove-sound" data-id="${esc(id)}">제외</button></div><audio controls preload="none" aria-label="${esc(soundName(id, file))} 들어보기" src="${resourceUrl(file)}"></audio><div class="usage-links">${bindings.map(({ binding, index }) => `<button class="chip" data-action="reference-binding" data-id="${index}">${esc(binding.id)} →</button>`).join("")}</div></div>`;
+  }).join("")}</div>`;
 }
 function resources() {
   const entries = Object.entries(doc!.character.resources ?? {});
-  return `${title("RESOURCE LIBRARY", "버디의 모든 리소스", "원본 파일을 프로젝트 안에 보관하고, 애니메이션에서 자유롭게 선택하세요.")}<label class="dropzone" id="dropzone"><input type="file" id="resource-upload" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp" multiple hidden><span class="upload-symbol">↥</span><strong>이미지를 놓거나 클릭해서 가져오기</strong><span>PNG · JPG · GIF · WebP · BMP / 파일당 최대 16 MB</span></label><div class="resource-grid"><article class="resource-card"><div class="resource-art checker"><img src="${sourceUrl(doc!.character.image)}" alt="기본 스프라이트"></div><div><strong>기본 스프라이트</strong><span>PNG · ${doc!.character.sheet.width} × ${doc!.character.sheet.height}</span></div><small class="resource-id">sheet · 기본 제공</small>${resourceReferences("sheet")}</article>${entries
+  return `${title("RESOURCE LIBRARY", "버디의 모든 리소스", "이미지와 사운드를 가져와 애니메이션이나 이벤트에 연결하세요.")}<label class="dropzone" id="dropzone"><input type="file" id="resource-upload" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.wav,.mp3" multiple hidden><span class="upload-symbol">↥</span><strong>이미지나 사운드를 놓거나 클릭해서 가져오기</strong><span>PNG · JPG · GIF · WebP · BMP · WAV · MP3 / 파일당 최대 16 MB</span></label><div class="resource-grid"><article class="resource-card"><div class="resource-art checker"><img src="${sourceUrl(doc!.character.image)}" alt="기본 스프라이트"></div><div><strong>기본 스프라이트</strong><span>PNG · ${doc!.character.sheet.width} × ${doc!.character.sheet.height}</span></div><small class="resource-id">sheet · 기본 제공</small>${resourceReferences("sheet")}</article>${entries
     .map(([id, r]) => {
       const f = r.image.slice(10),
         file = doc!.library[f];
@@ -438,10 +464,12 @@ function resources() {
     })
     .join(
       "",
-    )}</div><p class="hint">GIF는 프레임과 재생 시간을 읽어 이벤트마다 처음부터 재생합니다. 애니메이션 WebP/APNG는 GIF 또는 스프라이트로 변환해서 가져오세요.</p><div class="card"><h3>보관함 <span class="count">${Object.keys(doc!.library).length}</span></h3><p class="hint">구성에서 제외해도 원본은 남아 있습니다. 이전 버전 복원과 재사용에 사용할 수 있습니다.</p>${
+    )}</div>${soundCards()}<p class="hint">GIF는 프레임과 재생 시간을 읽어 이벤트마다 처음부터 재생합니다. 애니메이션 WebP/APNG는 GIF 또는 스프라이트로 변환해서 가져오세요.</p><div class="card"><h3>보관함 <span class="count">${Object.keys(doc!.library).length}</span></h3><p class="hint">구성에서 제외해도 원본은 남아 있습니다. 이전 버전 복원과 재사용에 사용할 수 있습니다.</p>${
     Object.values(doc!.library)
       .map((f) => {
-        const used = Object.values(doc!.character.resources).some((r) => r.image === `resources/${f.name}`);
+        const used = isAudio(f.name)
+          ? Object.values(doc!.character.sounds).some((sound) => sound.audio === `resources/${f.name}`)
+          : Object.values(doc!.character.resources).some((resource) => resource.image === `resources/${f.name}`);
         return `<div class="library-row"><span>${esc(f.originalName)} <small>${prettySize(f.bytes)}</small></span><button class="text-button" data-action="reuse-resource" data-id="${f.name}" ${used ? "disabled" : ""}>${used ? "사용 중" : "구성에 추가"}</button></div>`;
       })
       .join("") || '<p class="hint">아직 가져온 원본 파일이 없습니다.</p>'
@@ -469,8 +497,18 @@ function animations() {
       "",
     )}</select></label><div class="form-grid">${field("재생 속도 (FPS)", `${p}.fps`, "number", 'min="1" max="30"')}${check("반복 재생", `${p}.loop`)}</div>${isGif ? check("GIF 원본 프레임 시간 사용", `${p}.useSourceTiming`) : a.resource ? "" : `<label class="field"><span>스프라이트 프레임 번호 (0부터, 쉼표로 구분)</span><input id="clip-frames" value="${a.frames.join(", ")}" placeholder="0, 1, 2, 3"></label>`}<p class="hint">일회성 이벤트는 반복을 끄고, 입력 속도·키 유지·드래그 동작은 반복을 켜세요. GIF는 프레임과 영역을 비워두면 전체를 사용합니다.</p></div>${animationReferences(selectedClip)}${isGif ? gifFramesEditor(a) : cropEditor(a)}`;
 }
-function gifFramesEditor(a: Animation) {
-  return `<div class="card"><h3>GIF 프레임 선택</h3><p class="hint">비워두면 전체 프레임을 원본 순서로 사용합니다. 특정 프레임만 쓰려면 0부터 시작하는 번호를 쉼표로 구분하세요. GIF는 합성된 원본 프레임을 사용하므로 영역 자르기를 적용하지 않습니다.</p><label class="field"><span>프레임 번호 (선택)</span><input id="clip-frames" value="${a.frames.join(", ")}" placeholder="전체 프레임"></label></div>`;
+function gifFrameUrl(file: string, index: number) {
+  return `/api/projects/${doc!.meta.id}/gif-frame/${encodeURIComponent(file)}/${index}`;
+}
+function gifFramesEditor(animation: Animation) {
+  const filename = doc!.character.resources[animation.resource!].image.slice(10);
+  const count = doc!.library[filename]?.frames;
+  const first = animation.frames[0] ?? 0;
+  return `<div class="card"><h3>GIF 프레임 선택</h3><p class="hint">재생 목록을 비우면 원본 전체를 재생합니다. 번호 순서대로 재생하며 같은 프레임을 반복해서 넣을 수 있습니다.</p>
+    <div class="gif-frame-preview checker"><img id="gif-frame-preview" src="${gifFrameUrl(filename, first)}" alt="GIF ${first}번 프레임"></div>
+    <div class="row-actions"><label class="field"><span>확인할 프레임 번호${count ? ` (0~${count - 1})` : ""}</span><input id="gif-frame-number" type="number" min="0" max="${(count ?? 256) - 1}" value="${first}" step="1"></label>
+    <button class="small" data-action="append-gif-frame">＋ 재생 목록에 추가</button><button class="small" data-action="clear-gif-frames">전체 프레임 사용</button></div>
+    <label class="field"><span>재생 목록 (쉼표로 구분)</span><input id="clip-frames" value="${animation.frames.join(", ")}" placeholder="전체 프레임"></label></div>`;
 }
 function cropEditor(a: Animation) {
   return `<div class="card"><div class="card-heading"><h3>영역 선택 <span class="pill">SPRITE CROP</span></h3><button class="text-button" data-action="clear-regions">전체 이미지로 초기화</button></div><p class="hint">이미지 위를 드래그해 표시할 사각형을 선택하세요. GIF에는 영역 자르기를 적용할 수 없습니다.</p><div class="crop-viewport checker"><canvas id="crop-canvas" aria-label="스프라이트 영역 선택"></canvas></div><div class="crop-fields">${["x", "y", "width", "height"].map((key, i) => `<label class="field"><span>${["X", "Y", "너비", "높이"][i]}</span><input type="number" min="${i < 2 ? 0 : 1}" id="crop-${key}" value="${crop[key as keyof FrameRegion]}"></label>`).join("")}</div><div class="row-actions"><button class="small" data-action="apply-region">이 영역만 표시</button><button class="small" data-action="append-region">＋ 다음 프레임으로 추가</button></div><div class="region-list">${(a.regions ?? []).map((r, i) => `<span class="region">${i}: ${r.x},${r.y} · ${r.width}×${r.height}<button data-action="remove-region" data-id="${i}" aria-label="${i}번 영역 제외">×</button></span>`).join("")}</div><details><summary>격자로 프레임 만들기</summary><div class="crop-fields">${[
@@ -496,7 +534,7 @@ const triggerNames: Record<string, string> = {
   mouseDown: "마우스 누름",
   mouseUp: "마우스 뗌",
   wheel: "휠",
-  cursorMove: "커서 따라보기",
+  cursorMove: "대기 중 커서 방향",
   drag: "버디 드래그",
 };
 function events() {
@@ -504,13 +542,50 @@ function events() {
   if (selectedBinding >= bindings.length)
     selectedBinding = Math.max(0, bindings.length - 1);
   const b = bindings[selectedBinding];
-  return `${title("EVENT MAPPINGS", "입력에 반응을 연결하세요.", "다른 앱에서 작업하는 동안에도 입력을 감지합니다. 버디를 드래그하는 동안의 동작도 지정할 수 있습니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 위쪽이 같은 우선순위에서 먼저 적용됩니다.</span><button class="small" data-action="add-binding">＋ 이벤트</button></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[b.trigger.type]} ${esc((b.trigger as any).code ?? (b.trigger as any).keyword ?? "")}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
+  return `${title("EVENT MAPPINGS", "입력에 반응을 연결하세요.", "다른 앱에서 작업하는 동안에도 입력을 감지합니다. 버디를 드래그하는 동안의 동작도 지정할 수 있습니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 위쪽이 같은 우선순위에서 먼저 적용됩니다.</span><div class="row-actions"><button class="small" data-action="idle-directions">대기 방향 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[b.trigger.type]} ${esc((b.trigger as any).code ?? (b.trigger as any).keyword ?? "")}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
+}
+const cursorDirections: [CursorDirection, string][] = [
+  ["upLeft", "↖ 왼쪽 위"], ["up", "↑ 위"], ["upRight", "↗ 오른쪽 위"],
+  ["left", "← 왼쪽"], ["center", "· 가운데"], ["right", "→ 오른쪽"],
+  ["downLeft", "↙ 왼쪽 아래"], ["down", "↓ 아래"], ["downRight", "↘ 오른쪽 아래"],
+];
+function cursorDirectionEditor(effect: Extract<Effect, { type: "faceCursor" }>) {
+  const loops = clips().filter((name) => name !== "idle" && doc!.character.animations[name].loop);
+  return `<p class="hint">버디 앱에서 마우스 감지를 켜면, 대기 중 커서가 있는 9개 구역에 맞춰 표시합니다. 기본 방향은 왼쪽 구역에서 좌우 반전합니다.</p><div class="cursor-directions">${cursorDirections.map(([direction, label]) => {
+    const pose = effect.directions?.[direction];
+    const mirror = pose?.mirror == null ? "" : String(pose.mirror);
+    return `<fieldset class="cursor-direction"><legend>${label}</legend><label class="field"><span>동작</span><select data-cursor-direction="${direction}" data-pose-field="animation">${option("", "기본 대기 동작", pose?.animation === "idle" ? "" : pose?.animation ?? "")}${loops.map((name) => option(name, name, pose?.animation ?? "")).join("")}</select></label><label class="field"><span>좌우 방향</span><select data-cursor-direction="${direction}" data-pose-field="mirror">${option("", "기본 방향", mirror)}${option("false", "원본", mirror)}${option("true", "좌우 반전", mirror)}</select></label><button class="small" data-action="test-cursor" data-id="${direction}" aria-label="${label} 미리보기">미리보기</button></fieldset>`;
+  }).join("")}</div>`;
+}
+function soundSettings(binding: Binding) {
+  const sounds = Object.entries(doc!.character.sounds);
+  const volume = Math.round((binding.sound?.volume ?? 0.7) * 100);
+  return `<div class="form-grid"><label class="field"><span>이벤트 사운드</span><select id="event-sound">${option("", "재생 안 함", binding.sound?.resource ?? "")}${sounds.map(([id, sound]) => option(id, soundName(id, sound.audio.slice(10)), binding.sound?.resource ?? "")).join("")}</select></label>
+    ${binding.sound ? `<label class="field"><span>볼륨 (%)</span><input id="event-volume" type="number" min="0" max="100" step="1" value="${volume}"></label>` : ""}</div>
+    <p class="hint">${sounds.length ? "이 동작이 시작될 때 사운드를 한 번 재생합니다. 다른 동작으로 바뀌면 소리도 멈춥니다." : "리소스에서 WAV 또는 MP3를 가져오면 이벤트에 연결할 수 있습니다."}</p>`;
+}
+function reactionSettings(binding: Binding, path: string) {
+  const effect = binding.effect;
+  if (effect.type === "faceCursor") return cursorDirectionEditor(effect);
+  const cursor = check("이 동작 중 커서 위치에 따라 좌우 반전", `${path}.followCursor`)
+    + (binding.trigger.type === "drag" ? "" : '<p class="hint">커서를 따라보려면 버디 앱에서 마우스 감지를 켜세요.</p>');
+  const sound = soundSettings(binding);
+  if (effect.type !== "playAnimation") {
+    return `${cursor}${sound}${binding.trigger.type === "drag" ? "" : `<label class="field"><span>우선순위 (0~100, 비우면 기본 순서)</span><input id="continuous-priority" type="number" min="0" max="100" value="${effect.priority ?? ""}"></label>`}`;
+  }
+  const policy = effect.interruption ?? "byPriority";
+  const finish = policy === "finish";
+  return `${cursor}${sound}<div class="form-grid">${field("우선순위 (0~100)", `${path}.effect.priority`, "number", 'min="0" max="100"')}${field("재반응 대기 (ms)", `${path}.effect.cooldownMs`, "number", 'min="0" max="10000"')}
+    <label class="field"><span>새 이벤트가 들어오면</span><select id="interruption-policy">${option("byPriority", "우선순위에 따라 전환", policy)}${option("replace", "즉시 전환", policy)}${option("finish", "재생을 마칠 때까지 유지", policy)}</select></label>
+    <label class="field"><span>표시 시간 (ms, 비우면 동작 길이)</span><input id="duration-ms" type="number" min="1" max="60000" value="${effect.durationMs ?? ""}"></label>
+    ${finish ? "" : `<label class="field"><span>같은 이벤트가 반복되면</span><select data-path="${path}.effect.retrigger">${option("restart", "처음부터 재생", effect.retrigger)}${option("ignore", "현재 재생 유지", effect.retrigger)}</select></label>`}
+    </div>${finish ? '<p class="hint">표시 시간이 끝날 때까지 다른 입력이나 같은 이벤트가 재생을 바꾸지 않습니다.</p>' : ["keyDown", "mouseDown"].includes(binding.trigger.type) ? check("키·버튼을 떼면 즉시 대기로 복귀", `${path}.effect.stopOnRelease`) : ""}`;
 }
 function bindingEditor(b: Binding) {
   const t: any = b.trigger,
     e: any = b.effect,
     p = `project.bindings.${selectedBinding}`;
-  return `<div class="card"><div class="card-heading"><h3>이벤트 편집</h3><button class="text-button danger" data-action="remove-binding">삭제</button></div><div class="form-grid">${field("이벤트 ID", `${p}.id`)}<label class="field"><span>발생 조건</span><select id="trigger-type">${Object.entries(
+  return `<div class="card"><div class="card-heading"><h3>이벤트 편집</h3><div class="row-actions"><button class="small" data-action="reorder-binding" data-id="-1" ${selectedBinding === 0 ? "disabled" : ""}>↑ 위로</button><button class="small" data-action="reorder-binding" data-id="1" ${selectedBinding === doc!.project.bindings.length - 1 ? "disabled" : ""}>↓ 아래로</button><button class="text-button danger" data-action="remove-binding">삭제</button></div></div><div class="form-grid">${field("이벤트 ID", `${p}.id`)}<label class="field"><span>발생 조건</span><select id="trigger-type">${Object.entries(
     triggerNames,
   )
     .map(([k, v]) => option(k, v, t.type))
@@ -522,12 +597,12 @@ function bindingEditor(b: Binding) {
           .filter((n) =>
             e.type === "playAnimation"
               ? !doc!.character.animations[n].loop
-              : doc!.character.animations[n].loop,
+              : doc!.character.animations[n].loop && (e.type !== "move" || n !== "idle"),
           )
           .map((n) => option(n, n, e.animation ?? ""))
           .join("")}</select></label>`
-      : '<p class="hint">커서가 있는 방향으로 캐릭터를 좌우 반전합니다.</p>'
-  }${e.type === "playAnimation" ? `<div class="form-grid">${field("우선순위 (0~100)", `${p}.effect.priority`, "number", 'min="0" max="100"')}${field("재반응 대기 (ms)", `${p}.effect.cooldownMs`, "number", 'min="0" max="10000"')}<label class="field"><span>표시 시간 (ms, 비우면 동작 길이)</span><input id="duration-ms" type="number" min="1" max="60000" value="${e.durationMs ?? ""}"></label><label class="field"><span>재입력 시</span><select data-path="${p}.effect.retrigger">${option("restart", "처음부터 재생", e.retrigger)}${option("ignore", "현재 재생 유지", e.retrigger)}</select></label></div>${["keyDown", "mouseDown"].includes(t.type) ? check("키·버튼을 떼면 즉시 대기로 복귀", `${p}.effect.stopOnRelease`) : ""}` : ""}${e.type === "move" ? `<div class="form-grid">${field("X 방향 (-1~1)", `${p}.effect.x`, "number", 'min="-1" max="1" step="0.1"')}${field("Y 방향 (-1~1)", `${p}.effect.y`, "number", 'min="-1" max="1" step="0.1"')}${field("이동 속도 (DIP/초)", `${p}.effect.speedDipPerSecond`, "number", 'min="1" max="1000"')}</div>` : ""}</div>`;
+      : ""
+  }${reactionSettings(b, p)}${e.type === "move" ? `<div class="form-grid">${field("X 방향 (-1~1)", `${p}.effect.x`, "number", 'min="-1" max="1" step="0.1"')}${field("Y 방향 (-1~1)", `${p}.effect.y`, "number", 'min="-1" max="1" step="0.1"')}${field("이동 속도 (DIP/초)", `${p}.effect.speedDipPerSecond`, "number", 'min="1" max="1000"')}</div>` : ""}</div>`;
 }
 function timing() {
   return `${title("RESPONSE TIMING", "버디의 반응 리듬", "입력을 멈춘 뒤 계속 움직이는 시간을 줄이고, 속도에 따른 전환을 조절하세요.")}<div class="timing-highlight"><span class="timing-icon">◷</span><div><h3>입력 중단 → 대기 전환</h3><p>마지막 일반 키 입력 후 ${doc!.project.defaults.timing.idleTimeoutMs}ms에 속도 애니메이션을 끝냅니다.</p></div><strong>${doc!.project.defaults.timing.idleTimeoutMs}<small>ms</small></strong></div><div class="card">${field("입력 중단 판정 (ms)", "project.defaults.timing.idleTimeoutMs", "number", 'min="50" max="5000" step="10"')}<p class="hint">기본 250ms. 더 빠른 복귀는 150~200ms, 여유 있는 복귀는 400~600ms를 사용해보세요. 일회성 동작의 길이는 이벤트의 표시 시간에서 조절합니다.</p><div class="form-grid">${field("속도 측정 구간 (ms)", "project.defaults.timing.rateWindowMs", "number", 'min="100" max="10000" step="50"')}${field("속도 평가 간격 (ms)", "project.defaults.timing.rateEvaluationMs", "number", 'min="10" max="250" step="10"')}${field("속도 구간 안정 시간 (ms)", "project.defaults.timing.rateStabilityMs", "number", 'min="0" max="2000" step="10"')}</div><p class="hint">속도 = 측정 구간의 키 입력 수 ÷ 구간(초). 안정 시간이 지나야 새 속도 구간으로 바뀝니다. 중단 판정은 안정 시간과 관계없이 즉시 대기로 돌아갑니다.</p></div><div class="card"><h3>시작 프리셋</h3><div class="preset-row"><button data-action="timing-preset" data-id="snappy">빠릿하게 <small>중단 150ms · 안정 50ms</small></button><button data-action="timing-preset" data-id="balanced">기본 <small>중단 250ms · 안정 100ms</small></button><button data-action="timing-preset" data-id="relaxed">부드럽게 <small>중단 500ms · 안정 200ms</small></button></div></div>`;
@@ -608,8 +683,12 @@ function previewPanel() {
     .map((n) => option(n, n, selectedClip))
     .join(
       "",
-    )}</select></label><button class="small full-width" data-action="replay">↻ 처음부터 재생</button><div class="preview-divider"></div><h3>이벤트 테스트</h3><p class="hint">저장된 구성으로 실제 동작 엔진을 실행합니다.</p><label class="field"><span>테스트할 이벤트</span><select id="test-binding">${doc!.project.bindings.map((b, i) => option(String(i), `${triggerNames[b.trigger.type]} · ${b.id}`, String(selectedBinding))).join("")}</select></label><button class="small full-width" data-action="test-event" ${doc!.project.bindings.length ? "" : "disabled"}>이벤트 실행 →</button><div class="speed-test"><span>타이핑 속도</span><div><button data-action="test-speed" data-id="2">2 키/초</button><button data-action="test-speed" data-id="8">8 키/초</button></div><small>2초 입력 후 멈춤 → 대기 복귀 확인</small></div><p class="preview-note">웹 미리보기는 선택한 테스트 입력만 사용합니다. 완성된 앱은 다른 앱에서 작업할 때도 반응합니다.</p><div class="preview-divider"></div><div class="project-facts"><span>리소스<strong>${Object.keys(doc!.character.resources ?? {}).length + 1}</strong></span><span>동작<strong>${clips().length}</strong></span><span>이벤트<strong>${doc!.project.bindings.length}</strong></span></div></div></aside>`;
+    )}</select></label><button class="small full-width" data-action="replay">↻ 처음부터 재생</button><div class="preview-divider"></div><h3>이벤트 테스트</h3><p class="hint">저장된 구성으로 실제 동작 엔진을 실행합니다.</p><label class="field"><span>테스트할 이벤트</span><select id="test-binding">${doc!.project.bindings.map((b, i) => option(String(i), `${triggerNames[b.trigger.type]} · ${b.id}`, String(selectedBinding))).join("")}</select></label><button class="small full-width" data-action="test-event" ${doc!.project.bindings.length ? "" : "disabled"}>이벤트 실행 →</button><div class="speed-test"><span>타이핑 속도</span><div><button data-action="test-speed" data-id="2">2 키/초</button><button data-action="test-speed" data-id="8">8 키/초</button></div><small>2초 입력 후 멈춤 → 대기 복귀 확인</small></div><p class="preview-note">웹 미리보기는 선택한 테스트 입력만 사용합니다. 완성된 앱은 다른 앱에서 작업할 때도 반응합니다.</p><div class="preview-divider"></div><div class="project-facts"><span>리소스<strong>${Object.keys(doc!.character.resources ?? {}).length + Object.keys(doc!.character.sounds).length + 1}</strong></span><span>동작<strong>${clips().length}</strong></span><span>이벤트<strong>${doc!.project.bindings.length}</strong></span></div></div></aside>`;
 }
+const previewAudio = new ReactionAudio((id) => {
+  const sound = saved?.character.sounds[id];
+  return sound ? resourceUrl(sound.audio.slice(10)) : undefined;
+}, () => toast("미리보기에서 사운드를 재생하지 못했습니다.", true));
 function startPreview() {
   if (!doc || !saved) return;
   const canvas = document.querySelector<HTMLCanvasElement>("#preview-canvas");
@@ -636,6 +715,7 @@ function playClip(name: string) {
   if (!renderer || !saved) return;
   simulationTimers.forEach(clearTimeout);
   simulationTimers = [];
+  previewAudio.stop();
   const state: CharacterState = {
     protocolVersion: 1,
     epoch: currentEpoch++,
@@ -790,6 +870,15 @@ async function upload(files: FileList | File[], icon = false) {
     toast(`${imported}개 리소스를 가져왔습니다. 동작에 연결한 뒤 저장하세요.`);
 }
 function addResource(filename: string) {
+  if (isAudio(filename)) {
+    const sounds = doc!.character.sounds;
+    if (Object.values(sounds).some((sound) => sound.audio === `resources/${filename}`)) return;
+    let n = 1;
+    while (sounds[`sound-${n}`]) n++;
+    sounds[`sound-${n}`] = { audio: `resources/${filename}` };
+    markDirty();
+    return;
+  }
   doc!.character.resources ??= {};
   if (
     Object.values(doc!.character.resources).some(
@@ -826,6 +915,7 @@ function changeTrigger(type: string) {
   if (["mouseDown", "mouseUp"].includes(type)) t.button = "primary";
   if (type === "wheel") t.direction = "up";
   b.trigger = t;
+  if (type === "cursorMove") delete b.sound;
   b.effect =
     type === "cursorMove"
       ? { type: "faceCursor" }
@@ -940,12 +1030,14 @@ async function simulate(
   const epoch = currentEpoch++;
   let previous = "";
   for (const frame of timeline) {
-    const key = `${frame.state.actionInstanceId}:${frame.state.animation}`;
+    const key = `${frame.state.actionInstanceId}:${frame.state.animation}:${frame.state.facingLeft}`;
     if (key === previous) continue;
     previous = key;
     simulationTimers.push(
       window.setTimeout(() => {
-        renderer?.update({ ...frame.state, epoch }, frame.atMs);
+        const state = { ...frame.state, epoch };
+        renderer?.update(state, frame.atMs);
+        previewAudio.update(state);
         document.querySelector("#preview-state")!.textContent =
           `${frame.state.animation} · ${frame.atMs}ms`;
       }, frame.atMs),
@@ -1291,12 +1383,19 @@ async function performAction(name: string, id?: string) {
     case "remove-clip":
       if (
         doc!.project.bindings.some(
-          (b) => (b.effect as any).animation === selectedClip,
+          (b) => usesAnimation(b.effect, selectedClip),
         )
       )
         throw new Error("이 동작을 사용하는 이벤트를 먼저 수정하세요.");
       delete doc!.character.animations[selectedClip];
       selectedClip = "idle";
+      markDirty();
+      layout();
+      break;
+    case "remove-sound":
+      if (doc!.project.bindings.some((binding) => binding.sound?.resource === id))
+        throw new Error("이 사운드를 사용하는 이벤트를 먼저 수정하세요.");
+      delete doc!.character.sounds[id!];
       markDirty();
       layout();
       break;
@@ -1313,6 +1412,21 @@ async function performAction(name: string, id?: string) {
       addResource(id!);
       layout();
       break;
+    case "append-gif-frame":
+    case "clear-gif-frames": {
+      const animation = doc!.character.animations[selectedClip];
+      if (name === "append-gif-frame") {
+        const frame = document.querySelector<HTMLInputElement>("#gif-frame-number")!;
+        if (frame.value === "" || !frame.reportValidity()) return;
+        if (animation.frames.length >= 256) throw new Error("재생 목록은 최대 256프레임입니다.");
+        animation.frames.push(frame.valueAsNumber);
+      } else {
+        animation.frames = [];
+      }
+      document.querySelector<HTMLInputElement>("#clip-frames")!.value = animation.frames.join(", ");
+      markDirty();
+      break;
+    }
     case "clear-regions": {
       const a = doc!.character.animations[selectedClip];
       a.regions = [];
@@ -1370,13 +1484,23 @@ async function performAction(name: string, id?: string) {
       layout();
       break;
     }
+    case "idle-directions":
     case "add-binding": {
+      const idle = name === "idle-directions";
+      if (idle) {
+        const existing = doc!.project.bindings.findIndex((binding) => binding.trigger.type === "cursorMove");
+        if (existing >= 0) {
+          selectedBinding = existing;
+          layout(true);
+          break;
+        }
+      }
       let n = 1;
       while (doc!.project.bindings.some((b) => b.id === `event-${n}`)) n++;
       doc!.project.bindings.push({
         id: `event-${n}`,
-        trigger: { type: "keyDown", code: "Enter", repeat: false },
-        effect: {
+        trigger: idle ? { type: "cursorMove" } : { type: "keyDown", code: "Enter", repeat: false },
+        effect: idle ? { type: "faceCursor" } : {
           type: "playAnimation",
           animation: chooseDefaultAnimation(false),
           priority: 50,
@@ -1389,6 +1513,24 @@ async function performAction(name: string, id?: string) {
       selectedBinding = doc!.project.bindings.length - 1;
       markDirty();
       layout();
+      break;
+    }
+    case "test-cursor": {
+      const index = cursorDirections.findIndex(([direction]) => direction === id);
+      if (index < 0) return;
+      await ensureSaved();
+      const positions = [120, 228, 330];
+      await simulate([{ atMs: 100, event: { type: "cursorMove", x: positions[index % 3], y: positions[Math.floor(index / 3)] } }], 1500);
+      break;
+    }
+    case "reorder-binding": {
+      const destination = selectedBinding + Number(id);
+      const bindings = doc!.project.bindings;
+      if (destination < 0 || destination >= bindings.length) return;
+      [bindings[selectedBinding], bindings[destination]] = [bindings[destination], bindings[selectedBinding]];
+      selectedBinding = destination;
+      markDirty();
+      layout(true);
       break;
     }
     case "remove-binding":
@@ -1534,6 +1676,20 @@ app.addEventListener("input", (event) => {
       paintCrop();
     }
   }
+  if (input.id === "gif-frame-number" && input.value !== "" && input.validity.valid) {
+    const animation = doc!.character.animations[selectedClip];
+    const filename = doc!.character.resources[animation.resource!].image.slice(10);
+    const preview = document.querySelector<HTMLImageElement>("#gif-frame-preview")!;
+    preview.src = gifFrameUrl(filename, input.valueAsNumber);
+    preview.alt = `GIF ${input.valueAsNumber}번 프레임`;
+  }
+  if (input.id === "event-volume" && input.value !== "" && input.validity.valid) {
+    const cue = doc!.project.bindings[selectedBinding].sound;
+    if (cue) {
+      cue.volume = input.valueAsNumber / 100;
+      markDirty();
+    }
+  }
   if (input.id === "clip-frames") {
     const values = input.value
       .split(",")
@@ -1569,6 +1725,37 @@ app.addEventListener("change", (event) => {
     a.regions = [];
     markDirty();
     layout();
+  }
+  if (input.id === "event-sound") {
+    const binding = doc!.project.bindings[selectedBinding];
+    binding.sound = input.value ? { resource: input.value, volume: binding.sound?.volume ?? 0.7 } : null;
+    markDirty();
+    layout();
+  }
+  if (input.id === "interruption-policy") {
+    const effect = doc!.project.bindings[selectedBinding].effect;
+    if (effect.type !== "playAnimation") return;
+    effect.interruption = input.value as Interruption;
+    markDirty();
+    layout();
+  }
+  if (input.id === "continuous-priority") {
+    const effect = doc!.project.bindings[selectedBinding].effect;
+    if (effect.type === "move" || effect.type === "sustainAnimation") {
+      effect.priority = input.value === "" ? null : Number(input.value);
+      markDirty();
+    }
+  }
+  if (input.dataset.cursorDirection) {
+    const effect = doc!.project.bindings[selectedBinding].effect;
+    if (effect.type !== "faceCursor") return;
+    const direction = input.dataset.cursorDirection as CursorDirection;
+    const directions = effect.directions ??= {};
+    const pose = directions[direction] ??= {};
+    if (input.dataset.poseField === "animation") pose.animation = input.value || null;
+    else pose.mirror = input.value === "" ? null : input.value === "true";
+    if (pose.animation == null && pose.mirror == null) delete directions[direction];
+    markDirty();
   }
   if (input.id === "trigger-type") changeTrigger(input.value);
   if (input.id === "held-effect") {

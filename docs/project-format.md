@@ -144,12 +144,12 @@ manifest의 이미지·라이선스 경로는 manifest가 있는 디렉토리 �
 | `whileKeyDown` | `move`, `sustainAnimation` | 해당 키의 held 상태에서 이동 또는 반복 동작. `*` 금지 |
 | `mouseDown`, `mouseUp` | `playAnimation` | `primary`, `secondary`, `middle` 버튼 |
 | `wheel` | `playAnimation` | `up`, `down`, `left`, `right` 방향. OS 델타는 정규화한다. |
-| `cursorMove` | `faceCursor` | 캐릭터의 좌우 방향을 커서에 맞춘다. PNG 프레임은 수평 반전한다. |
+| `cursorMove` | `faceCursor` | 대기 중 커서가 있는 9구역에 따라 동작과 좌우 방향을 선택한다. |
 | `typingRate` | `sustainAnimation` | 설정한 측정 창(기본 2초)의 실제 키 입력 속도 구간에 머무르는 동안 반복 애니메이션 |
 | `keySequence` | `playAnimation` | keyword+layout으로 변환한 물리 키 순서 또는 명시적 steps의 매칭 |
 | `drag` | `sustainAnimation` | 버디를 직접 드래그하는 동안 반복 동작. 놓으면 즉시 해제 |
 
-typingRate.minKps는 0.5~1000, maxKps는 minKps보다 큰 1000 이하 값이며 생략하면 상한 없음이다. 구간은 `[minKps, maxKps)`이고 프로젝트당 최대 8개, 서로 겹치면 검증 오류다. sustainAnimation은 loop=true인 animation 참조만 가지며 priority·retrigger·cooldownMs는 받지 않는다. 속도 애니메이션은 기본 상태이고 일회성 playAnimation이 항상 그 위에 표시된다.
+typingRate.minKps는 0.5~1000, maxKps는 minKps보다 큰 1000 이하 값이며 생략하면 상한 없음이다. 구간은 `[minKps, maxKps)`이고 프로젝트당 최대 8개, 서로 겹치면 검증 오류다. sustainAnimation은 loop=true인 animation을 참조한다. 키 유지·속도 동작과 이동은 priority를 정수 0~100으로 지정할 수 있다. 생략하면 일회성 → 키 유지 → 속도 → 이동 순서가 적용된다. 드래그 중에는 편집용 동작을 표시한다.
 
 keySequence는 keyword+layout 또는 steps 중 하나만 가진다. keyword는 NFC 후 1~32 Unicode scalar, layout은 ko-KR-2set/en-US-qwerty다. steps는 1~128개의 `{ code, shift }`이며 shift는 필수 boolean이다. timeoutMs는 정수 500~10000, 기본 5000이다. sequence는 최대 32개, 변환 후 동일 패턴 중복은 오류다. 지원 문자·두벌식 변환표·중단 키·겹침 규칙은 [입력 계약](input-and-keywords.md)이 기준이다. 한 이벤트에서 키·wildcard·완성 sequence 후보를 함께 비교한다.
 
@@ -157,17 +157,21 @@ keySequence는 keyword+layout 또는 steps 중 하나만 가진다. keyword는 N
 
 - `playAnimation`이 참조하는 animation.loop는 false여야 한다. priority는 정수 0~100(기본 50), cooldownMs는 정수 0~10000(기본 0), retrigger는 restart/ignore(기본 restart)다. animation 참조는 필수다.
 - 한 이벤트의 적격 후보는 priority 내림차순, bindings 배열 순서 오름차순으로 하나를 선택한다. 이벤트 간에는 정규화 seq 순서를 따른다. 적격 후보가 없으면 아무것도 시작하지 않는다.
-- 재생 중인 다른 binding보다 priority가 높거나, 같은 priority이고 정의 순서가 빠르면 중단·교체한다. 그 외에는 버린다. 같은 binding은 restart일 때만 재시작하며 ignore는 버린다.
+- 현재 재생 중인 동작의 interruption이 byPriority(기본)이면 더 높은 우선순위 또는 같은 우선순위에서 앞선 정의가 교체한다. replace이면 새로 시작한 적격 이벤트가 즉시 교체한다. finish이면 원래 종료 시각까지 새 이벤트와 반복 입력을 무시한다. 그 외의 동일 이벤트 반복은 retrigger를 따른다.
 - 쿨다운은 binding별 마지막 실제 시작 시각부터 잰다. 쿨다운·우선순위·ignore로 버린 입력은 시각을 갱신하지 않는다. 중단된 반응은 재개·대기열 저장하지 않는다.
-- Rust가 정규화된 프레임 시간 합계 또는 지정한 durationMs 후 종료한다. stopOnRelease이면 실제 발생 키·버튼을 떼는 시점에도 중단한다. 렌더러 ACK는 완료 조건이 아니다. 종료 시 현재 키 유지·속도·이동·idle 순으로 기본 상태를 처음부터 재생한다. 드래그 중에는 drag 동작이 우선한다.
+- Rust가 정규화된 프레임 시간 합계 또는 지정한 durationMs 후 종료한다. finish 이외의 동작은 stopOnRelease가 켜져 있으면 해당 키나 버튼을 떼는 시점에도 중단한다. 렌더러 ACK는 완료 조건이 아니다. 종료 시 현재 활성화된 유지 조건의 우선순위를 다시 적용한다. 드래그 중에는 drag 동작이 우선한다.
 
 ### 유지 이동과 방향
 
 move의 x/y는 -1~1, 0 벡터는 금지하고 speedDipPerSecond는 1~1000이다. animation은 생략 가능하며 지정했다면 loop=true인 애니메이션만 참조한다. idle은 이동 애니메이션으로 지정하지 않는다. 같은 키로 여러 binding을 만들 수 있으며 모든 활성 move의 축을 합산해 각 축을 -1~1로 제한한다. 벡터 길이가 1을 넘으면 정규화하고, 활성 move 중 가장 큰 speed를 곱한다. 반대 방향이 상쇄되거나 작업 영역 경계에서 실제 이동이 0이면 이동 애니메이션을 표시하지 않는다.
 
-속도 애니메이션이 없고 실제 이동이 있으면 활성 move 중 animation이 있는 가장 앞 binding을 기본 애니메이션으로 선택하고, 없으면 idle을 사용한다. 일회성 반응은 기본 애니메이션만 가리며 이동 계산은 계속한다. 편집·일시 정지에서는 모든 입력 동작을 중지하고, movementEnabled=false는 이동과 walk만 중지한다. 범용 effect 배열과 유지 조건의 독립 playAnimation은 v1에 넣지 않는다.
+실제 이동이 있으면 활성 move 중 우선순위가 높은 동작을 후보로 삼는다. 기본 우선순위가 같은 이동은 애니메이션이 지정된 정의가 우선하고, 선택한 이동에 애니메이션이 없으면 기본 대기 모습을 사용한다. 일회성 반응 중에도 이동 계산은 계속한다. 편집·일시 정지에서는 모든 입력 동작을 중지하고, movementEnabled=false는 이동과 walk만 중지한다. 범용 effect 배열과 유지 조건의 독립 playAnimation은 v1에 넣지 않는다.
 
-faceCursor는 binding이 있고 마우스 감지가 유효한 동안 최신 커서와 캐릭터 중심의 로컬 X를 비교한다. 캐릭터가 이동할 때도 재계산하고 차이가 1 DIP 이하면 방향을 유지한다. 커서 기준이 없으면 실제 수평 이동 방향, 그것도 없으면 마지막 방향을 유지한다. 같은 cursorMove/faceCursor binding 중복은 검증 오류다.
+faceCursor는 대기 상태에서 캐릭터 영역을 3×3으로 나눠 최신 커서가 있는 구역을 선택한다. 밖에 있는 커서는 가장 가까운 행과 열에 대응한다. directions의 키는 upLeft, up, upRight, left, center, right, downLeft, down, downRight다. 각 키에 반복 animation과 mirror를 따로 지정할 수 있다. 기본 대기 동작을 쓰고, 왼쪽 열을 반전하는 것이 기본값이다. 다른 이벤트는 binding의 followCursor를 켠 경우에만 좌우로 커서를 따라본다. 같은 cursorMove/faceCursor binding 중복은 검증 오류다.
+
+### 이벤트 사운드
+
+캐릭터의 sounds에 사운드 ID와 manifest 기준 상대 경로 audio를 저장한다. 최대 32개의 WAV 또는 MP3를 추가할 수 있다. binding의 선택 필드 sound는 resource에 사운드 ID를, volume에 0~1 사이의 값을 가진다. 화면에 표시되는 동작이 시작될 때 한 번 재생하고 다른 동작으로 바뀌거나 숨기면 멈춘다. 우선순위에 밀려 시작하지 않은 이벤트에는 소리가 나지 않는다.
 
 ### 정규 입력 목록
 

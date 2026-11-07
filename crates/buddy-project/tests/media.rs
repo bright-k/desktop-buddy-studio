@@ -97,6 +97,17 @@ fn resources_crops_hashes_and_gif_timing_survive_loading() {
         256
     );
     assert!(!loaded.render_assets.is_empty());
+    c["animations"]["celebrate"]["frames"] = serde_json::json!([1, 0, 1]);
+    fs::write(&manifest, serde_json::to_vec(&c).unwrap()).unwrap();
+    let selected = load_project(dir.path()).unwrap();
+    let frames = &selected.data.render_plan.animations["celebrate"].frames;
+    assert_eq!(
+        frames.iter().map(|f| f.duration_ms).collect::<Vec<_>>(),
+        [240.0, 80.0, 240.0]
+    );
+    assert_eq!(frames[0].image, clip.frames[1].image);
+    assert_eq!(frames[1].image, clip.frames[0].image);
+    assert_eq!(frames[2].image, clip.frames[1].image);
     c["animations"]["idle"]["regions"][0]["x"] = 1000.into();
     fs::write(&manifest, serde_json::to_vec(&c).unwrap()).unwrap();
     assert!(load_project(dir.path())

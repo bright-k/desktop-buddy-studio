@@ -9,7 +9,7 @@
     "security": {
       "capabilities": ["overlay", "settings"],
       "assetProtocol": { "enable": true, "scope": [] },
-      "csp": { "default-src": "'self'", "script-src": "'self'", "style-src": "'self'", "img-src": "'self' asset: http://asset.localhost", "connect-src": "ipc: http://ipc.localhost", "object-src": "'none'", "frame-src": "'none'", "base-uri": "'none'", "form-action": "'none'" }
+      "csp": { "default-src": "'self'", "script-src": "'self'", "style-src": "'self'", "img-src": "'self' asset: http://asset.localhost", "media-src": "'self' asset: http://asset.localhost", "connect-src": "ipc: http://ipc.localhost", "object-src": "'none'", "frame-src": "'none'", "base-uri": "'none'", "form-action": "'none'" }
     }
   },
   "bundle": { "active": true, "targets": ["app", "dmg"], "icon": ["icons/icon.png"], "macOS": { "minimumSystemVersion": "15.0", "signingIdentity": "-" } }

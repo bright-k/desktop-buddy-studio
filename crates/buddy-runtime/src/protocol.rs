@@ -60,6 +60,7 @@ pub struct PlayerBootstrap {
     pub character: Character,
     pub product: Product,
     pub image_paths: std::collections::BTreeMap<String, String>,
+    pub sound_paths: std::collections::BTreeMap<String, String>,
     pub render_plan: buddy_project::RenderPlan,
     pub width: f64,
     pub height: f64,

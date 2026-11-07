@@ -1877,3 +1877,42 @@ textarea:disabled {
 .resource-grid { align-items: start; }
 .resource-card .usage-links > span { flex-basis: 100%; margin: 0 0 2px; color: #596850; font-size: 11px; }
 .resource-card .usage-links .chip { padding: 5px 8px; font-size: 11px; }
+
+.cursor-directions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.cursor-direction {
+  min-width: 0;
+  border: 1px solid #dce4df;
+  border-radius: 10px;
+  padding: 8px;
+}
+.cursor-direction legend {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.cursor-direction select {
+  width: 100%;
+}
+.gif-frame-preview {
+  display: grid;
+  place-items: center;
+  min-height: 128px;
+  border-radius: 10px;
+}
+.gif-frame-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 200px;
+  image-rendering: pixelated;
+}
+
+.sound-resource {
+  padding-block: 10px;
+  border-top: 1px solid #dce4df;
+}
+.sound-resource audio {
+  width: 100%;
+}

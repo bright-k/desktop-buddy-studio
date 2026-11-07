@@ -4,13 +4,17 @@ use buddy_project::Point;
 pub struct EditSession {
     pub id: String,
     pub origin: Point,
+    pub monitor: String,
+    pub grab: Point,
     pub scale: f64,
 }
 impl EditSession {
-    pub fn new(origin: Point, scale: f64) -> Self {
+    pub fn new(origin: Point, monitor: String, grab: Point, scale: f64) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             origin,
+            monitor,
+            grab,
             scale,
         }
     }
@@ -28,8 +32,8 @@ mod tests {
     use super::*;
     #[test]
     fn a_previous_session_cannot_change_a_new_edit() {
-        let first = EditSession::new(Point::default(), 1.0);
-        let second = EditSession::new(Point::default(), 1.0);
+        let first = EditSession::new(Point::default(), "primary".into(), Point::default(), 1.0);
+        let second = EditSession::new(Point::default(), "primary".into(), Point::default(), 1.0);
         assert!(second.require(&first.id).is_err());
         assert!(second.require("").is_err());
         assert!(second.require(&second.id).is_ok());

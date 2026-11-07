@@ -70,6 +70,7 @@ pub struct LoadedProject {
     pub image_relative_path: String,
     pub content_hash: String,
     pub render_assets: BTreeMap<String, Vec<u8>>,
+    pub sound_files: BTreeMap<String, String>,
 }
 
 pub fn sha256(bytes: &[u8]) -> String {
@@ -359,6 +360,12 @@ pub fn validate_parts(
         "$.resources",
         "maximum 32 resources; unique portable IDs other than sheet",
     );
+    check(
+        character.sounds.len() <= 32 && character.sounds.keys().all(|id| safe_id(id)),
+        char_file,
+        "$.sounds",
+        "maximum 32 sounds with portable IDs",
+    );
     for (name, animation) in &character.animations {
         let path = format!("$.animations.{name}");
         check(safe_id(name), char_file, &path, "invalid animation name");
@@ -407,7 +414,7 @@ pub fn validate_parts(
                     Trigger::TypingRate { .. } | Trigger::WhileKeyDown { .. } | Trigger::Drag,
                     Effect::SustainAnimation { .. }
                 )
-                | (Trigger::CursorMove, Effect::FaceCursor)
+                | (Trigger::CursorMove, Effect::FaceCursor { .. })
         );
         check(
             compatible,
@@ -415,6 +422,16 @@ pub fn validate_parts(
             &path,
             "trigger/effect combination is not allowed",
         );
+        if let Some(sound) = &binding.sound {
+            check(
+                !matches!(binding.trigger, Trigger::CursorMove)
+                    && character.sounds.contains_key(&sound.resource)
+                    && (0.0..=1.0).contains(&sound.volume),
+                file,
+                &format!("{path}.sound"),
+                "sound requires a reaction, an existing audio resource, and volume 0..1",
+            );
+        }
         let mut compiled = None;
         match &binding.trigger {
             Trigger::KeyDown { code, .. } | Trigger::KeyUp { code } => check(
@@ -503,20 +520,32 @@ pub fn validate_parts(
                     "priority 0..100, cooldown 0..10000, duration 1..60000 ms; stopOnRelease requires keyDown/mouseDown",
                 );
             }
-            Effect::SustainAnimation { animation } => check(
-                character
-                    .animations
-                    .get(animation)
-                    .is_some_and(|a| a.looping),
-                file,
-                &format!("{path}.effect.animation"),
-                "sustain must reference an existing looping animation",
-            ),
+            Effect::SustainAnimation {
+                animation,
+                priority,
+            } => {
+                check(
+                    character
+                        .animations
+                        .get(animation)
+                        .is_some_and(|a| a.looping),
+                    file,
+                    &format!("{path}.effect.animation"),
+                    "sustain must reference an existing looping animation",
+                );
+                check(
+                    priority.is_none_or(|value| value <= 100),
+                    file,
+                    &format!("{path}.effect.priority"),
+                    "priority must be 0..100",
+                );
+            }
             Effect::Move {
                 x,
                 y,
                 speed_dip_per_second,
                 animation,
+                priority,
             } => {
                 check(
                     (-1.0..=1.0).contains(x)
@@ -535,8 +564,27 @@ pub fn validate_parts(
                         "move must reference a non-idle looping animation",
                     );
                 }
+                check(
+                    priority.is_none_or(|value| value <= 100),
+                    file,
+                    &format!("{path}.effect.priority"),
+                    "priority must be 0..100",
+                );
             }
-            _ => {}
+            Effect::FaceCursor { directions } => {
+                if let Some(directions) = directions {
+                    for pose in directions.values() {
+                        check(
+                            pose.animation.as_ref().is_none_or(|name| {
+                                character.animations.get(name).is_some_and(|a| a.looping)
+                            }),
+                            file,
+                            &format!("{path}.effect.directions"),
+                            "idle directions must reference existing looping animations",
+                        );
+                    }
+                }
+            }
         }
         sequences.push(compiled);
     }
@@ -758,6 +806,7 @@ pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationE
     for name in std::iter::once(&character.image)
         .chain(std::iter::once(&character.license))
         .chain(character.resources.values().map(|r| &r.image))
+        .chain(character.sounds.values().map(|sound| &sound.audio))
     {
         if Path::new(name)
             .components()
@@ -891,6 +940,22 @@ pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationE
             data.render_plan.animations.insert(name.clone(), clip);
         }
     }
+    let mut sound_files = BTreeMap::new();
+    for (id, sound) in &data.character.sounds {
+        let relative = character_dir
+            .join(&sound.audio)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let extension = Path::new(&relative)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let bytes = read_source(&root, &relative, PNG_LIMIT, &mut files)?;
+        validate_sound(&extension, &bytes)
+            .map_err(|e| problem(&relative, "$", "INVALID_AUDIO", e))?;
+        sound_files.insert(id.clone(), relative);
+    }
     let mut hash = Sha256::new();
     for (name, file) in &files {
         hash.update((name.len() as u64).to_le_bytes());
@@ -906,5 +971,6 @@ pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationE
         image_relative_path: image_relative,
         content_hash: format!("{:x}", hash.finalize()),
         render_assets,
+        sound_files,
     })
 }

@@ -18,6 +18,8 @@ const mime = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
+  ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
   ".webp": "image/webp",
   ".bmp": "image/bmp",
   ".json": "application/json; charset=utf-8",
@@ -94,7 +96,7 @@ export async function createStudio(options) {
     res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     );
     const json = (value, status = 200) => {
       res.writeHead(status, {
@@ -206,6 +208,18 @@ export async function createStudio(options) {
               action.slice(10),
             ),
           );
+        const gifFrame = /^gif-frame\/([^/]+\.gif)\/([0-9]{1,3})$/.exec(action);
+        if (gifFrame && req.method === "GET") {
+          const source = await scopedFile(join(store.path(id), "resources"), gifFrame[1]);
+          const stage = await fs.mkdtemp(join(store.root, ".staging", "gif-frame-"));
+          try {
+            const output = join(stage, "frame.png");
+            await run(store.cli, ["media-info", source, "--frame", gifFrame[2], "--frame-output", output]);
+            return await serve(output);
+          } finally {
+            await fs.rm(stage, { recursive: true, force: true });
+          }
+        }
         if (action.startsWith("source/") && req.method === "GET")
           return serve(
             await scopedFile(await store.currentPath(id), action.slice(7)),

@@ -2,6 +2,7 @@ mod bundle;
 mod keys;
 mod media;
 mod sequence;
+mod sound;
 mod types;
 mod validation;
 
@@ -9,6 +10,7 @@ pub use bundle::*;
 pub use keys::*;
 pub use media::*;
 pub use sequence::*;
+pub use sound::*;
 pub use types::*;
 pub use validation::*;
 

@@ -64,6 +64,100 @@ fn idle_has_no_rust_tick_deadline() {
 }
 
 #[test]
+fn protected_keyword_keeps_its_original_deadline_through_other_events_and_retrigger() {
+    let mut keyword = pattern("ab", 5000);
+    keyword["trigger"]["layout"] = json!("en-US-qwerty");
+    keyword["effect"]["interruption"] = json!("finish");
+    keyword["effect"]["durationMs"] = json!(600);
+    let held = json!({
+        "id": "held", "trigger": {"type": "whileKeyDown", "code": "KeyH"},
+        "effect": {"type": "sustainAnimation", "animation": "typing", "priority": 100}
+    });
+    let mut runtime = runtime(json!([keyword, shot("click", "KeyC", "click", 100), held]));
+    tap(&mut runtime, 10, "KeyA");
+    tap(&mut runtime, 20, "KeyB");
+    let started = runtime.state().action_instance_id;
+    tap(&mut runtime, 100, "KeyC");
+    down(&mut runtime, 200, "KeyH");
+    tap(&mut runtime, 300, "KeyA");
+    tap(&mut runtime, 310, "KeyB");
+    runtime.advance(619);
+    assert_eq!(runtime.state().animation, "celebrate");
+    assert_eq!(runtime.state().action_instance_id, started);
+    runtime.advance(620);
+    assert_eq!(runtime.state().animation, "typing");
+    assert_eq!(runtime.performance(620).reactions_interrupted, 0);
+}
+
+#[test]
+fn replace_yields_to_lower_priority_shots_and_new_held_events() {
+    let mut replaceable = shot("jump", "KeyA", "jump", 90);
+    replaceable["effect"]["interruption"] = json!("replace");
+    let held = json!({
+        "id": "held", "trigger": {"type": "whileKeyDown", "code": "KeyH"},
+        "effect": {"type": "sustainAnimation", "animation": "typing"}
+    });
+    let mut runtime = runtime(json!([
+        replaceable,
+        shot("click", "KeyC", "click", 10),
+        held
+    ]));
+    tap(&mut runtime, 0, "KeyA");
+    tap(&mut runtime, 10, "KeyC");
+    assert_eq!(runtime.state().animation, "click");
+    tap(&mut runtime, 20, "KeyA");
+    down(&mut runtime, 30, "KeyH");
+    assert_eq!(runtime.state().animation, "typing");
+    up(&mut runtime, 40, "KeyH");
+    assert_eq!(runtime.state().animation, "idle");
+}
+
+#[test]
+fn all_nine_cursor_poses_are_idle_only_unless_an_event_opts_into_mirroring() {
+    let names = [
+        "upLeft",
+        "up",
+        "upRight",
+        "left",
+        "center",
+        "right",
+        "downLeft",
+        "down",
+        "downRight",
+    ];
+    let coordinates = [115.0, 150.0, 185.0];
+    for (index, direction) in names.into_iter().enumerate() {
+        let idle = json!({
+            "id": "look", "trigger": {"type": "cursorMove"},
+            "effect": {"type": "faceCursor", "directions": {
+                (direction): {"animation": "walk", "mirror": true}
+            }}
+        });
+        let mut follows = shot("follows", "KeyB", "click", 60);
+        follows["followCursor"] = json!(true);
+        let mut runtime = runtime(json!([idle, shot("jump", "KeyA", "jump", 50), follows]));
+        let cursor = InputEvent::CursorMove {
+            x: coordinates[index % 3],
+            y: coordinates[index / 3],
+        };
+        runtime.handle(0, cursor.clone());
+        assert_eq!(runtime.state().animation, "walk", "{direction}");
+        assert!(runtime.state().facing_left, "{direction}");
+        tap(&mut runtime, 1, "KeyA");
+        runtime.handle(2, InputEvent::CursorMove { x: 100.0, y: 100.0 });
+        assert_eq!(runtime.state().animation, "jump");
+        assert!(!runtime.state().facing_left);
+        tap(&mut runtime, 3, "KeyB");
+        assert_eq!(runtime.state().animation, "click");
+        assert!(runtime.state().facing_left);
+        runtime.handle(4, InputEvent::CursorMove { x: 205.0, y: 100.0 });
+        assert!(!runtime.state().facing_left);
+        runtime.handle(1000, cursor);
+        assert_eq!(runtime.state().animation, "walk");
+    }
+}
+
+#[test]
 fn frame_latency_includes_native_queue_delay_and_keyword_uses_final_key() {
     let mut runtime = runtime(json!([pattern("고양이", 5000)]));
     let codes = ["KeyR", "KeyH", "KeyD", "KeyI", "KeyD", "KeyD", "KeyL"];

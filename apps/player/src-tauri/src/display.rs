@@ -10,6 +10,7 @@ pub struct Display {
     pub origin: Point,
     pub scale: f64,
     pub bounds: Rect,
+    pub desktop_area: Rect,
 }
 impl Display {
     pub fn character_size(&self, character: &buddy_project::Character, scale: f64) -> Point {
@@ -80,6 +81,16 @@ pub fn choose(displays: &[Display], hint: Option<&str>) -> Option<Display> {
         .cloned()
 }
 
+pub fn at_cursor(displays: &[Display], cursor: Point) -> Option<&Display> {
+    displays.iter().find(|display| {
+        let area = display.desktop_area;
+        cursor.x >= area.x
+            && cursor.x < area.x + area.width
+            && cursor.y >= area.y
+            && cursor.y < area.y + area.height
+    })
+}
+
 pub fn list(app: &tauri::AppHandle) -> Result<Vec<Display>, String> {
     let primary = app.primary_monitor().map_err(|e| e.to_string())?;
     let mut monitors = app.available_monitors().map_err(|e| e.to_string())?;
@@ -104,6 +115,13 @@ pub fn list(app: &tauri::AppHandle) -> Result<Vec<Display>, String> {
         if !scale.is_finite() || scale <= 0.0 || work.size.width == 0 || work.size.height == 0 {
             continue;
         }
+        let desktop_scale = if cfg!(target_os = "macos") {
+            scale
+        } else {
+            1.0
+        };
+        let position = monitor.position();
+        let size = monitor.size();
         displays.push(Display {
             id,
             name,
@@ -120,6 +138,12 @@ pub fn list(app: &tauri::AppHandle) -> Result<Vec<Display>, String> {
                 y: 0.0,
                 width: work.size.width as f64 / scale,
                 height: work.size.height as f64 / scale,
+            },
+            desktop_area: Rect {
+                x: position.x as f64 / desktop_scale,
+                y: position.y as f64 / desktop_scale,
+                width: size.width as f64 / desktop_scale,
+                height: size.height as f64 / desktop_scale,
             },
         });
     }
@@ -141,6 +165,12 @@ mod tests {
                 y: 0.0,
                 width: 1000.0,
                 height: 700.0,
+            },
+            desktop_area: Rect {
+                x: x / scale,
+                y: 0.0,
+                width: 1000.0,
+                height: 750.0,
             },
         }
     }
@@ -187,5 +217,28 @@ mod tests {
             secondary.local_cursor(-900.0, 150.0, true),
             Point { x: 100.0, y: 100.0 }
         );
+    }
+    #[test]
+    fn drag_target_crosses_the_boundary_in_desktop_coordinates() {
+        let monitors = [
+            display("external", false, -2000.0, 2.0),
+            display("primary", true, 0.0, 1.0),
+        ];
+        assert_eq!(
+            at_cursor(&monitors, Point { x: -1.0, y: 10.0 }).unwrap().id,
+            "external"
+        );
+        assert_eq!(
+            at_cursor(&monitors, Point { x: 0.0, y: 10.0 }).unwrap().id,
+            "primary"
+        );
+        assert!(at_cursor(
+            &monitors,
+            Point {
+                x: -1001.0,
+                y: 10.0
+            }
+        )
+        .is_none());
     }
 }
