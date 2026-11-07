@@ -1,0 +1,98 @@
+{
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "animations": {
+    "celebrate": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-1",
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "click": {
+      "fps": 12,
+      "frames": [
+        4,
+        5
+      ],
+      "loop": false,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "idle": {
+      "fps": 2,
+      "frames": [
+        0,
+        1
+      ],
+      "loop": true,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "jump": {
+      "fps": 12,
+      "frames": [
+        6,
+        7,
+        8,
+        9
+      ],
+      "loop": false,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "typing": {
+      "fps": 12,
+      "frames": [
+        2,
+        3
+      ],
+      "loop": true,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "typingFast": {
+      "fps": 24,
+      "frames": [
+        14,
+        15
+      ],
+      "loop": true,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "walk": {
+      "fps": 8,
+      "frames": [
+        10,
+        11,
+        12,
+        13
+      ],
+      "loop": true,
+      "useSourceTiming": true,
+      "regions": []
+    }
+  },
+  "defaultAnimation": "idle",
+  "id": "sample-cat",
+  "image": "sprite.png",
+  "license": "LICENSE.txt",
+  "name": "Sample Cat",
+  "resources": {
+    "resource-1": {
+      "image": "resources/847fd66e87555d68f1ffe08f914e57015333acf3b8fc39b8da6fd15a0056cd82.gif"
+    }
+  },
+  "schemaVersion": 1,
+  "sheet": {
+    "frameCount": 16,
+    "frameHeight": 256,
+    "frameWidth": 256,
+    "height": 1024,
+    "width": 1024
+  }
+}
