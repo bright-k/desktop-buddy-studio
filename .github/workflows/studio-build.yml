@@ -80,6 +80,8 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check native builder contracts
+        run: node scripts/cargo.mjs test --locked -p buddy-builder
       - name: Build independent app and integrity receipt
         run: node scripts/build-project.mjs
       - uses: actions/upload-artifact@v7
