@@ -1,0 +1,95 @@
+name: Studio multi-platform build
+run-name: Studio · ${{ inputs.job_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Studio request UUID
+        required: true
+        type: string
+      project_hash:
+        description: Expected immutable project content hash
+        required: true
+        type: string
+      engine_hash:
+        description: Expected frozen template manifest SHA-256
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: macos-arm64
+          - runner: windows-2025
+            target: windows-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUDDY_PROJECT_PATH: .studio/project
+      BUDDY_BUILD_TARGET: ${{ matrix.target }}
+      BUDDY_BUILD_DEVELOPMENT: '1'
+      BUDDY_EXPECTED_PROJECT_HASH: ${{ inputs.project_hash }}
+      BUDDY_STUDIO_JOB_ID: ${{ inputs.job_id }}
+      BUDDY_ENGINE_HASH: ${{ inputs.engine_hash }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.18.0'
+          package-manager-cache: false
+      - name: Verify frozen engine and Studio request
+        run: |
+          node --input-type=module <<'JS'
+          import * as fs from 'node:fs/promises';
+          import { createHash } from 'node:crypto';
+          const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+          const manifest = await fs.readFile('pack-manifest.json');
+          if (hash(manifest) !== process.env.BUDDY_ENGINE_HASH) throw new Error('Engine manifest hash mismatch');
+          for (const f of JSON.parse(manifest).files) {
+            if (!f.path || f.path.includes('\\') || f.path.split('/').some(p => !p || p === '.' || p === '..')) throw new Error('Invalid engine path');
+            let path = '';
+            for (const p of f.path.split('/')) {
+              path = path ? path + '/' + p : p;
+              if ((await fs.lstat(path)).isSymbolicLink()) throw new Error('Engine symlink denied');
+            }
+            const bytes = await fs.readFile(f.path);
+            if (bytes.length !== f.size || hash(bytes) !== f.sha256) throw new Error('Engine file hash mismatch: ' + f.path);
+          }
+          const request = JSON.parse(await fs.readFile('.studio/request.json'));
+          if (request.jobId !== process.env.BUDDY_STUDIO_JOB_ID || request.contentHash !== process.env.BUDDY_EXPECTED_PROJECT_HASH) throw new Error('Studio request mismatch');
+          JS
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build independent app and integrity receipt
+        run: node scripts/build-project.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: studio-${{ inputs.job_id }}-${{ matrix.target }}-a${{ github.run_attempt }}
+          path: |
+            artifacts/project-${{ matrix.target }}.tar.gz
+            artifacts/receipt-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+# Hosted Windows Server builds development packages. Interactive permissions,
+# public signing/notarization and external-device installation remain separate QA.
