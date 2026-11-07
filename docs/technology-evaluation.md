@@ -61,13 +61,14 @@ Electron도 요구사항을 구현할 수 있다. 다만 이 프로젝트는 이
 
 Tauri 저장소에는 macOS 투명 창의 합성 부하를 보고한 [이슈 #15471](https://github.com/tauri-apps/tauri/issues/15471)이 있다. 단일 환경의 보고이며 모든 버전·기기에서 같은 결과라는 뜻은 아니다. 이 제품은 창 면적·유휴 재그리기·고주사율 환경을 실제 측정하고, 화면 전체를 덮는 투명 창을 기본 설계로 사용하지 않는다.
 
-## 6. 화면 기술과 입력 기술의 후속 결정
+## 6. v1 화면과 입력 기술 결정
 
-- **화면 제안**: TypeScript + Vite + Canvas 2D. 최초 PNG 시트 애니메이션에는 충분한 기능만 구현한다.
+- **화면**: TypeScript + Vite + Canvas 2D 채택. 최초 PNG 시트 애니메이션에는 충분한 기능만 구현한다.
 - **PixiJS**: 레이어·이펙트·많은 스프라이트가 필요해지면 검토한다. 처음부터 필수 의존성으로 만들지 않는다.
-- **React/Svelte**: Studio UI 복잡도를 보고 결정한다. 캐릭터 프레임마다 UI 컴포넌트를 갱신하지 않는다.
+- **React/Svelte**: Player·최초 Studio 폼은 둘 다 도입하지 않는다. 복잡도가 커지면 후속 ADR로 검토하며 프레임마다 UI 컴포넌트를 갱신하지 않는다.
 - **Rust WASM UI**: 언어 통일 이점은 있으나 초기 빌드·디버깅 경로를 늘리므로 기본 제안에서는 제외한다.
-- **입력**: Windows Raw Input과 macOS listen-only event tap을 우선 검증한다. 패키지를 도입해도 어댑터 계약·수명·권한·OS 지원을 직접 확인한다.
+- **입력**: Windows Raw Input과 macOS listen-only session event tap을 Rust OS API 바인딩으로 직접 감싼다. 범용 입력 후킹 패키지는 기본 의존성으로 두지 않고 바인딩 버전은 M0 잠금 파일에 기록한다. 어댑터 수명·권한·OS 지원은 실기 검증한다.
+- **속도·키워드**: 전역 물리 이벤트에서 KPS와 Shift 포함 sequence를 계산한다. 한글 keyword는 두벌식 steps로 변환하고 실제 IME 확정 텍스트·다른 앱의 입력란을 읽지 않는다. [ADR 0003](decisions/0003-global-typing-reactions.md)과 [입력 계약](input-and-keywords.md)이 기준이다.
 
 입력 근거: [Microsoft Raw Input](https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input), [RIDEV_INPUTSINK](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-rawinputdevice), [Apple passive tap](https://developer.apple.com/documentation/coregraphics/cgeventtapoptions), [Apple 엔지니어의 입력 모니터링 설명](https://developer.apple.com/forums/thread/724608).
 

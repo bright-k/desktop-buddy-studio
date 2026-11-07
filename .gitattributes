@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.crate binary
+
+# Prepared notice and upstream-license bytes are SHA-256 verified.
+packaging/notices/** -text
+packaging/licenses/supplemental/** -text
+packaging/windows/LICENSE-*.txt -text

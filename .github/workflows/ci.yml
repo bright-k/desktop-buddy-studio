@@ -1,0 +1,71 @@
+name: Contract and native checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.18.0'
+          package-manager-cache: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+      - name: Install locked web dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify prepared dependency notices
+        run: node scripts/prepare-notices.mjs --check
+      - name: Check frontend, contracts, native tests and clippy
+        run: npm run check
+      - name: Check the shared preview Player
+        run: node scripts/cargo.mjs check --locked -p buddy-player --features preview
+      - name: Enforce generated contracts and Rust formatting
+        run: |
+          git diff --exit-code -- packages/contracts/generated
+          node scripts/cargo.mjs fmt --all --check
+
+      - name: Package the CLI, preview and verified template pack
+        run: npm run package:cli -- --development --output artifacts/ci-cli
+      - name: Preserve executable permissions in the CLI archive
+        run: tar -czf artifacts/cli-${{ matrix.runner }}.tar.gz -C artifacts/ci-cli .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: development-cli-${{ matrix.runner }}
+          path: artifacts/cli-${{ matrix.runner }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Compile two independent Windows installers
+        if: runner.os == 'Windows'
+        run: |
+          node scripts/cargo.mjs run --locked -p buddy-cli -- template-pack --source . --output artifacts/ci-template-pack
+          node scripts/cargo.mjs run --locked -p buddy-cli -- build examples/typing-cat --template-pack artifacts/ci-template-pack --development --output artifacts/ci-builds
+          node scripts/cargo.mjs run --locked -p buddy-cli -- build examples/click-mascot --template-pack artifacts/ci-template-pack --development --output artifacts/ci-builds
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: development-installers-windows-x64
+          path: artifacts/ci-builds/
+          if-no-files-found: error
+          retention-days: 14
+
+# These runners verify native compilation and deterministic tests. They do not
+# replace interactive Windows 11/macOS input, permission or external install QA.

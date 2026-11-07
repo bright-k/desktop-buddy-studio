@@ -1,0 +1,79 @@
+# 로컬 Studio 사용과 저장 구조
+
+기준일: 2026-11-07. 현재 구현 계약은 [ADR 0004](decisions/0004-project-studio-and-media.md)와 [리소스 형식](project-format.md)을 따른다.
+
+## 실행
+
+저장소에서 `npm install` 후 `npm run studio`를 실행한다. macOS에서는 루트의 `Studio.command`를 더블클릭해도 된다. Node 22 이상과 고정 Rust 도구체인이 필요하다. 실행 중 CLI 계약과 웹 화면을 빌드하고 검증된 Player 템플릿 팩을 준비한다. 브라우저에 자동으로 로컬 주소를 연다. `BUDDY_STUDIO_OPEN=0`은 자동 열기를 끈다. 기본 포트 4340이 사용 중이면 임의의 빈 포트로 열고 실제 주소를 출력한다. `BUDDY_STUDIO_PORT`, `BUDDY_STUDIO_DATA`로 포트와 데이터 폴더를 지정할 수 있다.
+
+한 데이터 폴더에는 한 Studio만 실행한다. 두 번째 실행은 이미 실행 중인 주소를 안내한다. 실행 주소의 fragment 토큰으로 세션을 만들고 토큰은 주소 표시줄에서 제거한다. 루프백 서비스이며 외부에 공개하지 않는다.
+
+## 제작 흐름
+
+1. 새 프로젝트에서 이름·패키지 ID·템플릿을 선택한다. 패키지 ID가 폴더·URL·앱 identifier가 된다. 내부 projectId는 별도 UUID이며 실행 파일 이름(slug)은 이름에서 제안한다.
+2. 리소스 탭에서 PNG/JPEG/GIF/정적 WebP/BMP를 가져온다. 파일당 16 MiB, 보관함 256 MiB다. 최종 참조 파일은 전체 64 MiB·디코딩 RGBA 64 MiB 제한을 별도로 적용한다.
+3. 애니메이션 탭에서 기본 스프라이트 또는 추가 리소스를 고른다. 스프라이트는 프레임 번호, 사각형 드래그 선택, X/Y/크기 지정, 격자 프레임 생성으로 표시 영역을 정한다. GIF는 전체 또는 선언한 프레임을 사용하며 원본 시간/FPS를 선택한다.
+4. 이벤트 탭에서 키 누름/뗌/유지, 입력 속도, 한글·영문 키워드, 마우스 누름/뗌, 휠, 커서 방향, 버디 드래그를 연결한다. 일회성은 loop=false, 속도·키 유지·드래그는 loop=true 동작을 사용한다. 키 유지에는 이동도 선택할 수 있다.
+5. 타이밍 탭에서 입력 중단·측정 창·평가 간격·안정 시간을 조절한다. 기본은 250/2000/50/100ms다. 일회성의 표시 시간·키를 떼면 중단 여부·쿨다운은 이벤트에서 정한다.
+6. 검증 또는 저장을 누른다. 오른쪽 미리보기는 저장된 버전의 공통 Canvas 렌더러를 사용한다. 이벤트 테스트는 Rust Runtime으로 합성 이벤트를 실행한다. 실제 다른 앱 입력을 읽는 브라우저 기능은 아니다.
+7. 앱 빌드를 누른다. 변경이 있으면 먼저 저장한다. 전역 대기열은 한 번에 한 빌드만 실행하며 다른 프로젝트 편집을 계속할 수 있다. 취소, 로그, 완료된 ZIP/설치 파일·보고서 다운로드를 제공한다.
+8. 복제는 새 앱 식별자를 만든다. 보관한 프로젝트는 보관 목록에서 복원할 수 있다. 저장 이력에서는 이전 구성·리소스를 함께 복원한다.
+
+현재 macOS 14에서는 개발용 .app·DMG와 편의 ZIP을 생성한다. 정식 macOS 패키지는 macOS 15 이상에서, Windows 설치 파일은 Windows 11 25H2 이상 x64 환경에서 만든다. 생성 앱 실행에는 Node·Rust·Studio가 필요 없다. 빌드 결과를 실행 중인 다른 버전 앱 위에 자동 설치하지 않는다.
+
+## 프로젝트별 보관
+
+```text
+.data/
+  .studio.lock                  # 실행 중인 서비스 소유권·접속 주소
+  .staging/                     # 검증·저장·시뮬레이션 임시 작업
+  projects/<package-id>/
+    project.json                # 이름·현재 revision·보관 여부
+    resources/
+      index.json                # 원래 이름·크기·업로드 메타데이터
+      <sha256>.<extension>      # 불변 원본 리소스
+    revisions/<revision-id>/
+      buddy.project.json
+      character/manifest.json
+      character/sprite.png
+      character/resources/...
+      character/LICENSE.txt
+      assets/app-icon.png
+    draft.json                 # 임시 편집 (저장된 구성과 분리)
+    drafts/                    # 저장·취소한 임시 편집 보관
+    previews/<revision-id>/     # 디코딩된 PNG 프레임 캐시
+    jobs/<job-id>.json          # 상태·제한된 로그·결과
+    builds/<slug-version-job>/  # 앱·ZIP/설치 파일·보고서·라이선스
+    exports/<revision>.tar.gz   # 저장한 정의·원본 리소스의 이동용 묶음
+```
+
+저장 중 검증이 실패하면 현재 revision을 교체하지 않는다. 저장 포인터는 atomic rename으로 바꾸며 과거 revision은 유지한다. 앱·프로젝트 ID는 기존 제품에서 수정하지 않고 복제를 사용한다. 리소스 제외는 논리 참조만 제거하며 원본은 보관함에 남는다. 서버 재시작 시 진행 중이던 로컬 빌드는 중단 상태로 표시한다. Node 프로세스 종료 시 활성 로컬 빌드를 취소하고 하위 작업이 종료될 때까지 기다린다. Actions 실행은 재시작 후 다시 연결한다.
+
+엔진 실행 파일과 신뢰하는 템플릿 팩은 `.buddy/studio-engines/<binary-hash>/`에 함께 고정한다. 개발 중 target/debug/buddy가 다시 컴파일돼도 실행 중인 Studio의 빌더와 팩이 섞이지 않는다.
+
+선택한 프로젝트·탭·애니메이션·이벤트는 URL의 project/tab/clip/event query로 유지한다. project는 com.example.typingcat 같은 패키지 ID다. 새로고침은 같은 선택을 열고 임시 편집이 있으면 복원한다. 임시 보관이 완료되지 않은 수정만 브라우저 이탈 안내를 표시한다. 없는 프로젝트·잘못된 query는 유효한 기본 선택으로 복구한다.
+
+## 패키지 ID와 임시 편집
+
+프로젝트 폴더는 `.data/projects/com.example.typingcat/`, 브라우저 주소는 `?project=com.example.typingcat&tab=resources`처럼 같은 키를 쓴다. 생성 화면에서 패키지 ID를 직접 지정하고 이후에는 고정한다. 내부 projectId는 별도 UUID로 유지한다. 기존 UUID 폴더는 시작할 때 패키지 ID로 이전하며 원래 메타데이터와 이전 journal을 보관한다. 충돌 시 덮어쓰지 않고, 리소스·revision·빌드 파일과 앱 식별자는 유지한다. 이전 UUID 주소·다운로드도 연결한다.
+
+편집은 draft.json에 자동 보관한다. 잘못된 값이 있어도 임시 편집을 보존하고 재진입 시 복원한다. 미리보기와 빌드에는 검증하여 저장한 구성만 사용한다. Ctrl/Cmd+S로 저장하며 상단 도구는 스크롤해도 남는다. 브라우저의 뒤로·앞으로 가기와 새로고침은 프로젝트, 탭, 애니메이션과 이벤트 선택을 복원한다. 리소스의 사용 동작과 애니메이션의 연결 이벤트를 클릭해 편집 화면으로 이동할 수 있다. 로컬 서비스 연결이 끊기면 현재 화면을 유지하고 다시 연결 또는 편집 JSON 저장을 제공한다. 이전 임시 편집은 drafts/에 보관한다. [UX 검토 기록](studio-ux-review.md)에 개선과 확인 범위를 정리했다.
+
+## macOS·Windows 빌드
+
+한 프로젝트의 build.targets는 두 플랫폼을 지원한다. 현재 지원 아키텍처는 macOS arm64와 Windows x64이며 Intel Mac·Windows arm64는 포함하지 않는다. 빌드 화면에서 두 플랫폼과 현재 호스트의 빌드 가능 상태를 함께 보여준다. 로컬 빌드 버튼은 현재 OS의 패키지만 만든다. 현재 빌더는 다른 OS로의 교차 컴파일을 허용하지 않는다.
+
+빌드 탭의 ‘macOS·Windows를 모두 빌드하려면’에서 ‘저장한 프로젝트 내보내기’를 누르면 정의·참조 원본·아이콘·라이선스가 포함된 tar.gz를 내려받는다. 내부 앱 ID와 content hash는 유지된다. 저장 전 변경은 먼저 검증·저장하며 임시 편집·이전 빌드·관련 없는 파일은 포함하지 않는다. 이동용 묶음 자체는 실행 앱이 아니다.
+
+내보낸 묶음을 같은 엔진 버전의 소스 저장소 안 `projects/`에 풀고 의존성을 준비한 뒤 다음을 실행한다.
+
+```sh
+npm ci --ignore-scripts --no-audit --no-fund
+node scripts/build-project.mjs projects/com.example.typingcat --development
+```
+
+Mac에서 실행하면 macOS용, Windows x64에서 실행하면 Windows용 결과가 `artifacts/project-builds/<target>/`에 생긴다. 제작 도구체인은 [빌드 문서](build-and-distribution.md)를 따른다. 지원 OS에서 개발 플래그를 빼면 정식 지원 기준을 검사한다. 공개 배포용 인증서·공증 설정은 별도다.
+
+두 결과물을 한 번에 만들려면 내보낸 프로젝트를 저장소에 추가하고 `.github/workflows/build-project.yml`의 **Build project for macOS and Windows**를 수동 실행한다. `project_path`에 `projects/com.example.typingcat`을 지정한다. 같은 커밋의 같은 정의를 macos-15 arm64·windows-2025 x64 runner가 각각 빌드하고, `project-macos-arm64`·`project-windows-x64` 아티팩트를 보관한다. 각 묶음의 source.json·build-report.json에서 identifier·projectHash를 비교할 수 있다.
+
+이 workflow는 개발용 패키지다. Windows hosted runner는 Windows Server이므로 지원 기준인 Windows 11의 대화형 실기 검증을 대신하지 않는다. 수동 workflow 외에 Studio에서 저장소 연결·업로드·실행·취소·결과 가져오기를 수행하는 `.github/workflows/studio-build.yml` 경로도 제공한다. [Actions 연동 안내](studio-actions.md)를 따른다.

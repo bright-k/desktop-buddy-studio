@@ -17,11 +17,11 @@
 5. Windows는 공식 서명 없는 배포를 기본으로 하고, macOS는 ad-hoc 서명을 기본으로 설계한다. 공식 인증서·공증 작업을 빌드의 필수 단계로 만들지 않는다.
 6. Windows 앱은 Windows에서, macOS 앱은 macOS에서 빌드하는 경로를 우선 제공한다.
 
-## 상세 설계 제안
+## 상세 설계 결정
 
-WebView 화면은 TypeScript + Vite + Canvas 2D로 시작한다. React·Svelte·PixiJS·Rust WASM UI의 도입은 별도 결정이다. 앱 제작자는 Rust나 TypeScript를 수정하지 않고 프로젝트 데이터만 작성한다.
+WebView 화면은 TypeScript + Vite + Canvas 2D로 시작한다. 최초에는 별도 UI 프레임워크를 넣지 않는다. React·Svelte·PixiJS·Rust WASM UI 추가는 후속 ADR로 결정한다. 앱 제작자는 Rust나 TypeScript를 수정하지 않고 프로젝트 데이터를 작성하되 로컬 빌드 도구체인은 준비한다. 구체적인 v1 계약은 [ADR 0002](0002-runtime-and-builder-contracts.md)에 기록한다.
 
-입력은 OS별 네이티브 어댑터를 Rust 인터페이스 뒤에 둔다. 전역 단축키 API를 일반 타이핑 감지로 대체하지 않는다. 입력 패키지의 최종 선택은 초기 기술 검증에서 확정한다.
+입력은 Windows Raw Input·macOS listen-only session event tap을 직접 감싼 Rust 어댑터로 구현한다. 전역 단축키 API를 일반 타이핑 감지로 대체하지 않는다. 다른 앱 작업 중 전역 속도·특정 키·한글 키 순서 반응은 [ADR 0003](0003-global-typing-reactions.md)을 따른다. 실제 API 바인딩·도구 버전과 제약은 M0 시험·잠금 파일에 기록한다.
 
 ## 결과와 비용
 

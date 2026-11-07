@@ -1,0 +1,55 @@
+name: Build project for macOS and Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_path:
+        description: Saved project directory in this commit (for example projects/com.example.typingcat)
+        required: true
+        default: examples/typing-cat
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: macos-arm64
+          - runner: windows-2025
+            target: windows-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUDDY_PROJECT_PATH: ${{ inputs.project_path }}
+      BUDDY_BUILD_TARGET: ${{ matrix.target }}
+      # Hosted Windows Server is not the supported interactive Windows 11 OS.
+      # Both outputs are explicitly marked development and require device QA.
+      BUDDY_BUILD_DEVELOPMENT: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.18.0'
+          package-manager-cache: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the same project on the native host
+        run: node scripts/build-project.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: project-${{ matrix.target }}
+          path: artifacts/project-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
