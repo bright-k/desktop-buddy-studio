@@ -86,19 +86,21 @@ export class BuildQueue {
     return job;
   }
   async cancel(projectId, id) {
-    const job =
-      this.active?.job.id === id && this.active.job.projectId === projectId
-        ? this.active.job
-        : this.queue.find((j) => j.id === id && j.projectId === projectId);
-    if (!job) throw new StudioError("실행 중이거나 대기 중인 빌드가 없습니다.");
-    if (job.status === "queued") {
-      this.queue = this.queue.filter((j) => j !== job);
-      job.status = "cancelled";
-      job.finishedAt = new Date().toISOString();
-    } else {
-      job.status = "cancelling";
-      this.active.controller.abort();
+    const active = this.active;
+    if (active?.job.id === id && active.job.projectId === projectId) {
+      if (active.job.status === "cancelling") return active.job;
+      if (active.job.status !== "running")
+        throw new StudioError("이미 종료된 빌드입니다.");
+      active.job.status = "cancelling";
+      active.controller.abort();
+      await active.flush();
+      return active.job;
     }
+    const job = this.queue.find((j) => j.id === id && j.projectId === projectId);
+    if (!job) throw new StudioError("실행 중이거나 대기 중인 빌드가 없습니다.");
+    this.queue = this.queue.filter((j) => j !== job);
+    job.status = "cancelled";
+    job.finishedAt = new Date().toISOString();
     await this.persist(job);
     return job;
   }
@@ -106,14 +108,15 @@ export class BuildQueue {
     if (this.active || !this.queue.length) return;
     const job = this.queue.shift(),
       controller = new AbortController();
-    this.active = { job, controller };
     let write = Promise.resolve(),
       lastFlush = 0;
     const flush = () => {
       const snapshot = structuredClone(job);
-      write = write.then(() => this.persist(snapshot));
+      // An earlier progress write can fail. Still attempt later states in order.
+      write = write.catch(() => {}).then(() => this.persist(snapshot));
       return write;
     };
+    this.active = { job, controller, flush };
     try {
       job.status = "running";
       job.startedAt = new Date().toISOString();
@@ -207,7 +210,7 @@ export class BuildQueue {
     }
   }
   async close() {
-    if (this.active)
+    if (this.active?.job.status === "running")
       await this.cancel(this.active.job.projectId, this.active.job.id);
     for (const job of [...this.queue]) await this.cancel(job.projectId, job.id);
     while (this.active) await new Promise((resolve) => setTimeout(resolve, 50));

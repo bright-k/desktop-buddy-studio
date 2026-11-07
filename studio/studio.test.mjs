@@ -162,7 +162,8 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   ).json();
   assert.equal(queued.revision, d.meta.revision);
   // Invalid factory path deliberately fails before launching an app build.
-  for (let i = 0; i < 50; i++) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
     const jobs = await studio.jobs.list(d.meta.id);
     if (jobs[0].status === "failed") {
       assert.match(jobs[0].error, /unused|manifest|No such file/);

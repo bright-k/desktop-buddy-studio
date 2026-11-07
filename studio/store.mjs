@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from "node:crypto";
-import * as fs from "node:fs/promises";
+import fs from "node:fs/promises";
 import { join, resolve, relative, sep, dirname, extname } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { run } from "./cli.mjs";
 export class StudioError extends Error {
   constructor(message, status = 400) {
@@ -56,7 +57,18 @@ export async function atomicJson(path, value) {
     await fs.writeFile(temp, JSON.stringify(value, null, 2) + "\n", {
       flag: "wx",
     });
-    await fs.rename(temp, path);
+    // A reader can temporarily prevent replacement on Windows. Leave the
+    // previous JSON in place while waiting for the file to become available.
+    for (let wait = 10; ; wait *= 2) {
+      try {
+        await fs.rename(temp, path);
+        break;
+      } catch (error) {
+        if (wait > 320 || !["EPERM", "EBUSY", "EACCES"].includes(error.code))
+          throw error;
+        await delay(wait);
+      }
+    }
   } finally {
     await fs.rm(temp, { force: true });
   }

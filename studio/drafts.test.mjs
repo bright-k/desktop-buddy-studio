@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as fs from "node:fs/promises";
+import fs from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { ProjectStore } from "./store.mjs";
+import { atomicJson, ProjectStore } from "./store.mjs";
 import { BuildQueue } from "./jobs.mjs";
 const cli = resolve("target/debug/buddy");
 async function fixture(t) {
@@ -77,6 +77,48 @@ test("double build clicks reuse the same queued revision while a different mode 
   assert.ok(
     (await queue.list(doc.meta.id)).every((j) => j.status === "cancelled"),
   );
+});
+
+test("JSON replacement retries a temporary sharing error without removing the current status", async (t) => {
+  const root = await fs.mkdtemp(join(tmpdir(), ".buddy-rename-test-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const path = join(root, "job.json");
+  await atomicJson(path, { status: "queued" });
+  const rename = fs.rename;
+  const errors = ["EPERM", "EBUSY", "EACCES"];
+  t.mock.method(fs, "rename", async (source, destination) => {
+    if (destination === path && errors.length) {
+      assert.equal(JSON.parse(await fs.readFile(path, "utf8")).status, "queued");
+      throw Object.assign(new Error("File is temporarily in use"), {
+        code: errors.shift(),
+      });
+    }
+    return rename(source, destination);
+  });
+  await atomicJson(path, { status: "failed" });
+  assert.equal(errors.length, 0);
+  assert.equal(JSON.parse(await fs.readFile(path, "utf8")).status, "failed");
+  assert.deepEqual(await fs.readdir(root), ["job.json"]);
+});
+
+test("a failed running-state write cannot prevent the final job status from being saved", async (t) => {
+  const store = await fixture(t);
+  const doc = await store.create({ name: "Job Recovery" });
+  const queue = new BuildQueue(store, { development: true });
+  const pump = queue.pump.bind(queue);
+  queue.pump = async () => {};
+  const persist = queue.persist.bind(queue);
+  t.mock.method(queue, "persist", async (job) => {
+    if (job.status === "running") throw new Error("Running status write failed");
+    await persist(job);
+  });
+  const job = await queue.enqueue(doc.meta.id, doc.meta.revision);
+  await pump();
+  const [persisted] = await queue.list(doc.meta.id);
+  assert.equal(persisted.id, job.id);
+  assert.equal(persisted.status, "failed");
+  assert.equal(persisted.error, "Running status write failed");
+  assert.ok(persisted.finishedAt);
 });
 
 test("restoring an earlier revision protects a newer draft and archives the confirmed draft", async (t) => {
