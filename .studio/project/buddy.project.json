@@ -1,0 +1,139 @@
+{
+  "bindings": [
+    {
+      "effect": {
+        "animation": "typing",
+        "type": "sustainAnimation"
+      },
+      "id": "typing-slow",
+      "trigger": {
+        "maxKps": 3,
+        "minKps": 0.5,
+        "type": "typingRate"
+      }
+    },
+    {
+      "effect": {
+        "animation": "typingFast",
+        "type": "sustainAnimation"
+      },
+      "id": "typing-fast",
+      "trigger": {
+        "minKps": 3,
+        "type": "typingRate"
+      }
+    },
+    {
+      "effect": {
+        "animation": "jump",
+        "cooldownMs": 120,
+        "priority": 80,
+        "retrigger": "restart",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "id": "jump",
+      "trigger": {
+        "code": "Space",
+        "repeat": false,
+        "type": "keyDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "click",
+        "cooldownMs": 100,
+        "priority": 60,
+        "retrigger": "restart",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "id": "click",
+      "trigger": {
+        "button": "primary",
+        "type": "mouseDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "celebrate",
+        "cooldownMs": 2000,
+        "priority": 95,
+        "retrigger": "restart",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "id": "secret-cat",
+      "trigger": {
+        "keyword": "고양이",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 5000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "walk",
+        "speedDipPerSecond": 120,
+        "type": "move",
+        "x": 1,
+        "y": 0
+      },
+      "id": "right",
+      "trigger": {
+        "code": "ArrowRight",
+        "type": "whileKeyDown"
+      }
+    },
+    {
+      "id": "event-1",
+      "trigger": {
+        "type": "drag"
+      },
+      "effect": {
+        "type": "sustainAnimation",
+        "animation": "walk"
+      }
+    }
+  ],
+  "build": {
+    "signing": {
+      "macos": "ad-hoc",
+      "windows": "none"
+    },
+    "targets": [
+      "windows-x64",
+      "macos-arm64"
+    ]
+  },
+  "character": "character/manifest.json",
+  "defaults": {
+    "alwaysOnTop": true,
+    "input": {
+      "keyboard": true,
+      "mouse": true
+    },
+    "movementEnabled": false,
+    "position": {
+      "anchor": "bottomRight",
+      "marginDip": 24,
+      "monitor": "primary"
+    },
+    "scale": 1,
+    "timing": {
+      "idleTimeoutMs": 180,
+      "rateEvaluationMs": 50,
+      "rateStabilityMs": 100,
+      "rateWindowMs": 2000
+    }
+  },
+  "product": {
+    "icon": "assets/app-icon.png",
+    "identifier": "com.example.typingcat",
+    "name": "Typing Cat Lab",
+    "slug": "typing-cat-lab",
+    "version": "0.1.0"
+  },
+  "projectId": "d75ac5fa-0860-4963-b8ba-960b6c28f0bd",
+  "schemaVersion": 1
+}
