@@ -51,7 +51,7 @@ function harness(t, options = {}) {
   const canvas = { width: 0, height: 0, style: {}, getContext: () => context };
   const character = structuredClone(original);
   character.animations.idle = { frames: [0], fps: 30, loop: true };
-  const renderer = new CharacterRenderer(canvas, character, options.images ?? 'test.png', ack => acknowledgements.push(ack), options.plan);
+  const renderer = new CharacterRenderer(canvas, character, options.images ?? 'test.png', ack => acknowledgements.push(ack), options.plan, options.drawFirstFrameImmediately);
   renderer.resize(256, 256);
   const state = (actionInstanceId, epoch = 1) => ({ epoch, actionInstanceId, animation: 'idle', animationElapsedMs: 0, facingLeft: false });
   return { renderer, state, images, context, acknowledgements, canvas, drawCalls,
@@ -90,6 +90,20 @@ test('superseded states waiting for the image never receive a fictitious ACK', t
   assert.equal(h.acknowledgements.length, 1);
   assert.equal(h.acknowledgements[0].seq, 11);
   assert.equal(h.acknowledgements[0].actionInstanceId, 2);
+});
+
+test('the first overlay frame can draw before the native window enables animation frames', t => {
+  const h = harness(t, { drawFirstFrameImmediately: true });
+  h.renderer.update(h.state(1), 10);
+  h.renderer.update(h.state(2), 11);
+  assert.equal(h.acknowledgements.length, 0);
+  assert.equal(h.scheduled, 0);
+  h.images[0].onload();
+  assert.deepEqual(h.acknowledgements.map(ack => [ack.seq, ack.outcome]), [[11, 'drawn']]);
+  h.renderer.update(h.state(3), 12);
+  assert.equal(h.draws, 1);
+  h.step(34);
+  assert.equal(h.draws, 2);
 });
 
 test('hidden states do not draw or acknowledge, and resuming uses the latest state', t => {

@@ -31,6 +31,7 @@ export class CharacterRenderer {
     imageUrls: string | Record<string, string>,
     private onFrame: (ack: FrameAck) => void,
     plan?: RenderPlan,
+    private drawFirstFrameImmediately = false,
   ) {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Canvas 2D를 사용할 수 없습니다.");
@@ -123,7 +124,12 @@ export class CharacterRenderer {
     this.images.clear();
   }
   private schedule(delay = 0) {
-    if (!this.visible || this.frameRequest || this.frameTimer) return;
+    if (!this.visible || !this.state || this.frameRequest || this.frameTimer) return;
+    // A hidden native window may not receive animation frame callbacks yet.
+    if (this.drawFirstFrameImmediately) {
+      this.paint(performance.now());
+      return;
+    }
     if (delay > 0)
       this.frameTimer = window.setTimeout(() => {
         this.frameTimer = 0;
@@ -233,6 +239,7 @@ export class CharacterRenderer {
       if (this.acknowledgedError) return;
       this.acknowledgedError = true;
     }
+    this.drawFirstFrameImmediately = false;
     this.onFrame({
       seq: this.seq,
       epoch: this.state.epoch,

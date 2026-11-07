@@ -40,6 +40,7 @@ async function startOverlay() {
         });
     },
     bootstrap.renderPlan,
+    true,
   );
   let width = bootstrap.width,
     height = bootstrap.height;
