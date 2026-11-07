@@ -1,0 +1,5 @@
+{
+  "identifier": "settings",
+  "windows": ["settings"],
+  "permissions": ["allow-get-runtime-status", "allow-request-input-access", "allow-apply-user-preferences", "allow-set-runtime-mode", "allow-reset-user-preferences", "allow-reset-performance-session", "allow-export-runtime-diagnostics"]
+}
