@@ -16,7 +16,7 @@ export async function startSettings(host: SettingsHost) {
     <section><h2>위치</h2><label class="monitor-field">디스플레이 <select id="monitor" required></select></label><div class="coordinates"><label>X <input id="position-x" type="number" required min="0" max="1000000" step="1"></label><label>Y <input id="position-y" type="number" required min="0" max="1000000" step="1"></label></div><p class="hint">선택한 화면 왼쪽 위가 (0, 0)입니다. 버디를 직접 드래그하면 위치가 바로 저장되며, 이 창의 다른 편집 내용은 유지됩니다.</p></section>
     <section><h2>반응 타이밍</h2><div class="coordinates"><label>입력 중단 (ms)<input id="idle-timeout" type="number" required min="50" max="5000" step="1"></label><label>속도 안정 (ms)<input id="rate-stability" type="number" required min="0" max="2000" step="1"></label></div><p class="hint">입력 중단: 마지막 일반 키 입력 후 대기로 돌아갈 때까지의 시간입니다. 일회성 애니메이션 길이는 Studio 이벤트에서 조절합니다.</p><details><summary>속도 측정 설정</summary><div class="coordinates"><label>측정 구간 (ms)<input id="rate-window" type="number" required min="100" max="10000" step="1"></label><label>평가 간격 (ms)<input id="rate-evaluation" type="number" required min="10" max="250" step="1"></label></div></details></section>
     </fieldset></form>
-    <section><h2>적용된 입력 상태</h2><p id="status-keyboard"></p><p id="status-mouse"></p><button id="permission" type="button">권한 요청 · 다시 확인</button><p class="hint">설정 창을 닫으면 입력 감지를 재개합니다. 한글 키워드는 현재 한·영 모드와 관계없이 두벌식 물리 키 순서로 판정합니다.</p></section>
+    <section><h2>적용된 입력 상태</h2><p id="status-keyboard"></p><p id="status-mouse"></p><div class="settings-button-row"><button id="input-settings" type="button" hidden>입력 모니터링 설정 열기</button><button id="permission" type="button">입력 상태 다시 확인</button></div><p class="hint">설정 창을 닫으면 입력 감지를 재개합니다. 한글 키워드는 현재 한·영 모드와 관계없이 두벌식 물리 키 순서로 판정합니다.</p></section>
     <section><details><summary>초기화 · 성능 진단</summary><p class="hint">초기화 전에 변경사항을 확인합니다. 전체 초기화는 입력 감지도 끕니다.</p><div class="settings-button-row"><button id="reset-position">위치 초기화</button><button id="reset-all" class="danger">전체 초기화 · 입력 끄기</button></div><h2 class="diagnostic-heading">반응 성능 진단</h2><p class="hint">계측 초기화 후 설정 창을 닫고 시험하세요. 화면 발광 지연이나 성능 통과 판정 수치는 아닙니다.</p><pre id="performance"></pre><div class="settings-button-row"><button id="perf-refresh">집계 확인</button><button id="perf-reset">계측 초기화</button><button id="perf-export">진단 JSON 저장</button></div></details></section>
     <footer class="settings-actions"><span id="save-state" role="status">불러오는 중</span><div class="settings-button-row"><button id="close-settings">닫기</button><button id="save">저장</button><button id="save-close" class="primary">저장하고 닫기</button></div><p id="message" role="status" aria-live="polite"></p></footer>
     <dialog id="close-dialog"><h2>저장하지 않은 변경이 있습니다.</h2><p>설정을 적용하고 닫거나, 변경을 버릴 수 있습니다.</p><p id="dialog-message" class="error-text" role="alert" hidden></p><div class="settings-button-row"><button id="keep-editing">계속 편집</button><button id="discard-close" class="danger">버리고 닫기</button><button id="confirm-save" class="primary">저장하고 닫기</button></div></dialog>`;
@@ -33,7 +33,7 @@ export async function startSettings(host: SettingsHost) {
     element("save-state").textContent = busy ? "처리 중…" : !status ? "불러오는 중" : changed ? "저장하지 않은 변경" : "모든 변경 저장됨";
     input("settings-fields").disabled = busy || !status;
     for (const id of ["save", "save-close"]) input(id).disabled = busy || !status || !!status.dragging || !changed;
-    for (const id of ["reset-position", "reset-all", "permission", "perf-refresh", "perf-reset", "perf-export"]) input(id).disabled = busy || !status || !!status.dragging;
+    for (const id of ["reset-position", "reset-all", "input-settings", "permission", "perf-refresh", "perf-reset", "perf-export"]) input(id).disabled = busy || !status || !!status.dragging;
     input("close-settings").disabled = busy;
     element("scale-value").textContent = `${input("scale").value}%`;
   };
@@ -68,8 +68,7 @@ export async function startSettings(host: SettingsHost) {
     element("notice").textContent = next.notice ?? ""; element("notice").hidden = !next.notice;
     element("status-keyboard").textContent = `키보드: ${describe(next.keyboard, next.input.keyboard)}`;
     element("status-mouse").textContent = `마우스: ${describe(next.mouse, next.input.mouse)}`;
-    const needsPermission = [next.input.keyboard, next.input.mouse].some((s) => ["needsRequest", "denied"].includes(s.permission));
-    element("permission").textContent = needsPermission ? "입력 권한 요청 · 다시 확인" : "입력 상태 다시 확인";
+    element("input-settings").hidden = next.input.keyboard.permission === "notRequired";
     update();
   }
   async function close() {
@@ -119,7 +118,12 @@ export async function startSettings(host: SettingsHost) {
       if (!confirm(all ? "전체 설정을 초기화하고 입력 감지를 끌까요? 저장하지 않은 변경도 버립니다." : "위치를 초기화할까요? 저장하지 않은 변경이 있으면 마지막 저장 상태로 돌아갑니다.")) return;
       void action(async () => { await host.invoke("reset_user_preferences", { all }); await refresh(true); say(all ? "전체 설정을 초기화했습니다. 입력 감지는 꺼져 있습니다." : "위치를 초기화했습니다."); });
     };
-  element("permission").onclick = () => void action(async () => { await host.invoke("request_input_access"); await refresh(true, false); say("적용된 권한 상태를 확인했습니다."); });
+  element("input-settings").onclick = () => void action(async () => {
+    await host.invoke("request_input_access");
+    await refresh(true, false);
+    say("시스템 설정에서 버디를 허용하세요. 목록에 없으면 + 버튼으로 앱을 추가할 수 있습니다.");
+  });
+  element("permission").onclick = () => void action(async () => { await refresh(true, false); say("적용된 권한 상태를 확인했습니다."); });
   const showPerformance = async () => { const next = await host.invoke<RuntimeStatus>("get_runtime_status"); element("performance").textContent = JSON.stringify(next.performance, null, 2); };
   element("perf-refresh").onclick = () => void action(showPerformance);
   element("perf-reset").onclick = () => void action(async () => { await host.invoke("reset_performance_session"); await showPerformance(); say("계측을 초기화했습니다. 이 창을 닫고 시험하세요."); });

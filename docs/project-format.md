@@ -132,7 +132,7 @@ defaults의 부분 객체도 필드별로 기본값을 채운다. scale은 0.25~
 }
 ```
 
-프레임은 왼쪽 위부터 행 우선, 0부터 시작한다. 각 프레임 크기와 anchor를 동일하게 유지해 동작 전환 시 캐릭터가 튀지 않도록 한다. `idle`은 필수이며 defaultAnimation은 문자열 `idle`로 고정한다. idle.loop는 true다. 나머지 이름은 프로젝트 bindings가 참조할 때만 필수다. FPS는 정수 1~30, anchor는 각 축 0~1이다. 애니메이션 이름은 1~64자 영문·숫자·하이픈·밑줄, 애니메이션은 최대 128개, frames는 비어 있지 않은 최대 256개 정수 배열이다. 프레임 반복 참조는 허용한다.
+프레임은 왼쪽 위부터 행 우선, 0부터 시작한다. 각 프레임 크기와 anchor를 동일하게 유지해 동작 전환 시 캐릭터가 튀지 않도록 한다. `defaultAnimation`은 대기 상태에 사용할 기존 반복 애니메이션의 이름이다. FPS는 정수 1~30, anchor는 각 축 0~1이다. 애니메이션 이름은 1~64자 영문·숫자·하이픈·밑줄, 애니메이션은 최대 128개, frames는 비어 있지 않은 최대 256개 정수 배열이다. 프레임 반복 참조는 허용한다.
 
 manifest의 이미지·라이선스 경로는 manifest가 있는 디렉토리 기준이다. 프로젝트의 다른 자산 경로 기준과 혼동하지 않는다. 이름만 적은 라이선스를 권리 증명으로 해석하지 않으며 제작자가 사용 권한을 확보한 리소스를 포함한다.
 
@@ -144,7 +144,6 @@ manifest의 이미지·라이선스 경로는 manifest가 있는 디렉토리 �
 | `whileKeyDown` | `move`, `sustainAnimation` | 해당 키의 held 상태에서 이동 또는 반복 동작. `*` 금지 |
 | `mouseDown`, `mouseUp` | `playAnimation` | `primary`, `secondary`, `middle` 버튼 |
 | `wheel` | `playAnimation` | `up`, `down`, `left`, `right` 방향. OS 델타는 정규화한다. |
-| `cursorMove` | `faceCursor` | 대기 중 커서가 있는 9구역에 따라 동작과 좌우 방향을 선택한다. |
 | `typingRate` | `sustainAnimation` | 설정한 측정 창(기본 2초)의 실제 키 입력 속도 구간에 머무르는 동안 반복 애니메이션 |
 | `keySequence` | `playAnimation` | keyword+layout으로 변환한 물리 키 순서 또는 명시적 steps의 매칭 |
 | `drag` | `sustainAnimation` | 버디를 직접 드래그하는 동안 반복 동작. 놓으면 즉시 해제 |
@@ -167,7 +166,7 @@ move의 x/y는 -1~1, 0 벡터는 금지하고 speedDipPerSecond는 1~1000이다.
 
 실제 이동이 있으면 활성 move 중 우선순위가 높은 동작을 후보로 삼는다. 기본 우선순위가 같은 이동은 애니메이션이 지정된 정의가 우선하고, 선택한 이동에 애니메이션이 없으면 기본 대기 모습을 사용한다. 일회성 반응 중에도 이동 계산은 계속한다. 편집·일시 정지에서는 모든 입력 동작을 중지하고, movementEnabled=false는 이동과 walk만 중지한다. 범용 effect 배열과 유지 조건의 독립 playAnimation은 v1에 넣지 않는다.
 
-faceCursor는 대기 상태에서 캐릭터 영역을 3×3으로 나눠 최신 커서가 있는 구역을 선택한다. 밖에 있는 커서는 가장 가까운 행과 열에 대응한다. directions의 키는 upLeft, up, upRight, left, center, right, downLeft, down, downRight다. 각 키에 반복 animation과 mirror를 따로 지정할 수 있다. 기본 대기 동작을 쓰고, 왼쪽 열을 반전하는 것이 기본값이다. 다른 이벤트는 binding의 followCursor를 켠 경우에만 좌우로 커서를 따라본다. 같은 cursorMove/faceCursor binding 중복은 검증 오류다.
+프로젝트의 선택 필드 `idle`에서 `cursorEnabled: true`이면, 대기 중 캐릭터 영역을 3×3으로 나눠 최신 커서가 있는 구역을 선택한다. 밖에 있는 커서는 가장 가까운 행과 열에 대응한다. `idle.directions`의 키는 upLeft, up, upRight, left, center, right, downLeft, down, downRight다. 각 키에 반복 `animation`과 `mirror`를 따로 지정할 수 있다. 비어 있으면 기본 대기 동작을 쓰며, 자동 방향은 왼쪽 열에서 반전한다. 다른 이벤트는 binding의 `followCursor`를 켠 경우에만 좌우로 커서를 따라본다. 이전 프로젝트의 `cursorMove`와 `faceCursor` 조합은 `idle`이 생략된 경우에 대기 방향 설정으로 적용된다.
 
 ### 이벤트 사운드
 

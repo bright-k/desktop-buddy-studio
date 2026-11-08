@@ -9,7 +9,7 @@ import { BuildQueue } from "./jobs.mjs";
 import { run } from "./cli.mjs";
 import { exportProject } from "./export.mjs";
 import { ActionsBuilds } from "./github.mjs";
-const appRoot = fileURLToPath(new URL("../apps/studio/dist", import.meta.url));
+const defaultAppRoot = fileURLToPath(new URL("../apps/studio/dist", import.meta.url));
 const mime = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -44,7 +44,8 @@ const safeEqual = (a, b) =>
   timingSafeEqual(Buffer.from(a), Buffer.from(b));
 export async function createStudio(options) {
   const token = options.token ?? randomBytes(32).toString("hex"),
-    store = new ProjectStore(options);
+    store = new ProjectStore(options),
+    appRoot = options.appRoot ?? defaultAppRoot;
   await store.init({ migrate: false });
   const jobs = new BuildQueue(store, options);
   const actions = new ActionsBuilds(store, jobs, options);
@@ -74,6 +75,7 @@ export async function createStudio(options) {
           409,
         );
         error.existingUrl = owner.url;
+        error.existingVersion = owner.version;
         throw error;
       }
       await fs.rm(lockPath, { force: true });
@@ -237,9 +239,12 @@ export async function createStudio(options) {
         if (action === "sequence" && req.method === "POST") {
           const b = JSON.parse(await body(req)),
             info = await store.inspectPath(await store.currentPath(id));
-          if (!Number.isInteger(b.index) || !info.sequences[b.index])
+          const index = typeof b.id === "string"
+            ? info.project.bindings.findIndex((binding) => binding.id === b.id)
+            : b.index;
+          if (!Number.isInteger(index) || !info.sequences[index])
             throw new StudioError("키워드 이벤트를 선택하세요.");
-          return json(info.sequences[b.index]);
+          return json(info.sequences[index]);
         }
         if (action === "simulate" && req.method === "POST") {
           const b = JSON.parse(await body(req));
@@ -335,7 +340,7 @@ export async function createStudio(options) {
   await actions.init();
   await workspaceLock.truncate(0);
   await workspaceLock.write(
-    JSON.stringify({ pid: process.pid, url: `${origin}/#${token}` }),
+    JSON.stringify({ pid: process.pid, url: `${origin}/#${token}`, version: options.version }),
     0,
     "utf8",
   );

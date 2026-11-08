@@ -88,6 +88,18 @@ export async function scopedFile(root, name) {
     throw new StudioError("프로젝트 밖의 파일은 열 수 없습니다.", 403);
   return path;
 }
+function editableProject(project) {
+  if (!Array.isArray(project.bindings)) return project;
+  const legacy = project.bindings.find(
+    (binding) => binding.trigger?.type === "cursorMove" && binding.effect?.type === "faceCursor",
+  );
+  if (!legacy) return project;
+  return {
+    ...project,
+    idle: project.idle ?? { cursorEnabled: true, directions: legacy.effect.directions ?? {} },
+    bindings: project.bindings.filter((binding) => binding !== legacy),
+  };
+}
 export class ProjectStore {
   constructor({ dataRoot, cli }) {
     this.root = resolve(dataRoot);
@@ -307,8 +319,13 @@ export class ProjectStore {
     );
     const storedDraft = await this.readDraft(id);
     const draft =
-      storedDraft?.baseRevision === meta.revision ? storedDraft : null;
-    return { ...info, meta, library, license, draft };
+      storedDraft?.baseRevision === meta.revision
+        ? { ...storedDraft, project: editableProject(storedDraft.project) }
+        : null;
+    const project = editableProject(info.project);
+    const sequences = project === info.project ? info.sequences
+      : info.sequences.filter((_, index) => project.bindings.includes(info.project.bindings[index]));
+    return { ...info, project, sequences, meta, library, license, draft };
   }
   async readDraft(id) {
     return JSON.parse(

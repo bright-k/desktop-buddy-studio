@@ -441,6 +441,9 @@ fn get_runtime_status(
     let c = host.controller.lock().unwrap().clone();
     let mut input = host.input_status.lock().unwrap().clone();
     if c.settings_open {
+        let permission = buddy_platform::permission_state();
+        input.keyboard.permission = permission;
+        input.mouse.permission = permission;
         input.stop("설정 창을 닫으면 감지를 시작합니다.");
     }
     // Snapshot each owner separately; do not retain temporary mutex guards
@@ -548,7 +551,9 @@ fn export_runtime_diagnostics(
 #[tauri::command]
 fn request_input_access(window: WebviewWindow, host: State<'_, Arc<Host>>) -> Result<(), String> {
     require(&window, "settings")?;
-    buddy_platform::request_input_permission();
+    if buddy_platform::permission_state() == PermissionState::NeedsRequest {
+        buddy_platform::request_input_permission();
+    }
     host.controller.lock().unwrap().revision += 1;
     let c = host.controller.lock().unwrap().clone();
     *host.input_status.lock().unwrap() = InputOptions {
@@ -561,6 +566,17 @@ fn request_input_access(window: WebviewWindow, host: State<'_, Arc<Host>>) -> Re
         Some("설정 창을 닫고 입력 감지 상태를 확인하세요.".into()),
     );
     host.wake.wake();
+    #[cfg(target_os = "macos")]
+    {
+        let opened = std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !opened {
+            return Err("시스템 설정에서 개인정보 보호 및 보안 → 입력 모니터링을 여세요.".into());
+        }
+        let _ = window.set_always_on_top(false);
+    }
     Ok(())
 }
 #[tauri::command]

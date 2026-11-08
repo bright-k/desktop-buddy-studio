@@ -117,6 +117,7 @@ impl Runtime {
             movement_enabled: defaults.movement_enabled,
         };
         let count = data.project.bindings.len();
+        let display = data.character.default_animation.clone();
         Self {
             data,
             controls,
@@ -147,7 +148,7 @@ impl Runtime {
             movement_facing_left: false,
             facing_left: false,
             continuous_binding: None,
-            display: "idle".into(),
+            display,
             display_source: AnimationSource::Idle,
             display_binding: None,
             animation_started_at: 0,
@@ -788,7 +789,7 @@ impl Runtime {
                 Effect::Move { animation, .. } => animation.as_deref(),
                 Effect::FaceCursor { .. } => None,
             })
-            .unwrap_or("idle");
+            .unwrap_or(&self.data.character.default_animation);
         let mut mirror = self.movement_facing_left;
         let cursor = if self.dragging {
             self.drag_cursor
@@ -802,16 +803,18 @@ impl Runtime {
                     mirror = cursor.x < self.position.x + self.size.x / 2.0;
                 }
             } else if source == AnimationSource::Idle {
-                if let Some(Effect::FaceCursor { directions }) = self
-                    .data
-                    .project
-                    .bindings
-                    .iter()
-                    .map(|binding| &binding.effect)
-                    .find(|effect| matches!(effect, Effect::FaceCursor { .. }))
-                {
+                let directions = match &self.data.project.idle {
+                    Some(idle) => idle.cursor_enabled.then_some(Some(&idle.directions)),
+                    None => self.data.project.bindings.iter().find_map(|binding| {
+                        match &binding.effect {
+                            Effect::FaceCursor { directions } => Some(directions.as_ref()),
+                            _ => None,
+                        }
+                    }),
+                };
+                if let Some(directions) = directions {
                     let direction = self.cursor_direction(cursor);
-                    let pose = directions.as_ref().and_then(|poses| poses.get(&direction));
+                    let pose = directions.and_then(|poses| poses.get(&direction));
                     animation = pose
                         .and_then(|pose| pose.animation.as_deref())
                         .unwrap_or(animation);

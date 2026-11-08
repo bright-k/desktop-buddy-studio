@@ -337,13 +337,23 @@ pub fn validate_parts(
         "$.anchor",
         "anchor must be 0..1",
     );
+    let is_looping = |name: &str| character.animations.get(name).is_some_and(|a| a.looping);
     check(
-        character.default_animation == "idle"
-            && character.animations.get("idle").is_some_and(|a| a.looping),
+        is_looping(&character.default_animation),
         char_file,
         "$.defaultAnimation",
-        "defaultAnimation must be idle and idle must loop",
+        "defaultAnimation must reference an existing looping animation",
     );
+    if let Some(idle) = &project.idle {
+        check(
+            idle.directions
+                .values()
+                .all(|pose| pose.animation.as_deref().is_none_or(is_looping)),
+            file,
+            "$.idle.directions",
+            "idle directions must reference existing looping animations",
+        );
+    }
     check(
         character.animations.len() <= 128,
         char_file,
@@ -575,9 +585,7 @@ pub fn validate_parts(
                 if let Some(directions) = directions {
                     for pose in directions.values() {
                         check(
-                            pose.animation.as_ref().is_none_or(|name| {
-                                character.animations.get(name).is_some_and(|a| a.looping)
-                            }),
+                            pose.animation.as_deref().is_none_or(is_looping),
                             file,
                             &format!("{path}.effect.directions"),
                             "idle directions must reference existing looping animations",

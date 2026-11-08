@@ -304,6 +304,50 @@
         }
       ]
     },
+    "IdleSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "cursorEnabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "directions": {
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "center": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "down": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "downLeft": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "downRight": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "left": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "right": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "up": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "upLeft": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "upRight": {
+              "$ref": "#/$defs/CursorPose"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "InitialPosition": {
       "additionalProperties": false,
       "properties": {
@@ -753,6 +797,16 @@
           "rateWindowMs": 2000
         }
       }
+    },
+    "idle": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IdleSettings"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "product": {
       "$ref": "#/$defs/Product"

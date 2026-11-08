@@ -12,6 +12,8 @@ pub struct Project {
     pub character: String,
     #[serde(default)]
     pub defaults: Defaults,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<IdleSettings>,
     #[serde(default)]
     pub bindings: Vec<Binding>,
     #[serde(default)]
@@ -321,6 +323,13 @@ pub struct CursorPose {
     pub mirror: Option<bool>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct IdleSettings {
+    pub cursor_enabled: bool,
+    pub directions: BTreeMap<CursorDirection, CursorPose>,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Retrigger {
@@ -472,6 +481,7 @@ pub fn typescript_declarations() -> String {
         Interruption::decl(),
         CursorDirection::decl(),
         CursorPose::decl(),
+        IdleSettings::decl(),
         Retrigger::decl(),
         MouseButton::decl(),
         WheelDirection::decl(),

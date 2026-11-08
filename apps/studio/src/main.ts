@@ -303,6 +303,8 @@ function validationHint(message: string) {
     return "입력 속도·키 유지·드래그 동작은 반복 재생 애니메이션에 연결해주세요.";
   if (message.includes("INVALID_ICON"))
     return "아이콘은 512~1024px 정사각형 PNG여야 합니다.";
+  if (message.includes("$.idle.directions") || message.includes("$.defaultAnimation"))
+    return "대기 상태에는 반복 재생 동작이나 이미지·GIF 리소스를 연결하세요.";
   if (message.includes("$.defaults.timing"))
     return "입력 중단·평가·안정 시간의 허용 범위를 확인해주세요. 평가 간격은 입력 중단 시간 이하여야 합니다.";
   if (message.includes("Another window") || message.includes("다른 창"))
@@ -324,7 +326,8 @@ function showValidationError(message: string) {
   } else if (animation) {
     tab = "animations";
     selectedClip = animation[1];
-  } else if (message.includes("$.defaults.timing")) tab = "timing";
+  } else if (message.includes("$.idle") || message.includes("$.defaultAnimation")) tab = "idle";
+  else if (message.includes("$.defaults.timing")) tab = "timing";
   else if (message.includes("$.product")) tab = "overview";
   layout();
   requestAnimationFrame(() =>
@@ -365,7 +368,7 @@ function stopPreview() {
 }
 function layout(push = false) {
   stopPreview();
-  if (doc && !doc.character.animations[selectedClip]) selectedClip = "idle";
+  if (doc && !doc.character.animations[selectedClip]) selectedClip = doc.character.defaultAnimation;
   app.innerHTML = `<aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">b<span>•</span></span><span>buddy<span class="brand-studio">STUDIO</span></span></a><div class="workspace-label">LOCAL WORKSPACE <span class="local-dot"></span></div><div class="sidebar-heading"><h2>프로젝트 <span>${projects.filter((p) => p.archived === archived).length}</span></h2><button class="icon-button" data-action="new" aria-label="프로젝트 만들기">＋</button></div><div class="project-list">${
     projects
       .filter((p) => p.archived === archived)
@@ -380,7 +383,6 @@ function layout(push = false) {
   setConnection(connectionIssue);
   if (projectLoading) setProjectLoading(true);
   if (doc) {
-    if (!doc.character.animations[selectedClip]) selectedClip = "idle";
     syncRoute(push);
     startPreview();
     if (doc.meta.archived) {
@@ -409,6 +411,7 @@ function editor() {
     ["overview", "프로젝트"],
     ["resources", "리소스"],
     ["animations", "애니메이션"],
+    ["idle", "대기 상태"],
     ["events", "이벤트"],
     ["timing", "타이밍"],
     ["builds", "빌드"],
@@ -419,7 +422,7 @@ function editor() {
     )
     .join(
       "",
-    )}</nav><div class="editor-content">${validationPanel()}${restoredDraft && dirty ? '<div class="draft-banner"><div><strong>임시 편집을 복원했습니다.</strong><p>저장하면 미리보기와 다음 빌드에 반영됩니다.</p></div><button class="small" data-action="discard-draft">편집 버리기</button></div>' : ""}${({ overview: overview, resources: resources, animations: animations, events: events, timing: timing, builds: builds }[tab] ?? overview)()}</div></main>${previewPanel()}</div><footer class="workspace-footer"><span><i class="local-dot"></i> 로컬 프로젝트 · ${esc(doc!.project.product.version)}</span><span title="${esc(doc!.contentHash)}">${esc(doc!.contentHash.slice(0, 12))} · ${date(doc!.meta.updatedAt)}</span></footer>`;
+    )}</nav><div class="editor-content">${validationPanel()}${restoredDraft && dirty ? '<div class="draft-banner"><div><strong>임시 편집을 복원했습니다.</strong><p>저장하면 미리보기와 다음 빌드에 반영됩니다.</p></div><button class="small" data-action="discard-draft">편집 버리기</button></div>' : ""}${({ overview: overview, resources: resources, animations: animations, idle: idleSettings, events: events, timing: timing, builds: builds }[tab] ?? overview)()}</div></main>${previewPanel()}</div><footer class="workspace-footer"><span><i class="local-dot"></i> 로컬 프로젝트 · ${esc(doc!.project.product.version)}</span><span title="${esc(doc!.contentHash)}">${esc(doc!.contentHash.slice(0, 12))} · ${date(doc!.meta.updatedAt)}</span></footer>`;
 }
 function title(kicker: string, name: string, description: string) {
   return `<div class="section-title"><span class="eyebrow">${kicker}</span><h2>${name}</h2><p>${description}</p></div>`;
@@ -436,9 +439,13 @@ function usesAnimation(effect: Effect, name: string) {
     ? Object.values(effect.directions ?? {}).some((pose) => pose.animation === name)
     : effect.animation === name;
 }
+function usedByIdle(name: string) {
+  return doc!.character.defaultAnimation === name
+    || Object.values(doc!.project.idle?.directions ?? {}).some((pose) => pose.animation === name);
+}
 function animationReferences(name: string) {
   const used = doc!.project.bindings.map((b, i) => ({ b, i })).filter(({ b }) => usesAnimation(b.effect, name));
-  return `<div class="usage-links"><span>연결 이벤트 ${used.length}</span>${used.map(({ b, i }) => `<button class="chip" data-action="reference-binding" data-id="${i}">${esc(b.id)} →</button>`).join("") || `<small>${name === "idle" ? "입력이 없을 때 기본으로 표시합니다." : "아직 연결된 이벤트가 없습니다."}</small>`}</div>`;
+  return `<div class="usage-links"><span>연결 이벤트 ${used.length}</span>${used.map(({ b, i }) => `<button class="chip" data-action="reference-binding" data-id="${i}">${esc(b.id)} →</button>`).join("") || "<small>아직 연결된 이벤트가 없습니다.</small>"}${usedByIdle(name) ? '<button class="chip" data-action="tab" data-id="idle">대기 상태 →</button>' : ""}</div>`;
 }
 const isAudio = (filename: string) => /\.(mp3|wav)$/i.test(filename);
 function soundName(id: string, file: string) {
@@ -483,7 +490,7 @@ function animations() {
   const isGif =
     !!a.resource &&
     doc!.character.resources[a.resource]?.image.toLowerCase().endsWith(".gif");
-  return `${title("ANIMATION CLIPS", "어떤 모습을 보여줄까요?", "한 장의 이미지, GIF 전체 또는 스프라이트의 특정 영역을 하나의 동작으로 정의합니다.")}<div class="subheading"><div class="clip-chips">${names.map((n) => `<button class="chip ${n === selectedClip ? "active" : ""}" data-action="clip" data-id="${esc(n)}">${esc(n)} <small>${doc!.character.animations[n].loop ? "↻" : "→"}</small></button>`).join("")}</div><button class="small" data-action="add-clip">＋ 동작</button></div><div class="card"><div class="card-heading"><h3>${esc(selectedClip)}</h3>${selectedClip !== "idle" ? '<button class="text-button danger" data-action="remove-clip">동작 삭제</button>' : '<span class="pill">기본 대기 동작</span>'}</div><label class="field"><span>표시할 리소스</span><select id="clip-resource">${option("sheet", "기본 PNG 스프라이트", a.resource ?? "sheet")}${Object.entries(
+  return `${title("ANIMATION CLIPS", "어떤 모습을 보여줄까요?", "한 장의 이미지, GIF 전체 또는 스프라이트의 특정 영역을 하나의 동작으로 정의합니다.")}<div class="subheading"><div class="clip-chips">${names.map((n) => `<button class="chip ${n === selectedClip ? "active" : ""}" data-action="clip" data-id="${esc(n)}">${esc(n)} <small>${doc!.character.animations[n].loop ? "↻" : "→"}</small></button>`).join("")}</div><button class="small" data-action="add-clip">＋ 동작</button></div><div class="card"><div class="card-heading"><h3>${esc(selectedClip)}</h3>${selectedClip !== doc!.character.defaultAnimation ? '<button class="text-button danger" data-action="remove-clip">동작 삭제</button>' : '<span class="pill">기본 대기 동작</span>'}</div><label class="field"><span>표시할 리소스</span><select id="clip-resource">${option("sheet", "기본 PNG 스프라이트", a.resource ?? "sheet")}${Object.entries(
     doc!.character.resources ?? {},
   )
     .map(([id, r]) =>
@@ -534,7 +541,6 @@ const triggerNames: Record<string, string> = {
   mouseDown: "마우스 누름",
   mouseUp: "마우스 뗌",
   wheel: "휠",
-  cursorMove: "대기 중 커서 방향",
   drag: "버디 드래그",
 };
 function events() {
@@ -542,20 +548,67 @@ function events() {
   if (selectedBinding >= bindings.length)
     selectedBinding = Math.max(0, bindings.length - 1);
   const b = bindings[selectedBinding];
-  return `${title("EVENT MAPPINGS", "입력에 반응을 연결하세요.", "다른 앱에서 작업하는 동안에도 입력을 감지합니다. 버디를 드래그하는 동안의 동작도 지정할 수 있습니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 위쪽이 같은 우선순위에서 먼저 적용됩니다.</span><div class="row-actions"><button class="small" data-action="idle-directions">대기 방향 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[b.trigger.type]} ${esc((b.trigger as any).code ?? (b.trigger as any).keyword ?? "")}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
+  return `${title("EVENT MAPPINGS", "입력에 반응을 연결하세요.", "다른 앱에서 작업하는 동안에도 입력을 감지합니다. 버디를 드래그하는 동안의 동작도 지정할 수 있습니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 위쪽이 같은 우선순위에서 먼저 적용됩니다.</span><div class="row-actions"><button class="small" data-action="tab" data-id="idle">대기 상태 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[b.trigger.type]} ${esc((b.trigger as any).code ?? (b.trigger as any).keyword ?? "")}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
 }
 const cursorDirections: [CursorDirection, string][] = [
   ["upLeft", "↖ 왼쪽 위"], ["up", "↑ 위"], ["upRight", "↗ 오른쪽 위"],
   ["left", "← 왼쪽"], ["center", "· 가운데"], ["right", "→ 오른쪽"],
   ["downLeft", "↙ 왼쪽 아래"], ["down", "↓ 아래"], ["downRight", "↘ 오른쪽 아래"],
 ];
-function cursorDirectionEditor(effect: Extract<Effect, { type: "faceCursor" }>) {
-  const loops = clips().filter((name) => name !== "idle" && doc!.character.animations[name].loop);
-  return `<p class="hint">버디 앱에서 마우스 감지를 켜면, 대기 중 커서가 있는 9개 구역에 맞춰 표시합니다. 기본 방향은 왼쪽 구역에서 좌우 반전합니다.</p><div class="cursor-directions">${cursorDirections.map(([direction, label]) => {
-    const pose = effect.directions?.[direction];
-    const mirror = pose?.mirror == null ? "" : String(pose.mirror);
-    return `<fieldset class="cursor-direction"><legend>${label}</legend><label class="field"><span>동작</span><select data-cursor-direction="${direction}" data-pose-field="animation">${option("", "기본 대기 동작", pose?.animation === "idle" ? "" : pose?.animation ?? "")}${loops.map((name) => option(name, name, pose?.animation ?? "")).join("")}</select></label><label class="field"><span>좌우 방향</span><select data-cursor-direction="${direction}" data-pose-field="mirror">${option("", "기본 방향", mirror)}${option("false", "원본", mirror)}${option("true", "좌우 반전", mirror)}</select></label><button class="small" data-action="test-cursor" data-id="${direction}" aria-label="${label} 미리보기">미리보기</button></fieldset>`;
-  }).join("")}</div>`;
+function idleAppearanceOptions(current: string | undefined, inherited = false) {
+  const resources = doc!.character.resources;
+  const imageName = (id: string) => {
+    const path = resources[id].image;
+    return doc!.library[path.slice(10)]?.originalName ?? path.split("/").at(-1) ?? id;
+  };
+  const selected = current ? `clip:${current}` : "";
+  const loops = clips().filter((name) => doc!.character.animations[name].loop);
+  return (inherited ? option("", "기본 대기 모습 사용", selected) : "")
+    + `<optgroup label="반복 애니메이션">${loops.map((name) => {
+      const resource = doc!.character.animations[name].resource;
+      const label = resource && resources[resource] ? `${name} · ${imageName(resource)}` : name;
+      return option(`clip:${name}`, label, selected);
+    }).join("")}</optgroup>`
+    + (Object.keys(resources).length ? `<optgroup label="이미지·GIF 바로 선택">${Object.keys(resources).map((id) =>
+      option(`resource:${id}`, imageName(id), selected),
+    ).join("")}</optgroup>` : "");
+}
+function selectIdleAppearance(value: string) {
+  if (value.startsWith("clip:")) return value.slice(5);
+  const resource = value.slice("resource:".length);
+  const animations = doc!.character.animations;
+  const reusable = Object.entries(animations).find(([, animation]) =>
+    animation.resource === resource && animation.loop && animation.fps === 12
+    && animation.frames.length === 0 && animation.regions.length === 0 && animation.useSourceTiming,
+  );
+  if (reusable) return reusable[0];
+  if (Object.keys(animations).length >= 128)
+    throw new Error("동작이 128개입니다. 기존 동작을 선택하거나 사용하지 않는 동작을 정리하세요.");
+  const prefix = `idle-${resource}`.slice(0, 58);
+  let name = prefix;
+  for (let index = 2; Object.hasOwn(animations, name); index++) name = `${prefix}-${index}`;
+  animations[name] = { resource, frames: [], regions: [], fps: 12, loop: true, useSourceTiming: true };
+  return name;
+}
+function idleSettings() {
+  const idle = doc!.project.idle;
+  const enabled = idle?.cursorEnabled ?? false;
+  return `${title("IDLE STATE", "대기 상태", "다른 동작이 재생되지 않을 때 표시할 기본 모습을 정하세요.")}<div class="card">
+    <h3>기본 대기 모습</h3>
+    <label class="field"><span>애니메이션 또는 리소스</span><select id="idle-appearance">${idleAppearanceOptions(doc!.character.defaultAnimation)}</select></label>
+    <p class="hint">이미지나 GIF를 바로 선택하면 전체 리소스를 사용하는 반복 동작이 만들어집니다.</p>
+    <button class="small" data-action="test-idle">기본 대기 미리보기</button></div>
+    <div class="card"><h3>커서 방향별 모습</h3>
+    <label class="toggle"><input type="checkbox" id="idle-cursor-enabled" ${enabled ? "checked" : ""}><span>커서 위치에 따라 모습 바꾸기</span></label>
+    <p class="hint">버디 앱에서 마우스 감지를 켜면 대기 중에만 적용합니다. 비워 둔 칸은 기본 대기 모습을 사용합니다.</p>
+    ${enabled ? `<div class="cursor-directions">${cursorDirections.map(([direction, label]) => {
+      const pose = idle?.directions?.[direction];
+      const mirror = pose?.mirror == null ? "" : String(pose.mirror);
+      return `<fieldset class="cursor-direction"><legend>${label}</legend>
+        <label class="field"><span>애니메이션 또는 리소스</span><select data-cursor-direction="${direction}" data-pose-field="animation">${idleAppearanceOptions(pose?.animation ?? undefined, true)}</select></label>
+        <label class="field"><span>좌우 방향</span><select data-cursor-direction="${direction}" data-pose-field="mirror">${option("", "자동 (왼쪽에서 반전)", mirror)}${option("false", "원본", mirror)}${option("true", "좌우 반전", mirror)}</select></label>
+        <button class="small" data-action="test-cursor" data-id="${direction}" aria-label="${label} 미리보기">미리보기</button></fieldset>`;
+    }).join("")}</div>` : ""}</div>`;
 }
 function soundSettings(binding: Binding) {
   const sounds = Object.entries(doc!.character.sounds);
@@ -566,7 +619,7 @@ function soundSettings(binding: Binding) {
 }
 function reactionSettings(binding: Binding, path: string) {
   const effect = binding.effect;
-  if (effect.type === "faceCursor") return cursorDirectionEditor(effect);
+  if (effect.type === "faceCursor") return "";
   const cursor = check("이 동작 중 커서 위치에 따라 좌우 반전", `${path}.followCursor`)
     + (binding.trigger.type === "drag" ? "" : '<p class="hint">커서를 따라보려면 버디 앱에서 마우스 감지를 켜세요.</p>');
   const sound = soundSettings(binding);
@@ -915,11 +968,8 @@ function changeTrigger(type: string) {
   if (["mouseDown", "mouseUp"].includes(type)) t.button = "primary";
   if (type === "wheel") t.direction = "up";
   b.trigger = t;
-  if (type === "cursorMove") delete b.sound;
   b.effect =
-    type === "cursorMove"
-      ? { type: "faceCursor" }
-      : ["typingRate", "whileKeyDown", "drag"].includes(type)
+    ["typingRate", "whileKeyDown", "drag"].includes(type)
         ? {
             type: "sustainAnimation",
             animation: doc!.character.animations[
@@ -1059,7 +1109,7 @@ async function testBinding(index: number) {
   )
     throw new Error("프로젝트 탭에서 키보드 감지를 먼저 켜주세요.");
   if (
-    ["mouseDown", "mouseUp", "wheel", "cursorMove"].includes(b.trigger.type) &&
+    ["mouseDown", "mouseUp", "wheel"].includes(b.trigger.type) &&
     !doc!.project.defaults.input.mouse
   )
     throw new Error("프로젝트 탭에서 마우스 감지를 먼저 켜주세요.");
@@ -1101,9 +1151,6 @@ async function testBinding(index: number) {
     case "wheel":
       events.push({ atMs: 100, event: t });
       break;
-    case "cursorMove":
-      events.push({ atMs: 100, event: { type: "cursorMove", x: 0, y: 0 } });
-      break;
     case "drag":
       events.push(
         { atMs: 100, event: { type: "dragStart" } },
@@ -1113,7 +1160,7 @@ async function testBinding(index: number) {
     case "typingRate":
       return testSpeed(t.minKps + 0.5);
     case "keySequence": {
-      const steps = await compileSequence(index);
+      const steps = await compileSequence(b.id);
       if (doc?.meta.id !== projectId || request !== simulationRequest) return;
       let at = 100;
       for (const step of steps) {
@@ -1139,9 +1186,9 @@ async function testBinding(index: number) {
 }
 // Keyword compilation is supplied by the Rust validator, never duplicated here.
 async function compileSequence(
-  index: number,
+  id: string,
 ): Promise<{ code: string; shift: boolean }[]> {
-  return projectApi("sequence", post({ index }));
+  return projectApi("sequence", post({ id }));
 }
 async function testSpeed(rate: number) {
   if (!doc!.project.defaults.input.keyboard)
@@ -1381,6 +1428,8 @@ async function performAction(name: string, id?: string) {
       break;
     }
     case "remove-clip":
+      if (usedByIdle(selectedClip))
+        throw new Error("이 동작을 사용하는 대기 상태를 먼저 수정하세요.");
       if (
         doc!.project.bindings.some(
           (b) => usesAnimation(b.effect, selectedClip),
@@ -1388,7 +1437,7 @@ async function performAction(name: string, id?: string) {
       )
         throw new Error("이 동작을 사용하는 이벤트를 먼저 수정하세요.");
       delete doc!.character.animations[selectedClip];
-      selectedClip = "idle";
+      selectedClip = doc!.character.defaultAnimation;
       markDirty();
       layout();
       break;
@@ -1484,23 +1533,13 @@ async function performAction(name: string, id?: string) {
       layout();
       break;
     }
-    case "idle-directions":
     case "add-binding": {
-      const idle = name === "idle-directions";
-      if (idle) {
-        const existing = doc!.project.bindings.findIndex((binding) => binding.trigger.type === "cursorMove");
-        if (existing >= 0) {
-          selectedBinding = existing;
-          layout(true);
-          break;
-        }
-      }
       let n = 1;
       while (doc!.project.bindings.some((b) => b.id === `event-${n}`)) n++;
       doc!.project.bindings.push({
         id: `event-${n}`,
-        trigger: idle ? { type: "cursorMove" } : { type: "keyDown", code: "Enter", repeat: false },
-        effect: idle ? { type: "faceCursor" } : {
+        trigger: { type: "keyDown", code: "Enter", repeat: false },
+        effect: {
           type: "playAnimation",
           animation: chooseDefaultAnimation(false),
           priority: 50,
@@ -1515,9 +1554,15 @@ async function performAction(name: string, id?: string) {
       layout();
       break;
     }
+    case "test-idle":
+      await ensureSaved();
+      await simulate([], 0);
+      break;
     case "test-cursor": {
       const index = cursorDirections.findIndex(([direction]) => direction === id);
       if (index < 0) return;
+      if (!doc!.project.defaults.input.mouse)
+        throw new Error("프로젝트 탭에서 마우스 감지를 먼저 켜주세요.");
       await ensureSaved();
       const positions = [120, 228, 330];
       await simulate([{ atMs: 100, event: { type: "cursorMove", x: positions[index % 3], y: positions[Math.floor(index / 3)] } }], 1500);
@@ -1746,16 +1791,34 @@ app.addEventListener("change", (event) => {
       markDirty();
     }
   }
-  if (input.dataset.cursorDirection) {
-    const effect = doc!.project.bindings[selectedBinding].effect;
-    if (effect.type !== "faceCursor") return;
-    const direction = input.dataset.cursorDirection as CursorDirection;
-    const directions = effect.directions ??= {};
-    const pose = directions[direction] ??= {};
-    if (input.dataset.poseField === "animation") pose.animation = input.value || null;
-    else pose.mirror = input.value === "" ? null : input.value === "true";
-    if (pose.animation == null && pose.mirror == null) delete directions[direction];
+  if (input.id === "idle-cursor-enabled") {
+    const idle = doc!.project.idle ??= { cursorEnabled: false, directions: {} };
+    idle.cursorEnabled = input.checked;
     markDirty();
+    layout();
+  }
+  if (input.id === "idle-appearance" || input.dataset.cursorDirection) {
+    try {
+      if (input.id === "idle-appearance") {
+        doc!.character.defaultAnimation = selectIdleAppearance(input.value);
+      } else {
+        const direction = input.dataset.cursorDirection as CursorDirection;
+        const directions = doc!.project.idle!.directions ??= {};
+        const pose = { ...directions[direction] };
+        if (input.dataset.poseField === "animation") {
+          pose.animation = input.value ? selectIdleAppearance(input.value) : null;
+        } else {
+          pose.mirror = input.value === "" ? null : input.value === "true";
+        }
+        if (pose.animation == null && pose.mirror == null) delete directions[direction];
+        else directions[direction] = pose;
+      }
+      markDirty();
+      layout();
+    } catch (error) {
+      layout();
+      toast((error as Error).message, true);
+    }
   }
   if (input.id === "trigger-type") changeTrigger(input.value);
   if (input.id === "held-effect") {

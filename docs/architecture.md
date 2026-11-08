@@ -168,7 +168,7 @@ Player overlay는 Windows 작업 표시줄·Alt-Tab 및 macOS Dock에 일반 앱
 | `subscribe_character_state` | overlay | 초기 전체 snapshot 이후 순서 있는 상태 수신 |
 | `reset_performance_session` / `export_runtime_diagnostics` | settings | 집계 초기화 / 앱 데이터 폴더의 고정 형식 JSON 저장. 임의 경로 인자 없음 |
 | `apply_user_preferences` | Player 설정 | 변경한 위치·배율·타이밍·감지 토글만 검증해 적용 |
-| `request_input_access` | Player 설정 | 사용자 동작으로 입력 권한 요청/재점검 |
+| `request_input_access` | Player 설정 | 사용자 동작으로 권한을 요청하고 macOS 입력 모니터링 설정을 연다 |
 | `reset_user_preferences` | Player 설정 | 위치만 초기화 또는 전체 설정 초기화 |
 | `begin_character_drag` | overlay | 이동 임계값을 넘은 포인터에 편집 세션 부여 |
 | `update_character_edit` / `finish_character_edit` / `cancel_character_edit` | overlay, 편집 세션 한정 | Host가 검증한 드래그·배율·편집 확정/취소 |

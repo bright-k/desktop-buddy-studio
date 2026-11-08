@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve, join } from "node:path";
-import { existsSync, readFileSync, mkdirSync, copyFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, copyFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { cargoExecutable, toolchainEnvironment } from "./toolchain.mjs";
 import { createStudio } from "../studio/server.mjs";
@@ -30,11 +30,18 @@ step(process.execPath, [
   "-p",
   "apps/studio/tsconfig.json",
 ]);
+const localCache = join(root, ".buddy");
+mkdirSync(localCache, { recursive: true });
+// A running Studio must keep serving the frontend built for its pinned CLI.
+const appRoot = mkdtempSync(join(localCache, "studio-web-"));
+process.once("exit", () => rmSync(appRoot, { recursive: true, force: true }));
 step(process.execPath, [
   "node_modules/vite/bin/vite.js",
   "build",
   "--config",
   "apps/studio/vite.config.ts",
+  "--outDir",
+  appRoot,
 ]);
 // Export may have changed contracts that are part of the trusted template.
 // Recompile before freezing the CLI so its embedded manifest matches them.
@@ -68,6 +75,8 @@ const suggestedRepository = remote.stdout?.trim().match(/github\.com[:/]([^/]+\/
 const options = {
   cli,
   templatePack,
+  appRoot,
+  version: createHash("sha256").update(hash).update(readFileSync(join(appRoot, "index.html"))).digest("hex"),
   dataRoot: resolve(process.env.BUDDY_STUDIO_DATA || join(root, ".data")),
   port: Number(process.env.BUDDY_STUDIO_PORT || 4340),
   development,
@@ -78,6 +87,10 @@ try {
   studio = await createStudio(options);
 } catch (error) {
   if (error.existingUrl) {
+    if (error.existingVersion !== options.version) {
+      console.error("이전 버전의 Studio가 실행 중입니다. 기존 Studio 터미널에서 Ctrl+C를 누른 뒤 Studio를 다시 실행하세요.");
+      process.exit(1);
+    }
     console.log(`이미 실행 중인 Studio: ${error.existingUrl}`);
     if (process.env.BUDDY_STUDIO_OPEN !== "0" && process.platform === "darwin")
       spawnSync("/usr/bin/open", [error.existingUrl]);

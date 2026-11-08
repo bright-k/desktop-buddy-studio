@@ -117,19 +117,26 @@ test("invalid definition cannot replace the saved revision, symlink file escape 
   await assert.rejects(scopedFile(dir, "../project.json"));
 });
 test("HTTP requires session authorization and same origin; actual engine simulation and keyword compiler are used", async (t) => {
-  const store = await fixture(t),
-    studio = await createStudio({
+  const store = await fixture(t);
+  const appRoot = join(store.root, "pinned-frontend");
+  await fs.mkdir(appRoot);
+  await fs.writeFile(join(appRoot, "index.html"), "<title>Pinned frontend</title>");
+  const studio = await createStudio({
       dataRoot: store.root,
       cli,
       port: 0,
-    templatePack: join(store.root, "missing-template"),
+      appRoot,
+      version: "fixture-engine-and-frontend",
+      templatePack: join(store.root, "missing-template"),
       development: true,
     });
   t.after(() => studio.close());
   await assert.rejects(
     createStudio({ dataRoot: store.root, cli, port: 0 }),
-    (error) => error.status === 409 && error.existingUrl === studio.url,
+    (error) => error.status === 409 && error.existingUrl === studio.url
+      && error.existingVersion === "fixture-engine-and-frontend",
   );
+  assert.match(await (await fetch(studio.origin)).text(), /Pinned frontend/);
   const request = (path, options = {}) =>
     fetch(studio.origin + path, {
       ...options,
@@ -177,7 +184,14 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   const sound = await audioUpload.json();
   assert.equal(sound.kind, "audio");
   d.character.sounds = { ping: { audio: `resources/${sound.name}` } };
-  d.project.bindings.find((b) => b.id === "jump").sound = { resource: "ping", volume: 0.7 };
+  d.character.resources = { blink: { image: `resources/${gif.name}` } };
+  d.character.animations["idle-blink"] = { resource: "blink", loop: true };
+  d.character.defaultAnimation = "typing";
+  d.project.idle = { cursorEnabled: true, directions: { upLeft: { animation: "idle-blink", mirror: false } } };
+  Object.assign(d.project.bindings.find((b) => b.id === "jump"), {
+    followCursor: true,
+    sound: { resource: "ping", volume: 0.7 },
+  });
   const soundSave = await request(prefix, { method: "PUT", body: JSON.stringify(payload(d)) });
   assert.equal(soundSave.status, 200);
   const saved = await soundSave.json();
@@ -197,13 +211,22 @@ test("HTTP requires session authorization and same origin; actual engine simulat
     await request(prefix + "/simulate", {
       method: "POST",
       body: JSON.stringify({
-        events: [{ atMs: 0, event: { type: "keyDown", code: "Space" } }],
-        untilMs: 500,
+        events: [
+          { atMs: 50, event: { type: "cursorMove", x: 120, y: 120 } },
+          { atMs: 100, event: { type: "keyDown", code: "Space" } },
+          { atMs: 600, event: { type: "cursorMove", x: 228, y: 228 } },
+        ],
+        untilMs: 650,
       }),
     })
   ).json();
-  assert.deepEqual(timeline.find((f) => f.state.animation === "jump").state.sound, { resource: "ping", volume: 0.7 });
-  assert.equal(timeline.at(-1).state.animation, "idle");
+  assert.equal(timeline[0].state.animation, "typing");
+  assert.equal(timeline.find((f) => f.atMs === 50).state.animation, "idle-blink");
+  assert.equal(timeline.find((f) => f.atMs === 50).state.facingLeft, false);
+  const jump = timeline.find((f) => f.state.animation === "jump").state;
+  assert.equal(jump.facingLeft, true);
+  assert.deepEqual(jump.sound, { resource: "ping", volume: 0.7 });
+  assert.equal(timeline.at(-1).state.animation, "typing");
   assert.equal(timeline.at(-1).state.sound, undefined);
   const queued = await (
     await request(prefix + "/builds", {
@@ -226,4 +249,27 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   assert.equal(finished?.status, "failed");
   assert.match(finished.error, /^verify-template\r?$/m);
   assert.doesNotMatch(finished.error, /^configure-product\r?$/m);
+});
+
+test("legacy cursor bindings in saved projects and drafts appear as idle settings without changing the stored revision", async (t) => {
+  const store = await fixture(t);
+  const created = await store.create();
+  const legacy = { id: "legacy-look", trigger: { type: "cursorMove" }, effect: {
+    type: "faceCursor", directions: { up: { animation: "walk", mirror: false } },
+  } };
+  created.project.bindings.unshift(legacy);
+  const saved = await store.save(created.meta.id, payload(created));
+  const raw = await store.inspectPath(await store.currentPath(saved.meta.id));
+  assert.equal(raw.project.bindings[0].id, legacy.id);
+  assert.equal(saved.project.bindings.some((b) => b.id === legacy.id), false);
+  assert.deepEqual(saved.project.idle, { cursorEnabled: true, directions: legacy.effect.directions });
+  assert.equal(saved.sequences.length, saved.project.bindings.length);
+
+  const draft = structuredClone(raw.project);
+  draft.bindings[0].effect.directions.up.animation = "typing";
+  await store.saveDraft(saved.meta.id, { ...payload(saved), project: draft, draftRevision: null });
+  const reloaded = await store.load(saved.meta.id);
+  assert.equal(reloaded.project.idle.directions.up.animation, "walk");
+  assert.equal(reloaded.draft.project.idle.directions.up.animation, "typing");
+  assert.equal(reloaded.draft.project.bindings.length, saved.project.bindings.length);
 });
