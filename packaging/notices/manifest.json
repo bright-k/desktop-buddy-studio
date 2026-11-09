@@ -6,14 +6,14 @@
     "x86_64-pc-windows-msvc"
   ],
   "inputHashes": {
-    "Cargo.lock": "f345eefa3bd8bfab470f870fd44b5df33971bcd348dde2dad3e739fb463aade0",
+    "Cargo.lock": "2d1ae5876a956e5f83c71402c2d69f91cc22407e63dcd73b49e91299e6c77ad5",
     "package-lock.json": "3aa48e5d08d3cae5c73c963d86fd69888604c4cdc9b437c8d6a29157ec2c83bd",
     "LICENSE": "f2f22882db3877a6550bff01df6d2825adcb40f783bbed30ffe40674b8dab7f1",
     "packaging/licenses/about.toml": "42780ae77c59b231b9326ac2d35a795a53c90073bb905fa716bfaae54fa7c802",
     "packaging/licenses/clarifications.json": "27bc9c279b05d7807fd0e3975ee6352dc4ca63f330492fa86da5555295fabd78",
     "scripts/prepare-notices.mjs": "40a70060c2953287656c9d73390458456974e8313f6b3893ec70ffe2fa900f26"
   },
-  "crateCount": 297,
+  "crateCount": 299,
   "npmCount": 4,
   "sourceArchiveCount": 17,
   "files": [
@@ -24,13 +24,13 @@
     },
     {
       "path": "THIRD_PARTY_NOTICES.txt",
-      "bytes": 518938,
-      "sha256": "29f52e6e00b330d73f4b9960c429bf57ba0b92d0db402770adc255801428358c"
+      "bytes": 520654,
+      "sha256": "6beb76316d7c91b64193bc5db829c54ca06fff00c665066c44d4a857ac2def76"
     },
     {
       "path": "inventory.json",
-      "bytes": 200271,
-      "sha256": "faf0830ab334751800c48499e713ab99a31912a4853dcda0b3b40c8149b022ba"
+      "bytes": 201577,
+      "sha256": "82d3705de08287125577c594b0fe09e68a32876a802c3ba28a9f24081e4290c3"
     },
     {
       "path": "sources/block2-0.6.2.crate",
@@ -121,6 +121,11 @@
       "path": "terms/0145db344fea6097efc9abce5ee50326abd87f0739eb73f7d0e2192fd8f3cd8f.txt",
       "bytes": 1057,
       "sha256": "f7715d38a3fa1b4ac97c5729740752505a39cb92ee83ab5b102aeb5eaa7cdea4"
+    },
+    {
+      "path": "terms/06b8978473b6b27ba2c7ea71e211f0c54c74323fb3628856e04b74d70cffeec2.txt",
+      "bytes": 1070,
+      "sha256": "8ca6b96cea9e67c6c5c63f452c31bd396db8bd2406231fdea5d48ef462b48077"
     },
     {
       "path": "terms/074dc921a117b5d81fd36943440ad17e4a321baa13e0ff5f9d9318b516057a09.txt",

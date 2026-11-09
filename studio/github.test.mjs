@@ -14,6 +14,7 @@ import { createStudio } from "./server.mjs";
 import { tarExecutable } from "../scripts/archive-tools.mjs";
 
 const cli = resolve("target/debug", process.platform === "win32" ? "buddy.exe" : "buddy");
+const windowsInstaller = "먼작버 치이카와_0.1.4_x64-setup.exe";
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const blobHash = (bytes) => createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
@@ -87,7 +88,7 @@ async function fixture(t) {
 async function completeArtifact(root, fake, job, target, id) {
   const dir = join(root, target), bundle = target === "windows-x64" ? "b".repeat(140) : "bundle";
   await fs.mkdir(join(dir, bundle), { recursive: true });
-  const installer = target === "windows-x64" ? "buddy-setup.exe" : "Buddy.dmg", binary = Buffer.from("fixture installer");
+  const installer = target === "windows-x64" ? windowsInstaller : "Buddy.dmg", binary = Buffer.from("fixture installer");
   await fs.writeFile(join(dir, bundle, installer), binary);
   const guide = target === "windows-x64" ? "Windows Installation Guide.pdf" : "Installation Guide.pdf";
   const pdf = Buffer.from(`fixture PDF guide for ${target}`);
@@ -99,14 +100,21 @@ async function completeArtifact(root, fake, job, target, id) {
   if (target === "windows-x64") {
     const name = "remote-buddy_0.1.0_windows-x64.zip";
     const path = join(dir, bundle, name);
-    await run(tarExecutable, ["-a", "-cf", path, "-C", join(dir, bundle), installer, guide]);
+    const zipFixture = join(dir, "zip-fixture");
+    await fs.mkdir(zipFixture);
+    await fs.writeFile(join(zipFixture, "buddy-setup.exe"), binary);
+    await fs.writeFile(join(zipFixture, guide), pdf);
+    await run(tarExecutable, ["-a", "-cf", path, "-C", zipFixture, "buddy-setup.exe", guide]);
     const bytes = await fs.readFile(path);
     report.artifacts.push({ path: name, bytes: bytes.length, sha256: sha(bytes) });
   }
   await fs.writeFile(join(dir, "source.json"), JSON.stringify({ contentHash: job.contentHash, identifier: job.projectId }));
   await fs.writeFile(join(dir, bundle, "build-report.json"), JSON.stringify(report));
   const name = `project-${target}.tar.gz`;
-  await run(tarExecutable, ["-czf", join(dir, name), "-C", dir, "source.json", bundle]);
+  if (target === "windows-x64")
+    await run(cli, ["archive-build", join(dir, "source.json"), join(dir, bundle), "--output", join(dir, name)]);
+  else
+    await run(tarExecutable, ["-czf", join(dir, name), "-C", dir, "source.json", bundle]);
   const bytes = await fs.readFile(join(dir, name)), receipt = `receipt-${target}.json`;
   await fs.writeFile(join(dir, receipt), JSON.stringify({ jobId: job.id, projectHash: job.contentHash, identifier: job.projectId, target, templateHash: job.github.engineHash, engineHash: job.github.engineHash, bytes: bytes.length, sha256: sha(bytes) }));
   const zipPath = join(dir, "artifact.zip");
@@ -175,6 +183,8 @@ test("dispatch timeout recovers without duplicate runs; completed platform artif
   assert.equal(await fs.readFile(join(artifactRoot, macGuide.path), "utf8"), "fixture PDF guide for macos-arm64");
   assert.equal(await fs.readFile(join(artifactRoot, windowsGuide.path), "utf8"), "fixture PDF guide for windows-x64");
   const packageDownload = job.downloads.find(d => d.name === "remote-buddy_0.1.0_windows-x64.zip");
+  const installerDownload = job.downloads.find(d => d.name === windowsInstaller);
+  assert.equal(await fs.readFile(join(artifactRoot, installerDownload.path), "utf8"), "fixture installer");
   const files = artifactFiles(await fs.readFile(join(artifactRoot, packageDownload.path)), ["buddy-setup.exe", windowsGuide.name]);
   assert.equal(files.get("buddy-setup.exe").toString(), "fixture installer");
   assert.equal(files.get(windowsGuide.name).toString(), "fixture PDF guide for windows-x64");

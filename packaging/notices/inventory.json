@@ -1329,6 +1329,23 @@
       "sourceArchive": null
     },
     {
+      "id": "cargo:filetime@0.2.29",
+      "name": "filetime",
+      "version": "0.2.29",
+      "ecosystem": "cargo",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "authors": [
+        "Alex Crichton <alex@alexcrichton.com>"
+      ],
+      "repository": "https://github.com/alexcrichton/filetime",
+      "sourceUrl": "https://crates.io/api/v1/crates/filetime/0.2.29/download",
+      "terms": [
+        "bc3217700ac684163eb5e4e91c78d779b391cbcb7e6d180e9f446a4b90215822"
+      ],
+      "supplements": [],
+      "sourceArchive": null
+    },
+    {
       "id": "cargo:find-msvc-tools@0.1.15",
       "name": "find-msvc-tools",
       "version": "0.1.15",
@@ -3642,6 +3659,23 @@
       "sourceArchive": null
     },
     {
+      "id": "cargo:tar@0.4.46",
+      "name": "tar",
+      "version": "0.4.46",
+      "ecosystem": "cargo",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "authors": [
+        "Alex Crichton <alex@alexcrichton.com>"
+      ],
+      "repository": "https://github.com/composefs/tar-rs",
+      "sourceUrl": "https://crates.io/api/v1/crates/tar/0.4.46/download",
+      "terms": [
+        "06b8978473b6b27ba2c7ea71e211f0c54c74323fb3628856e04b74d70cffeec2"
+      ],
+      "supplements": [],
+      "sourceArchive": null
+    },
+    {
       "id": "cargo:tauri-build@2.7.4",
       "name": "tauri-build",
       "version": "2.7.4",
@@ -5110,6 +5144,11 @@
     "0145db344fea6097efc9abce5ee50326abd87f0739eb73f7d0e2192fd8f3cd8f": {
       "id": "MIT",
       "path": "terms/0145db344fea6097efc9abce5ee50326abd87f0739eb73f7d0e2192fd8f3cd8f.txt",
+      "source": "published-crate"
+    },
+    "06b8978473b6b27ba2c7ea71e211f0c54c74323fb3628856e04b74d70cffeec2": {
+      "id": "MIT",
+      "path": "terms/06b8978473b6b27ba2c7ea71e211f0c54c74323fb3628856e04b74d70cffeec2.txt",
       "source": "published-crate"
     },
     "074dc921a117b5d81fd36943440ad17e4a321baa13e0ff5f9d9318b516057a09": {

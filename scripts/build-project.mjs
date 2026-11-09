@@ -47,7 +47,11 @@ try {
     "--output", output, ...(development ? ["--development"] : [])], true));
   // Include the completed app and report; exclude multi-GB Cargo caches and prior builds.
   const archive = join(root, "artifacts", `project-${target}.tar.gz`);
-  step(tarExecutable, ["-czf", archive, "-C", output, "source.json", basename(result.directory)]);
+  if (target === "windows-x64") {
+    step(cli, ["archive-build", join(output, "source.json"), result.directory, "--output", archive]);
+  } else {
+    step(tarExecutable, ["-czf", archive, "-C", output, "source.json", basename(result.directory)]);
+  }
   if (process.env.BUDDY_STUDIO_JOB_ID) {
     const bytes = await fs.readFile(archive);
     await fs.writeFile(join(root, "artifacts", `receipt-${target}.json`), JSON.stringify({

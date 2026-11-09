@@ -45,6 +45,13 @@ enum Command {
         #[arg(long, hide = true)]
         job_id: Option<uuid::Uuid>,
     },
+    #[command(hide = true)]
+    ArchiveBuild {
+        source: PathBuf,
+        directory: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Create a data-only project with a fresh product identity.
     New {
         directory: PathBuf,
@@ -175,6 +182,12 @@ fn run(cli: Cli) -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&result).unwrap());
             Ok(())
         }
+        Command::ArchiveBuild {
+            source,
+            directory,
+            output,
+        } => buddy_builder::write_build_archive(&source, &directory, &output)
+            .map_err(|error| format!("Could not archive the build result: {error}")),
         Command::New {
             directory,
             name,

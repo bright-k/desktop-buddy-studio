@@ -547,6 +547,13 @@ Authors: ["The image-rs Developers"]
 License texts: b64f61d145a2db0a47908fd939c8909e4c3cb6dc74fb7bc9def7e37e6e52a500
 Additional notices: 
 
+cargo:filetime@0.2.29
+Declared: MIT OR Apache-2.0
+Source: https://crates.io/api/v1/crates/filetime/0.2.29/download
+Authors: ["Alex Crichton <alex@alexcrichton.com>"]
+License texts: bc3217700ac684163eb5e4e91c78d779b391cbcb7e6d180e9f446a4b90215822
+Additional notices: 
+
 cargo:find-msvc-tools@0.1.15
 Declared: MIT OR Apache-2.0
 Source: https://crates.io/api/v1/crates/find-msvc-tools/0.1.15/download
@@ -1510,6 +1517,13 @@ Authors: ["Tauri Programme within The Commons Conservancy","The winit contributo
 License texts: f3f533c3b81c89b621136058575e0d89ec1058229488dbbf02b55b1730f952c0
 Additional notices: 
 
+cargo:tar@0.4.46
+Declared: MIT OR Apache-2.0
+Source: https://crates.io/api/v1/crates/tar/0.4.46/download
+Authors: ["Alex Crichton <alex@alexcrichton.com>"]
+License texts: 06b8978473b6b27ba2c7ea71e211f0c54c74323fb3628856e04b74d70cffeec2
+Additional notices: 
+
 cargo:tauri-build@2.7.4
 Declared: Apache-2.0 OR MIT
 Source: https://crates.io/api/v1/crates/tauri-build/2.7.4/download
@@ -2131,6 +2145,36 @@ Additional notices:
 Source: published-crate
 
 Copyright (c) 2015 Jonathan Reem
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+========== 06b8978473b6b27ba2c7ea71e211f0c54c74323fb3628856e04b74d70cffeec2 / MIT ==========
+Source: published-crate
+
+Copyright (c) The tar-rs Project Contributors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated

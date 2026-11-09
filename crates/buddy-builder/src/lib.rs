@@ -1,3 +1,4 @@
+mod archive;
 mod build;
 mod dmg;
 mod environment;
@@ -8,6 +9,7 @@ mod preview;
 mod process;
 mod snapshot;
 mod toolchain;
+pub use archive::write_build_archive;
 pub use build::*;
 pub use environment::*;
 pub use identity::WindowsIdentity;

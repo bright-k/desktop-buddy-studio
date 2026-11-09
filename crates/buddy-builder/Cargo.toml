@@ -16,6 +16,8 @@ uuid.workspace = true
 toml = "1"
 fs2 = "0.4"
 plist = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+tar = { version = "0.4.46", default-features = false }
 zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(unix)'.dependencies]
