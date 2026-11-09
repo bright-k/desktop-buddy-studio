@@ -188,6 +188,14 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   d.character.animations["idle-blink"] = { resource: "blink", loop: true };
   d.character.defaultAnimation = "typing";
   d.project.idle = { cursorEnabled: true, directions: { upLeft: { animation: "idle-blink", mirror: false } } };
+  const guideBody = "<!doctype html><title>Buddy guide</title><p>설치 안내</p>";
+  const guideUpload = await request(prefix + "/resources?purpose=installer&filename=guide.html", {
+    method: "POST", body: guideBody,
+  });
+  assert.equal(guideUpload.status, 201);
+  const guide = await guideUpload.json();
+  d.project.build.macosDmg = { guide: `assets/installer/${guide.name}` };
+  d.project.cursorFollow = { enabled: false, stopDistanceDip: 0, bands: [{ minDistanceDip: 0, speedDipPerSecond: 120, animation: "walk" }] };
   Object.assign(d.project.bindings.find((b) => b.id === "jump"), {
     followCursor: true,
     sound: { resource: "ping", volume: 0.7 },
@@ -195,6 +203,13 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   const soundSave = await request(prefix, { method: "PUT", body: JSON.stringify(payload(d)) });
   assert.equal(soundSave.status, 200);
   const saved = await soundSave.json();
+  assert.equal(saved.project.build.macosDmg.guide, d.project.build.macosDmg.guide);
+  assert.equal(saved.project.cursorFollow.stopDistanceDip, 0);
+  const guideDownload = await request(prefix.replace("/api/", "/%61pi/") + `/source/assets/installer/${guide.name}`);
+  assert.equal(guideDownload.status, 200);
+  assert.match(guideDownload.headers.get("content-disposition"), /^attachment;/);
+  assert.equal(guideDownload.headers.get("content-type"), "application/octet-stream");
+  assert.equal(await guideDownload.text(), guideBody);
   const response = await request(prefix + `/resources/${sound.name}`);
   assert.equal(response.headers.get("content-type"), "audio/wav");
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), wav);
@@ -249,6 +264,10 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   assert.equal(finished?.status, "failed");
   assert.match(finished.error, /^verify-template\r?$/m);
   assert.doesNotMatch(finished.error, /^configure-product\r?$/m);
+  delete saved.project.build.macosDmg;
+  const removed = await request(prefix, { method: "PUT", body: JSON.stringify(payload(saved)) });
+  assert.equal(removed.status, 200);
+  assert.equal((await request(prefix + `/source/assets/installer/${guide.name}`)).status, 404);
 });
 
 test("legacy cursor bindings in saved projects and drafts appear as idle settings without changing the stored revision", async (t) => {
@@ -272,4 +291,77 @@ test("legacy cursor bindings in saved projects and drafts appear as idle setting
   assert.equal(reloaded.project.idle.directions.up.animation, "walk");
   assert.equal(reloaded.draft.project.idle.directions.up.animation, "typing");
   assert.equal(reloaded.draft.project.bindings.length, saved.project.bindings.length);
+});
+
+function pdfGuideFixture() {
+  let pdf = "%PDF-1.4\n";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+  ];
+  const offsets = objects.map((object, index) => {
+    const offset = pdf.length;
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+    return offset;
+  });
+  return pdf + `xref\n0 4\n0000000000 65535 f \n${offsets.map(offset =>
+    `${String(offset).padStart(10, "0")} 00000 n \n`).join("")}trailer\n<< /Root 1 0 R /Size 4 >>\nstartxref\n${pdf.length}\n%%EOF\n`;
+}
+
+test("PDF guides roundtrip and build deletion distinguishes records, files, and active builds", async (t) => {
+  const store = await fixture(t);
+  const d = await store.create({ name: "PDF Buddy" });
+  const studio = await createStudio({ dataRoot: store.root, cli, port: 0 });
+  t.after(() => studio.close());
+  const prefix = `${studio.origin}/api/projects/${d.meta.id}`;
+  const request = (path, options = {}) => fetch(prefix + path, {
+    ...options, headers: { Authorization: `Bearer ${studio.token}` },
+  });
+  const upload = (body, installer) => request(`/resources?filename=guide.pdf${installer ? "&purpose=installer" : ""}`, { method: "POST", body });
+  const pdf = pdfGuideFixture();
+  assert.equal((await upload(pdf, false)).status, 400);
+  assert.equal((await upload("%PDF-1.4\ntruncated", true)).status, 400);
+  const accepted = await upload(pdf, true);
+  assert.equal(accepted.status, 201);
+  const guide = await accepted.json();
+  const guidePath = `assets/installer/${guide.name}`;
+  d.project.build.macosDmg = { background: guidePath };
+  await assert.rejects(store.save(d.meta.id, payload(d)), /INVALID_INSTALL_ASSET/);
+  d.project.build.macosDmg = { guide: guidePath, guidePosition: { x: 180, y: 180 } };
+  await assert.rejects(store.save(d.meta.id, payload(d)), /guidePosition/);
+  d.project.build.macosDmg.guidePosition = { x: 340, y: 260 };
+  const saved = await store.save(d.meta.id, payload(d));
+  assert.deepEqual(saved.project.build.macosDmg.guidePosition, { x: 340, y: 260 });
+  const downloaded = await request(`/source/${guidePath}`);
+  assert.equal(downloaded.status, 200);
+  assert.equal(downloaded.headers.get("content-type"), "application/pdf");
+  assert.match(downloaded.headers.get("content-disposition"), /^attachment;/);
+  assert.equal(await downloaded.text(), pdf);
+
+  const [localId, remoteId, activeId, builderId] = [1, 2, 3, 4]
+    .map(n => `00000000-0000-4000-8000-00000000000${n}`);
+  const root = join(store.path(d.meta.id), "builds");
+  const localDir = join(root, `pdf-buddy-0.1.0-${builderId}`), remoteDir = join(root, `actions-${remoteId}`);
+  const build = { projectId: d.meta.id, revision: saved.meta.revision, createdAt: new Date().toISOString(), status: "succeeded" };
+  for (const directory of [localDir, remoteDir]) {
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(join(directory, "buddy.dmg"), "test build");
+  }
+  await fs.writeFile(join(root, `build-${builderId}.log`), "build log");
+  await studio.jobs.persist({ ...build, id: localId, result: { directory: localDir, jobId: builderId } });
+  await studio.jobs.persist({ ...build, id: remoteId, provider: "github", result: { directory: remoteDir } });
+  await studio.jobs.persist({ ...build, id: activeId, provider: "github", status: "awaiting_auth" });
+  const remove = (id, files) => request(`/builds/${id}${files ? "?files=true" : ""}`, { method: "DELETE" });
+  assert.equal((await remove(activeId, true)).status, 409);
+  assert.equal((await remove(remoteId, false)).status, 200);
+  assert.equal(await fs.readFile(join(remoteDir, "buddy.dmg"), "utf8"), "test build");
+  assert.equal((await remove(localId, true)).status, 200);
+  assert.equal((await remove(localId, true)).status, 404);
+  await assert.rejects(fs.stat(localDir), { code: "ENOENT" });
+  await assert.rejects(fs.stat(join(root, `build-${builderId}.log`)), { code: "ENOENT" });
+  assert.deepEqual((await (await request("/builds")).json()).map(job => job.id), [activeId]);
+  assert.equal((await store.metadata(d.meta.id)).builtSlug, saved.project.product.slug);
+  saved.project.product.slug += "-renamed";
+  await assert.rejects(store.save(d.meta.id, payload(saved)), /실행 파일 이름/);
 });

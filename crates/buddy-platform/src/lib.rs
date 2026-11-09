@@ -69,11 +69,70 @@ pub struct InputSession {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
+
+/// Each overlay button belongs to the window that received the press. After
+/// capture restarts, an unmatched release cannot create a global reaction.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+struct OverlayMouseRoute {
+    overlay: Option<usize>,
+    global_down: [bool; 2],
+}
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl OverlayMouseRoute {
+    fn new(overlay: Option<usize>) -> Self {
+        Self {
+            overlay,
+            global_down: [false; 2],
+        }
+    }
+
+    fn reset(&mut self) {
+        self.global_down = [false; 2];
+    }
+
+    fn routes(&self, button: buddy_project::MouseButton) -> bool {
+        self.overlay.is_some() && button != buddy_project::MouseButton::Middle
+    }
+
+    fn forward(
+        &mut self,
+        button: buddy_project::MouseButton,
+        pressed: bool,
+        target: Option<usize>,
+    ) -> bool {
+        if !self.routes(button) {
+            return true;
+        }
+        let index = usize::from(button == buddy_project::MouseButton::Secondary);
+        if pressed {
+            self.global_down[index] = target != self.overlay;
+            self.global_down[index]
+        } else {
+            std::mem::take(&mut self.global_down[index])
+        }
+    }
+}
+
 impl InputSession {
     pub fn start(options: InputOptions) -> Result<Self, String> {
         Self::start_with_signal(options, WakeSignal::default())
     }
     pub fn start_with_signal(options: InputOptions, signal: WakeSignal) -> Result<Self, String> {
+        Self::start_routed(options, signal, None)
+    }
+    /// `overlay` is the Player PID on macOS and the overlay HWND on Windows.
+    pub fn start_for_overlay(
+        options: InputOptions,
+        signal: WakeSignal,
+        overlay: usize,
+    ) -> Result<Self, String> {
+        Self::start_routed(options, signal, (overlay != 0).then_some(overlay))
+    }
+    fn start_routed(
+        options: InputOptions,
+        signal: WakeSignal,
+        overlay: Option<usize>,
+    ) -> Result<Self, String> {
         let (sender, receiver) = queue::bounded_with_signal(1024, signal);
         let status = Arc::new(Mutex::new(options.status(
             permission_state(),
@@ -88,12 +147,26 @@ impl InputSession {
             .name("buddy-native-input".into())
             .spawn(move || {
                 #[cfg(target_os = "macos")]
-                macos::run(options, sender, worker_status, worker_stop, ready_tx);
+                macos::run(
+                    options,
+                    sender,
+                    worker_status,
+                    worker_stop,
+                    ready_tx,
+                    overlay,
+                );
                 #[cfg(target_os = "windows")]
-                windows::run(options, sender, worker_status, worker_stop, ready_tx);
+                windows::run(
+                    options,
+                    sender,
+                    worker_status,
+                    worker_stop,
+                    ready_tx,
+                    overlay,
+                );
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
-                    let _ = (options, sender, worker_status, worker_stop);
+                    let _ = (options, sender, worker_status, worker_stop, overlay);
                     let _ = ready_tx.send(());
                 }
             })
@@ -147,6 +220,21 @@ pub fn permission_state() -> PermissionState {
         PermissionState::Denied
     }
 }
+/// Query button state without starting the global input capture session.
+pub fn mouse_button_down() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::mouse_button_down()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::mouse_button_down()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        false
+    }
+}
 /// Must only be called from an explicit user request (settings or CLI flag).
 pub fn request_input_permission() -> bool {
     #[cfg(target_os = "macos")]
@@ -160,5 +248,28 @@ pub fn request_input_permission() -> bool {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod overlay_mouse_tests {
+    use super::OverlayMouseRoute;
+    use buddy_project::MouseButton::{Middle, Primary, Secondary};
+
+    #[test]
+    fn the_press_target_owns_the_release_even_across_window_edges() {
+        let mut route = OverlayMouseRoute::new(Some(10));
+        assert!(!route.forward(Primary, true, Some(10)));
+        assert!(route.forward(Secondary, true, Some(20)));
+        assert!(!route.forward(Primary, false, Some(20)));
+        assert!(route.forward(Secondary, false, Some(10)));
+
+        assert!(!route.forward(Secondary, true, Some(10)));
+        assert!(!route.forward(Secondary, false, Some(20)));
+        assert!(route.forward(Middle, true, Some(10)));
+
+        assert!(route.forward(Secondary, true, Some(20)));
+        route.reset();
+        assert!(!route.forward(Secondary, false, Some(20)));
     }
 }

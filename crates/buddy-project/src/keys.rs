@@ -8,6 +8,47 @@ pub const MODIFIERS: [&str; 8] = [
     "MetaLeft",
     "MetaRight",
 ];
+const SPECIAL_KEYS: &[&str] = &[
+    "Escape",
+    "Tab",
+    "Space",
+    "Enter",
+    "Backspace",
+    "Delete",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "ArrowUp",
+    "ArrowDown",
+    "Backquote",
+    "Minus",
+    "Equal",
+    "BracketLeft",
+    "BracketRight",
+    "Backslash",
+    "Semicolon",
+    "Quote",
+    "Comma",
+    "Period",
+    "Slash",
+];
+
+pub fn supported_keys() -> impl Iterator<Item = String> {
+    ('A'..='Z')
+        .map(|letter| format!("Key{letter}"))
+        .chain((0..=9).map(|digit| format!("Digit{digit}")))
+        .chain((1..=12).map(|number| format!("F{number}")))
+        .chain(
+            MODIFIERS
+                .into_iter()
+                .chain(SPECIAL_KEYS.iter().copied())
+                .map(str::to_owned),
+        )
+}
+
 pub fn is_modifier(code: &str) -> bool {
     MODIFIERS.contains(&code)
 }
@@ -25,35 +66,7 @@ pub fn is_supported_key(code: &str) -> bool {
             }
         }
     }
-    is_modifier(code)
-        || [
-            "Escape",
-            "Tab",
-            "Space",
-            "Enter",
-            "Backspace",
-            "Delete",
-            "Home",
-            "End",
-            "PageUp",
-            "PageDown",
-            "ArrowLeft",
-            "ArrowRight",
-            "ArrowUp",
-            "ArrowDown",
-            "Backquote",
-            "Minus",
-            "Equal",
-            "BracketLeft",
-            "BracketRight",
-            "Backslash",
-            "Semicolon",
-            "Quote",
-            "Comma",
-            "Period",
-            "Slash",
-        ]
-        .contains(&code)
+    is_modifier(code) || SPECIAL_KEYS.contains(&code)
 }
 pub fn is_sequence_key(code: &str) -> bool {
     is_supported_key(code) && !is_modifier(code) && !["Backspace", "Delete"].contains(&code)

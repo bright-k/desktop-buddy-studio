@@ -32,6 +32,7 @@ test("project, tab, animation and event survive a URL roundtrip without dropping
     };
     const url = writeRoute(new URL("http://127.0.0.1:4340/?extra=keep"), state);
     assert.deepEqual(readRoute(url), state);
+    assert.deepEqual(readRoute(writeRoute(url, { ...state, tab: "follow" })), { ...state, tab: "follow" });
     assert.equal(
       readRoute(
         new URL(

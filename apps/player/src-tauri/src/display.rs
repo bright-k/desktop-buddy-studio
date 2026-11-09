@@ -1,6 +1,32 @@
 use buddy_project::Point;
 use buddy_runtime::{MonitorChoice, Rect};
 
+const EDGE_INSET_DIP: f64 = 6.0;
+
+pub fn placement_bounds(area: Rect, size: Point, footprint: Option<(Point, Point)>) -> Rect {
+    placement_with_margin(area, size, footprint, EDGE_INSET_DIP)
+}
+
+pub fn placement_with_margin(
+    area: Rect,
+    size: Point,
+    footprint: Option<(Point, Point)>,
+    margin: f64,
+) -> Rect {
+    let (min, max) = footprint.unwrap_or((Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 1.0 }));
+    let slack_x = (area.width - (max.x - min.x) * size.x).max(0.0);
+    let slack_y = (area.height - (max.y - min.y) * size.y).max(0.0);
+    let margin = margin.max(EDGE_INSET_DIP);
+    let inset_x = margin.min(slack_x / 2.0);
+    let inset_y = margin.min(slack_y / 2.0);
+    Rect {
+        x: area.x + inset_x - min.x * size.x,
+        y: area.y + inset_y - min.y * size.y,
+        width: size.x + (slack_x - 2.0 * inset_x),
+        height: size.y + (slack_y - 2.0 * inset_y),
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct Display {
     pub id: String,
@@ -13,21 +39,13 @@ pub struct Display {
     pub desktop_area: Rect,
 }
 impl Display {
-    pub fn character_size(&self, character: &buddy_project::Character, scale: f64) -> Point {
-        let sheet = character.sheet;
-        // Reserve both mirrored extents so flipping about an off-center anchor
-        // cannot clip the character or move its reference point.
-        let width = sheet.frame_width as f64
-            * 2.0
-            * character.anchor.x.max(1.0 - character.anchor.x)
-            * scale;
-        let height = sheet.frame_height as f64 * scale;
-        let fit = (self.bounds.width / width)
-            .min(self.bounds.height / height)
+    pub fn fit_size(&self, size: Point) -> Point {
+        let fit = ((self.bounds.width - 2.0 * EDGE_INSET_DIP).max(1.0) / size.x)
+            .min((self.bounds.height - 2.0 * EDGE_INSET_DIP).max(1.0) / size.y)
             .min(1.0);
         Point {
-            x: width * fit,
-            y: height * fit,
+            x: size.x * fit,
+            y: size.y * fit,
         }
     }
     pub fn choice(&self) -> MonitorChoice {
@@ -183,12 +201,17 @@ mod tests {
         character.anchor.x = 0.0;
         let monitor = display("primary", true, 0.0, 1.0);
         assert_eq!(
-            monitor.character_size(&character, 1.0),
+            monitor.fit_size(character.canvas_size(1.0)),
             Point { x: 512.0, y: 256.0 }
         );
-        let size = monitor.character_size(&character, 3.0);
-        assert_eq!(size.x, 1000.0);
-        assert_eq!(size.y, 500.0);
+        let size = monitor.fit_size(character.canvas_size(3.0));
+        assert_eq!(size.x, 988.0);
+        assert_eq!(size.y, 494.0);
+        character.animations.get_mut("jump").unwrap().scale_percent = Some(150);
+        assert_eq!(
+            monitor.fit_size(character.canvas_size(1.0)),
+            Point { x: 768.0, y: 384.0 }
+        );
     }
     #[test]
     fn missing_monitor_recovers_to_primary_and_clamps_placement() {
@@ -240,5 +263,36 @@ mod tests {
             }
         )
         .is_none());
+    }
+
+    #[test]
+    fn transparent_padding_can_cross_the_work_area_but_ink_keeps_six_dip() {
+        let size = Point { x: 200.0, y: 100.0 };
+        let area = display("primary", true, 0.0, 1.0).bounds;
+        let bounds = placement_bounds(
+            area,
+            size,
+            Some((Point { x: 0.25, y: 0.5 }, Point { x: 0.75, y: 0.875 })),
+        );
+        assert_eq!(
+            bounds.clamp(-200.0, -100.0, size),
+            Point { x: -44.0, y: -44.0 }
+        );
+        assert_eq!(
+            bounds.clamp(1000.0, 700.0, size),
+            Point { x: 844.0, y: 606.5 }
+        );
+        // An animation with more visible pixels needs a temporary correction;
+        // its bounds do not change the position saved using the idle footprint.
+        let idle_position = bounds.clamp(-200.0, -100.0, size);
+        let larger = placement_bounds(
+            area,
+            size,
+            Some((Point { x: 0.1, y: 0.2 }, Point { x: 0.9, y: 0.95 })),
+        );
+        assert_eq!(
+            larger.clamp(idle_position.x, idle_position.y, size),
+            Point { x: -14.0, y: -14.0 }
+        );
     }
 }

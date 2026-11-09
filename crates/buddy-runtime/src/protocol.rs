@@ -75,6 +75,7 @@ pub struct WireState {
     pub edit_session_id: Option<String>,
     pub width: f64,
     pub height: f64,
+    pub canvas_offset: Point,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -84,6 +85,8 @@ pub struct PreferenceUpdate {
     pub keyboard: Option<bool>,
     pub mouse: Option<bool>,
     pub movement_enabled: Option<bool>,
+    #[serde(default)]
+    pub cursor_follow: Option<bool>,
     pub always_on_top: Option<bool>,
     pub scale: Option<f64>,
     #[serde(default)]
@@ -100,6 +103,7 @@ pub struct RuntimeStatus {
     pub keyboard: bool,
     pub mouse: bool,
     pub movement_enabled: bool,
+    pub cursor_follow: bool,
     pub always_on_top: bool,
     pub scale: f64,
     pub input: InputStatus,
@@ -140,6 +144,8 @@ pub struct PreferenceOverrides {
     pub mouse: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub movement_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_follow: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_placement: Option<BasePlacement>,
 }

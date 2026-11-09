@@ -22,6 +22,7 @@ pub struct BuildOptions {
     pub target: Target,
     pub development: bool,
     pub signing_identity: Option<String>,
+    pub job_id: Option<uuid::Uuid>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,7 +79,10 @@ pub fn build(
 ) -> Result<BuildResult, String> {
     let started = Instant::now();
     let mut stages = Vec::new();
-    let job = uuid::Uuid::new_v4().to_string();
+    let job = options
+        .job_id
+        .unwrap_or_else(uuid::Uuid::new_v4)
+        .to_string();
     if Target::current() != Some(options.target) {
         return Err("UNSUPPORTED_BUILD_HOST: Windows apps require Windows x64; macOS apps require Apple Silicon macOS".into());
     }
@@ -188,6 +192,7 @@ pub fn build(
         start_stage("compile-and-package", started, &mut stages, &mut progress);
         let cache = build_cache_directory(&output, options.target);
         fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+        let dmg_layout = snapshot.data.project.build.macos_dmg.as_ref();
         let mut package_command = Command::new("node");
         package_command.arg(&tauri).args([
             "build",
@@ -195,7 +200,11 @@ pub fn build(
             options.target.rust_target(),
             "--bundles",
             if options.target == Target::MacosArm64 {
-                "app,dmg"
+                if dmg_layout.is_some() {
+                    "app"
+                } else {
+                    "app,dmg"
+                }
             } else {
                 "nsis"
             },
@@ -218,6 +227,24 @@ pub fn build(
             } else {
                 "release/bundle"
             });
+        let guide = snapshot
+            .data
+            .project
+            .build
+            .macos_dmg
+            .as_ref()
+            .and_then(|dmg| dmg.guide.as_ref())
+            .map(|relative| {
+                let extension = Path::new(relative)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("html")
+                    .to_ascii_lowercase();
+                let path = staged.join(format!("Installation Guide.{extension}"));
+                fs::write(&path, &snapshot.files[relative].bytes).map_err(|e| e.to_string())?;
+                Ok::<_, String>(path)
+            })
+            .transpose()?;
         if options.target == Target::MacosArm64 {
             let app = bundle
                 .join("macos")
@@ -259,16 +286,42 @@ pub fn build(
                 ));
             }
             let timestamp = String::from_utf8(timestamp.stdout).map_err(|e| e.to_string())?;
-            copy_matching(
-                &bundle.join("dmg"),
-                &staged,
-                "dmg",
-                &format!(
-                    "{}_{}_",
-                    snapshot.data.project.product.name, snapshot.data.project.product.version
-                ),
-                &format!("_{}", timestamp.trim()),
-            )?;
+            let product = &snapshot.data.project.product;
+            if let Some(layout) = dmg_layout {
+                let name = format!(
+                    "{}_{}_aarch64_{}.dmg",
+                    product.name,
+                    product.version,
+                    timestamp.trim()
+                );
+                crate::dmg::create(
+                    &workspace,
+                    &work.path().join("dmg-settings.json"),
+                    json!({
+                        "app": staged_app,
+                        "guide": guide,
+                        "background": layout.background.as_ref().map(|path| snapshot.root.join(path)),
+                        "volume": product.name,
+                        "output": staged.join(name),
+                        "width": layout.width,
+                        "height": layout.height,
+                        "appPosition": layout.app_position,
+                        "applicationsPosition": layout.applications_position,
+                        "guidePosition": layout.guide_position(),
+                    }),
+                    options.signing_identity.as_deref(),
+                    &cancellation,
+                    &mut progress,
+                )?;
+            } else {
+                copy_matching(
+                    &bundle.join("dmg"),
+                    &staged,
+                    "dmg",
+                    &format!("{}_{}_", product.name, product.version),
+                    &format!("_{}", timestamp.trim()),
+                )?;
+            }
             process::run(
                 Command::new("codesign")
                     .args(["--verify", "--deep", "--strict"])
@@ -453,12 +506,14 @@ fn build_cache_directory(output: &Path, target: Target) -> PathBuf {
 fn verify_bundled_project(resources: &Path, snapshot: &LoadedProject) -> Result<(), String> {
     let entry =
         buddy_project::bundled_project_path(resources)?.ok_or("Bundled project is missing")?;
-    if buddy_project::load_project(entry)
-        .map_err(|e| e.to_string())?
-        .content_hash
-        != snapshot.content_hash
-    {
+    let bundled =
+        buddy_project::load_project_with_prepared(entry, &resources.join("prepared-render"))
+            .map_err(|e| e.to_string())?;
+    if bundled.content_hash != snapshot.content_hash {
         return Err("Bundled project differs from validated snapshot".into());
+    }
+    if bundled.prepared_render_paths.is_empty() {
+        return Err("Bundled prepared rendering is missing or invalid".into());
     }
     Ok(())
 }
@@ -482,6 +537,8 @@ fn configure(
         serde_json::to_vec(&snapshot.entry_relative_path).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    buddy_project::write_prepared_rendering(snapshot, &tauri_dir.join("resources/prepared-render"))
+        .map_err(|e| format!("Could not package prepared frames: {e}"))?;
     let notices =
         crate::copy_verified_notices(workspace, &tauri_dir.join("resources/third-party"))?;
     let config_path = tauri_dir.join("tauri.conf.json");
@@ -492,7 +549,12 @@ fn configure(
     config["identifier"] = product.identifier.clone().into();
     config["version"] = product.version.clone().into();
     config["mainBinaryName"] = product.slug.clone().into();
-    config["bundle"]["resources"] = json!({"resources/project/":"project/","resources/project-entry.json":"project-entry.json","resources/third-party/":"third-party/"});
+    config["bundle"]["resources"] = json!({
+        "resources/project/": "project/",
+        "resources/project-entry.json": "project-entry.json",
+        "resources/prepared-render/": "prepared-render/",
+        "resources/third-party/": "third-party/"
+    });
     config["bundle"]["icon"] = json!([
         "icons/32x32.png",
         "icons/128x128.png",
@@ -581,11 +643,8 @@ fn copy_matching(
         if path.extension().and_then(|s| s.to_str()) == Some(extension)
             && stem.starts_with(expected_prefix)
         {
-            fs::copy(
-                &path,
-                destination.join(format!("{stem}{suffix}.{extension}")),
-            )
-            .map_err(|e| e.to_string())?;
+            let destination = destination.join(format!("{stem}{suffix}.{extension}"));
+            fs::copy(&path, &destination).map_err(|e| e.to_string())?;
             count += 1;
         }
     }
@@ -682,6 +741,11 @@ mod tests {
             serde_json::to_vec(&snapshot.entry_relative_path).unwrap(),
         )
         .unwrap();
+        let prepared = resources.join("prepared-render");
+        assert!(verify_bundled_project(&resources, &snapshot)
+            .unwrap_err()
+            .contains("prepared rendering"));
+        buddy_project::write_prepared_rendering(&snapshot, &prepared).unwrap();
         verify_bundled_project(&resources, &snapshot).unwrap();
         fs::write(
             resources.join("project/character/LICENSE.txt"),
@@ -740,6 +804,7 @@ mod tests {
             target: Target::MacosArm64,
             development: true,
             signing_identity: None,
+            job_id: None,
         };
         configure(&workspace, &snapshot, &options).unwrap();
         let tauri = workspace.join("apps/player/src-tauri");

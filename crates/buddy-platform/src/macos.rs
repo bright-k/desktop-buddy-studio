@@ -1,4 +1,6 @@
-use crate::{queue::EventSender, CaptureState, InputOptions, InputStatus, PermissionState};
+use crate::{
+    queue::EventSender, CaptureState, InputOptions, InputStatus, OverlayMouseRoute, PermissionState,
+};
 use buddy_project::{MouseButton, WheelDirection};
 use buddy_runtime::InputEvent;
 use std::{
@@ -16,6 +18,9 @@ use std::{
 type CFRef = *const c_void;
 type EventRef = *mut c_void;
 static ACCESS_REQUESTED_OR_REVOKED: AtomicBool = AtomicBool::new(false);
+const SESSION_EVENT_TAP: u32 = 1;
+const ANNOTATED_SESSION_EVENT_TAP: u32 = 2;
+const EVENT_TARGET_PID: u32 = 40;
 #[repr(C)]
 struct CGPoint {
     x: f64,
@@ -72,10 +77,16 @@ pub fn request_permission() -> bool {
     unsafe { CGRequestListenEventAccess() }
 }
 
+pub(crate) fn mouse_button_down() -> bool {
+    // kCGEventSourceStateCombinedSessionState includes the current user's devices.
+    (0..5).any(|button| unsafe { CGEventSourceButtonState(0, button) })
+}
+
 struct Context {
     sender: EventSender,
     keys: BTreeSet<u16>,
     buttons: BTreeSet<u32>,
+    overlay_mouse: OverlayMouseRoute,
     last_motion: Instant,
     tap: CFRef,
     interrupted: bool,
@@ -83,6 +94,7 @@ struct Context {
 }
 impl Context {
     unsafe fn rearm(&mut self) {
+        self.overlay_mouse.reset();
         self.keys = (0..128)
             .filter(|key| key_code(*key).is_some() && CGEventSourceKeyState(0, *key))
             .collect();
@@ -104,6 +116,7 @@ impl Context {
                     1 => MouseButton::Secondary,
                     _ => MouseButton::Middle,
                 })
+                .filter(|button| !self.overlay_mouse.routes(*button))
                 .collect(),
         });
         self.interrupted = false;
@@ -171,17 +184,29 @@ unsafe extern "C" fn callback(
                 2 => MouseButton::Middle,
                 _ => return event,
             };
-            if matches!(kind, 1 | 3 | 25) {
+            let pressed = matches!(kind, 1 | 3 | 25);
+            if pressed {
                 context.buttons.insert(raw);
-                context
-                    .sender
-                    .send_at(InputEvent::MouseDown { button }, received_at);
             } else {
                 context.buttons.remove(&raw);
-                context
-                    .sender
-                    .send_at(InputEvent::MouseUp { button }, received_at);
             }
+            if context.overlay_mouse.routes(button) {
+                // Global capture pauses for the settings window. While it is
+                // active, a routed press delivered to this PID is the overlay's.
+                let target =
+                    pressed.then(|| CGEventGetIntegerValueField(event, EVENT_TARGET_PID) as usize);
+                if !context.overlay_mouse.forward(button, pressed, target) {
+                    return event;
+                }
+            }
+            context.sender.send_at(
+                if pressed {
+                    InputEvent::MouseDown { button }
+                } else {
+                    InputEvent::MouseUp { button }
+                },
+                received_at,
+            );
         }
         5 | 6 | 7 | 27 => {
             if context.last_motion.elapsed() >= Duration::from_millis(34) {
@@ -235,6 +260,7 @@ pub(crate) fn run(
     status: Arc<Mutex<InputStatus>>,
     stop: Arc<AtomicBool>,
     ready: SyncSender<()>,
+    overlay: Option<usize>,
 ) {
     if !options.keyboard && !options.mouse {
         let _ = ready.send(());
@@ -263,6 +289,7 @@ pub(crate) fn run(
         sender,
         keys: BTreeSet::new(),
         buttons: BTreeSet::new(),
+        overlay_mouse: OverlayMouseRoute::new(overlay),
         last_motion: Instant::now() - Duration::from_secs(1),
         tap: ptr::null(),
         interrupted: false,
@@ -270,7 +297,11 @@ pub(crate) fn run(
     });
     unsafe {
         let tap = CGEventTapCreate(
-            1,
+            if overlay.is_some() && options.mouse {
+                ANNOTATED_SESSION_EVENT_TAP
+            } else {
+                SESSION_EVENT_TAP
+            },
             0,
             1,
             mask,
@@ -369,7 +400,9 @@ pub(crate) fn run(
                         1 => MouseButton::Secondary,
                         _ => MouseButton::Middle,
                     };
-                    context.sender.send(InputEvent::MouseUp { button });
+                    if context.overlay_mouse.forward(button, false, None) {
+                        context.sender.send(InputEvent::MouseUp { button });
+                    }
                 }
             }
             previous = Instant::now();

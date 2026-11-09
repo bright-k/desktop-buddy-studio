@@ -8,11 +8,16 @@ import type {
   Interruption,
   FrameRegion,
   CharacterState,
+  KeyChord,
+  KeyModifier,
+  KeyStep,
+  MacosDmg,
   RenderPlan,
   Resource,
   SoundResource,
 } from "../../../packages/contracts/generated/index";
-import { CharacterRenderer } from "../../../packages/renderer/src/index";
+import { animationScaleLimits, supportedPhysicalKeys } from "../../../packages/contracts/generated/index";
+import { CharacterRenderer, horizontalAnchorExtent } from "../../../packages/renderer/src/index";
 import { ReactionAudio } from "../../../packages/renderer/src/audio";
 import { readRoute, writeRoute, type StudioRoute } from "./route";
 import "./style.css";
@@ -23,6 +28,7 @@ type Meta = {
   revision: string;
   name: string;
   slug: string;
+  builtSlug?: string;
   identifier: string;
   archived: boolean;
   updatedAt: string;
@@ -49,7 +55,10 @@ type Document = {
   library: Record<string, ResourceFile>;
   renderPlan: RenderPlan;
   images: string[];
+  sequences: (KeyStep[] | null)[];
+  sequenceAlternatives?: KeyStep[][][];
   contentHash: string;
+  idleHeightDipAtScaleOne?: number;
   draft?: {
     baseRevision: string;
     draftRevision: string;
@@ -88,10 +97,14 @@ let projects: Meta[] = [],
   busy = false,
   archived = false;
 let renderer: CharacterRenderer | undefined,
-  previewTimer = 0,
+  previewDocument: Document | undefined,
+  previewClip = "",
+  previewWork = "",
   simulationTimers: number[] = [],
   cropImage: HTMLImageElement | undefined,
   crop: FrameRegion = { x: 0, y: 0, width: 256, height: 256 };
+let gifFrameTimer = 0, gifFrameRequest = 0;
+let scalePreviews: CharacterRenderer[] = [];
 let config = { dataRoot: "", target: "macos-arm64", development: false },
   messageTimer = 0,
   currentEpoch = 1,
@@ -106,6 +119,27 @@ let draftRevision: string | null = null,
   projectRequest = 0,
   simulationRequest = 0;
 let connectionIssue = "", polling = false, projectLoading = false;
+let editorWork = "";
+const operationStatus = document.createElement("div");
+operationStatus.className = "operation-status";
+operationStatus.setAttribute("role", "status");
+operationStatus.innerHTML = '<i class="operation-spinner" aria-hidden="true"></i><span></span>';
+operationStatus.hidden = true;
+app.after(operationStatus);
+
+function updateOperationStatus() {
+  const message = editorWork || (projectLoading ? "프로젝트와 미리보기를 불러오는 중…" : "");
+  operationStatus.querySelector("span")!.textContent = message;
+  operationStatus.hidden = !message;
+}
+function setEditorBusy(message = "") {
+  editorWork = message;
+  busy = !!message;
+  app.inert = busy;
+  if (busy) app.setAttribute("aria-busy", "true");
+  else app.removeAttribute("aria-busy");
+  updateOperationStatus();
+}
 const esc = (value: unknown) =>
   String(value ?? "").replace(
     /[&<>"']/g,
@@ -305,6 +339,12 @@ function validationHint(message: string) {
     return "아이콘은 512~1024px 정사각형 PNG여야 합니다.";
   if (message.includes("$.idle.directions") || message.includes("$.defaultAnimation"))
     return "대기 상태에는 반복 재생 동작이나 이미지·GIF 리소스를 연결하세요.";
+  if (message.includes("$.cursorFollow"))
+    return "멈춤 거리와 거리별 이동 속도를 확인하세요. 구간에는 반복 애니메이션을 연결할 수 있습니다.";
+  if (message.includes("$.defaults.displayHeightDip"))
+    return "대기 모션의 표시 높이는 16~1024 DIP로 설정하세요.";
+  if (message.includes("$.build.macosDmg.guidePosition"))
+    return "가이드 아이콘이 창 안에 있고 다른 아이콘과 겹치지 않도록 X·Y를 조정하거나 자동 배치를 선택하세요.";
   if (message.includes("$.defaults.timing"))
     return "입력 중단·평가·안정 시간의 허용 범위를 확인해주세요. 평가 간격은 입력 중단 시간 이하여야 합니다.";
   if (message.includes("Another window") || message.includes("다른 창"))
@@ -327,7 +367,10 @@ function showValidationError(message: string) {
     tab = "animations";
     selectedClip = animation[1];
   } else if (message.includes("$.idle") || message.includes("$.defaultAnimation")) tab = "idle";
+  else if (message.includes("$.cursorFollow")) tab = "follow";
   else if (message.includes("$.defaults.timing")) tab = "timing";
+  else if (message.includes("$.defaults.displayHeightDip")) tab = "overview";
+  else if (message.includes("$.build.macosDmg")) tab = "builds";
   else if (message.includes("$.product")) tab = "overview";
   layout();
   requestAnimationFrame(() =>
@@ -362,12 +405,23 @@ function stopPreview() {
   simulationRequest++;
   renderer?.dispose();
   renderer = undefined;
-  clearTimeout(previewTimer);
+  previewDocument = undefined;
+  previewClip = "";
+  setPreviewWork();
   simulationTimers.forEach(clearTimeout);
   simulationTimers = [];
+  previewAudio.stop();
 }
 function layout(push = false) {
-  stopPreview();
+  clearTimeout(gifFrameTimer);
+  gifFrameRequest++;
+  for (const preview of scalePreviews) preview.dispose();
+  scalePreviews = [];
+  const canvas = doc && previewDocument === saved && renderer
+    ? document.querySelector<HTMLCanvasElement>("#preview-canvas")
+    : null;
+  const previewState = canvas ? document.querySelector("#preview-state")?.textContent : null;
+  if (!canvas) stopPreview();
   if (doc && !doc.character.animations[selectedClip]) selectedClip = doc.character.defaultAnimation;
   app.innerHTML = `<aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">b<span>•</span></span><span>buddy<span class="brand-studio">STUDIO</span></span></a><div class="workspace-label">LOCAL WORKSPACE <span class="local-dot"></span></div><div class="sidebar-heading"><h2>프로젝트 <span>${projects.filter((p) => p.archived === archived).length}</span></h2><button class="icon-button" data-action="new" aria-label="프로젝트 만들기">＋</button></div><div class="project-list">${
     projects
@@ -384,7 +438,18 @@ function layout(push = false) {
   if (projectLoading) setProjectLoading(true);
   if (doc) {
     syncRoute(push);
-    startPreview();
+    if (canvas) {
+      document.querySelector("#preview-canvas")!.replaceWith(canvas);
+      document.querySelector("#preview-state")!.textContent = previewState ?? selectedClip;
+      if (previewClip !== selectedClip) playClip(selectedClip);
+    } else startPreview();
+    setPreviewWork(previewWork);
+    if (tab === "animations") {
+      startScaleComparison();
+      setupCrop();
+      const input = document.querySelector<HTMLInputElement>("#gif-frame-number");
+      if (input) showGifFrame(input.valueAsNumber, 0);
+    }
     if (doc.meta.archived) {
       for (const input of document.querySelectorAll<
         HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
@@ -412,6 +477,7 @@ function editor() {
     ["resources", "리소스"],
     ["animations", "애니메이션"],
     ["idle", "대기 상태"],
+    ["follow", "마우스 따라오기"],
     ["events", "이벤트"],
     ["timing", "타이밍"],
     ["builds", "빌드"],
@@ -422,13 +488,20 @@ function editor() {
     )
     .join(
       "",
-    )}</nav><div class="editor-content">${validationPanel()}${restoredDraft && dirty ? '<div class="draft-banner"><div><strong>임시 편집을 복원했습니다.</strong><p>저장하면 미리보기와 다음 빌드에 반영됩니다.</p></div><button class="small" data-action="discard-draft">편집 버리기</button></div>' : ""}${({ overview: overview, resources: resources, animations: animations, idle: idleSettings, events: events, timing: timing, builds: builds }[tab] ?? overview)()}</div></main>${previewPanel()}</div><footer class="workspace-footer"><span><i class="local-dot"></i> 로컬 프로젝트 · ${esc(doc!.project.product.version)}</span><span title="${esc(doc!.contentHash)}">${esc(doc!.contentHash.slice(0, 12))} · ${date(doc!.meta.updatedAt)}</span></footer>`;
+    )}</nav><div class="editor-content">${validationPanel()}${restoredDraft && dirty ? '<div class="draft-banner"><div><strong>임시 편집을 복원했습니다.</strong><p>저장하면 미리보기와 다음 빌드에 반영됩니다.</p></div><button class="small" data-action="discard-draft">편집 버리기</button></div>' : ""}${({ overview: overview, resources: resources, animations: animations, idle: idleSettings, follow: followSettings, events: events, timing: timing, builds: builds }[tab] ?? overview)()}</div></main>${previewPanel()}</div><footer class="workspace-footer"><span><i class="local-dot"></i> 로컬 프로젝트 · ${esc(doc!.project.product.version)}</span><span title="${esc(doc!.contentHash)}">${esc(doc!.contentHash.slice(0, 12))} · ${date(doc!.meta.updatedAt)}</span></footer>`;
 }
 function title(kicker: string, name: string, description: string) {
   return `<div class="section-title"><span class="eyebrow">${kicker}</span><h2>${name}</h2><p>${description}</p></div>`;
 }
+function defaultSizeFields() {
+  const defaults = doc!.project.defaults;
+  const absolute = defaults.displayHeightDip != null;
+  return `<label class="field"><span>기본 크기 기준</span><select id="display-size-mode">${option("height", "대기 모션의 표시 높이 (DIP)", absolute ? "height" : "scale")}${option("scale", "리소스 기준 배율", absolute ? "height" : "scale")}</select></label>${absolute
+    ? field("기본 대기 높이 (DIP)", "project.defaults.displayHeightDip", "number", 'min="16" max="1024" step="any"')
+    : field("기본 크기 배율", "project.defaults.scale", "number", 'min="0.25" max="3" step="0.05"')}`;
+}
 function overview() {
-  return `${title("PROJECT DETAILS", "버디의 기본 정보", "앱 이름, 표시 크기와 기본 동작을 설정합니다.")}<div class="card"><div class="form-grid">${field("앱 이름", "project.product.name")}${field("실행 파일 이름 (slug)", "project.product.slug", "text", jobs.some((j) => j.status === "succeeded") ? "readonly" : "")}${field("버전", "project.product.version")}${field("캐릭터 이름", "character.name")}</div><label class="field"><span>패키지 ID <small>프로젝트 폴더·URL·앱 식별자로 사용합니다.</small></span><input value="${esc(doc!.project.product.identifier)}" readonly></label></div><div class="card"><h3>데스크톱에서의 모습</h3><div class="form-grid">${field("기본 크기 배율", "project.defaults.scale", "number", 'min="0.25" max="3" step="0.05"')}${field("화면 여백 (DIP)", "project.defaults.position.marginDip", "number", 'min="0" max="256"')}${field("기준 프레임 너비 (px)", "character.sheet.frameWidth", "number", 'min="16" max="512"')}${field("기준 프레임 높이 (px)", "character.sheet.frameHeight", "number", 'min="16" max="512"')}</div><p class="hint">이미지와 GIF는 기준 프레임 안에 비율을 유지해 표시됩니다. 버디를 드래그하면 위치가 저장됩니다.</p>${check("항상 위에 표시", "project.defaults.alwaysOnTop")}${check("키보드 감지", "project.defaults.input.keyboard")}${check("마우스 감지", "project.defaults.input.mouse")}${check("키를 누르고 있을 때 이동 허용", "project.defaults.movementEnabled")}</div><div class="card"><h3>앱 아이콘 · 리소스 이용 조건</h3><div class="icon-upload"><img src="/api/projects/${doc!.meta.id}/source/assets/app-icon.png" alt="앱 아이콘"><div><strong>앱 아이콘</strong><p>512~1024px 정사각형 PNG</p><label class="button small">아이콘 교체<input type="file" id="icon-upload" accept="image/png" hidden></label></div></div><label class="field"><span>프로젝트 리소스 라이선스</span><textarea data-path="license" rows="5">${esc(doc!.license)}</textarea></label><p class="hint">가져온 리소스의 이용 조건과 출처를 여기에 모아두세요. 빌드 패키지에 함께 포함됩니다.</p></div>`;
+  return `${title("PROJECT DETAILS", "버디의 기본 정보", "앱 이름, 표시 크기와 기본 동작을 설정합니다.")}<div class="card"><div class="form-grid">${field("앱 이름", "project.product.name")}${field("실행 파일 이름 (slug)", "project.product.slug", "text", (doc!.meta.builtSlug || jobs.some((j) => j.status === "succeeded" || j.status === "partial")) ? "readonly" : "")}${field("버전", "project.product.version")}${field("캐릭터 이름", "character.name")}</div><label class="field"><span>패키지 ID <small>프로젝트 폴더·URL·앱 식별자로 사용합니다.</small></span><input value="${esc(doc!.project.product.identifier)}" readonly></label></div><div class="card"><h3>데스크톱에서의 모습</h3><div class="form-grid">${defaultSizeFields()}${field("처음 배치 여백 (DIP)", "project.defaults.position.marginDip", "number", 'min="0" max="256"')}${field("기준 프레임 너비 (px)", "character.sheet.frameWidth", "number", 'min="16" max="512"')}${field("기준 프레임 높이 (px)", "character.sheet.frameHeight", "number", 'min="16" max="512"')}</div><p class="hint">표시 높이는 투명 여백을 제외한 기본 대기 모션의 높이입니다. 화면에 맞춰 줄어들 수 있으며, 화면 가장자리에서는 모든 모션에 여백을 둡니다.</p>${check("항상 위에 표시", "project.defaults.alwaysOnTop")}${check("키보드 감지", "project.defaults.input.keyboard")}${check("마우스 감지", "project.defaults.input.mouse")}${check("키를 누르고 있을 때 이동 허용", "project.defaults.movementEnabled")}</div><div class="card"><h3>앱 아이콘 · 리소스 이용 조건</h3><div class="icon-upload"><img src="/api/projects/${doc!.meta.id}/source/assets/app-icon.png" alt="앱 아이콘"><div><strong>앱 아이콘</strong><p>512~1024px 정사각형 PNG</p><label class="button small">아이콘 교체<input type="file" id="icon-upload" accept="image/png" hidden></label></div></div><label class="field"><span>프로젝트 리소스 라이선스</span><textarea data-path="license" rows="5">${esc(doc!.license)}</textarea></label><p class="hint">가져온 리소스의 이용 조건과 출처를 여기에 모아두세요. 빌드 패키지에 함께 포함됩니다.</p></div>`;
 }
 function resourceReferences(id: string) {
   const used = Object.entries(doc!.character.animations).filter(([, a]) => (a.resource ?? "sheet") === id);
@@ -445,7 +518,7 @@ function usedByIdle(name: string) {
 }
 function animationReferences(name: string) {
   const used = doc!.project.bindings.map((b, i) => ({ b, i })).filter(({ b }) => usesAnimation(b.effect, name));
-  return `<div class="usage-links"><span>연결 이벤트 ${used.length}</span>${used.map(({ b, i }) => `<button class="chip" data-action="reference-binding" data-id="${i}">${esc(b.id)} →</button>`).join("") || "<small>아직 연결된 이벤트가 없습니다.</small>"}${usedByIdle(name) ? '<button class="chip" data-action="tab" data-id="idle">대기 상태 →</button>' : ""}</div>`;
+  return `<div class="usage-links"><span>연결 이벤트 ${used.length}</span>${used.map(({ b, i }) => `<button class="chip" data-action="reference-binding" data-id="${i}">${esc(b.id)} →</button>`).join("") || "<small>아직 연결된 이벤트가 없습니다.</small>"}${usedByIdle(name) ? '<button class="chip" data-action="tab" data-id="idle">대기 상태 →</button>' : ""}${doc!.project.cursorFollow?.bands.some(band => band.animation === name) ? '<button class="chip" data-action="tab" data-id="follow">마우스 따라오기 →</button>' : ""}</div>`;
 }
 const isAudio = (filename: string) => /\.(mp3|wav)$/i.test(filename);
 function soundName(id: string, file: string) {
@@ -463,16 +536,16 @@ function soundCards() {
 }
 function resources() {
   const entries = Object.entries(doc!.character.resources ?? {});
-  return `${title("RESOURCE LIBRARY", "버디의 모든 리소스", "이미지와 사운드를 가져와 애니메이션이나 이벤트에 연결하세요.")}<label class="dropzone" id="dropzone"><input type="file" id="resource-upload" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.wav,.mp3" multiple hidden><span class="upload-symbol">↥</span><strong>이미지나 사운드를 놓거나 클릭해서 가져오기</strong><span>PNG · JPG · GIF · WebP · BMP · WAV · MP3 / 파일당 최대 16 MB</span></label><div class="resource-grid"><article class="resource-card"><div class="resource-art checker"><img src="${sourceUrl(doc!.character.image)}" alt="기본 스프라이트"></div><div><strong>기본 스프라이트</strong><span>PNG · ${doc!.character.sheet.width} × ${doc!.character.sheet.height}</span></div><small class="resource-id">sheet · 기본 제공</small>${resourceReferences("sheet")}</article>${entries
+  return `${title("RESOURCE LIBRARY", "버디의 모든 리소스", "이미지와 사운드를 가져와 애니메이션이나 이벤트에 연결하세요.")}<label class="dropzone" id="dropzone"><input type="file" id="resource-upload" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.wav,.mp3" multiple hidden><span class="upload-symbol">↥</span><strong>이미지나 사운드를 놓거나 클릭해서 가져오기</strong><span>PNG · JPG · GIF · WebP · BMP · WAV · MP3 / 파일당 최대 16 MB</span></label><p class="hint">이미지와 GIF는 표시할 때 기준 프레임에 자동으로 맞춥니다. <button class="text-button" data-action="tab" data-id="overview">크기 기준 ${doc!.character.sheet.frameWidth} × ${doc!.character.sheet.frameHeight} px</button></p><div class="resource-grid"><article class="resource-card"><div class="resource-art checker"><img src="${sourceUrl(doc!.character.image)}" alt="기본 스프라이트"></div><div><strong>기본 스프라이트</strong><span>PNG · ${doc!.character.sheet.width} × ${doc!.character.sheet.height}</span></div><small class="resource-id">sheet · 기본 제공</small>${resourceReferences("sheet")}</article>${entries
     .map(([id, r]) => {
       const f = r.image.slice(10),
         file = doc!.library[f];
-      return `<article class="resource-card"><div class="resource-art checker"><img src="${resourceUrl(f)}" alt="${esc(id)}"></div><div><strong title="${esc(file?.originalName)}">${esc(file?.originalName ?? id)}</strong><span>${esc(f.split(".").at(-1)?.toUpperCase())} · ${file ? prettySize(file.bytes) : ""}</span></div><div class="resource-bottom"><small class="resource-id">${esc(id)}</small><button class="text-button danger" data-action="remove-resource" data-id="${esc(id)}">제외</button></div>${resourceReferences(id)}</article>`;
+      return `<article class="resource-card"><div class="resource-art checker"><img src="${resourceUrl(f)}" alt="${esc(id)}" loading="lazy" decoding="async"></div><div><strong title="${esc(file?.originalName)}">${esc(file?.originalName ?? id)}</strong><span>${esc(f.split(".").at(-1)?.toUpperCase())} · ${file ? prettySize(file.bytes) : ""}</span></div><div class="resource-bottom"><small class="resource-id">${esc(id)}</small><button class="text-button danger" data-action="remove-resource" data-id="${esc(id)}">제외</button></div>${resourceReferences(id)}</article>`;
     })
     .join(
       "",
     )}</div>${soundCards()}<p class="hint">GIF는 프레임과 재생 시간을 읽어 이벤트마다 처음부터 재생합니다. 애니메이션 WebP/APNG는 GIF 또는 스프라이트로 변환해서 가져오세요.</p><div class="card"><h3>보관함 <span class="count">${Object.keys(doc!.library).length}</span></h3><p class="hint">구성에서 제외해도 원본은 남아 있습니다. 이전 버전 복원과 재사용에 사용할 수 있습니다.</p>${
-    Object.values(doc!.library)
+    Object.values(doc!.library).filter(file => !file.name.endsWith(".html"))
       .map((f) => {
         const used = isAudio(f.name)
           ? Object.values(doc!.character.sounds).some((sound) => sound.audio === `resources/${f.name}`)
@@ -502,17 +575,67 @@ function animations() {
     )
     .join(
       "",
-    )}</select></label><div class="form-grid">${field("재생 속도 (FPS)", `${p}.fps`, "number", 'min="1" max="30"')}${check("반복 재생", `${p}.loop`)}</div>${isGif ? check("GIF 원본 프레임 시간 사용", `${p}.useSourceTiming`) : a.resource ? "" : `<label class="field"><span>스프라이트 프레임 번호 (0부터, 쉼표로 구분)</span><input id="clip-frames" value="${a.frames.join(", ")}" placeholder="0, 1, 2, 3"></label>`}<p class="hint">일회성 이벤트는 반복을 끄고, 입력 속도·키 유지·드래그 동작은 반복을 켜세요. GIF는 프레임과 영역을 비워두면 전체를 사용합니다.</p></div>${animationReferences(selectedClip)}${isGif ? gifFramesEditor(a) : cropEditor(a)}`;
+    )}</select></label><div class="form-grid">${field("재생 속도 (FPS)", `${p}.fps`, "number", 'min="1" max="30"')}${check("반복 재생", `${p}.loop`)}</div>${isGif ? check("GIF 원본 프레임 시간 사용", `${p}.useSourceTiming`) : a.resource ? "" : `<label class="field"><span>스프라이트 프레임 번호 (0부터, 쉼표로 구분)</span><input id="clip-frames" value="${a.frames.join(", ")}" placeholder="0, 1, 2, 3"></label>`}<p class="hint">일회성 이벤트는 반복을 끄고, 입력 속도·키 유지·드래그 동작은 반복을 켜세요. GIF는 프레임과 영역을 비워두면 전체를 사용합니다.</p></div>${scaleEditor(a)}${animationReferences(selectedClip)}${isGif ? gifFramesEditor(a) : cropEditor(a)}`;
+}
+function anchorPercent(anchor: number | null | undefined) {
+  return anchor == null ? "" : String(Number((anchor * 100).toFixed(8)));
+}
+function scaleEditor(animation: Animation) {
+  const size = animation.scalePercent ?? 100;
+  const idle = doc!.character.defaultAnimation;
+  const limits = `min="${animationScaleLimits.min}" max="${animationScaleLimits.max}" step="1"`;
+  const canCompare = !!saved?.renderPlan.animations[idle] && !!saved.renderPlan.animations[selectedClip];
+  return `<div class="card"><div class="card-heading"><h3>동작 크기와 방향 맞추기</h3><button class="small" data-action="reset-clip-scale" id="reset-clip-scale" ${size === 100 ? "disabled" : ""}>100%로 초기화</button></div>
+    <div class="clip-scale-controls">
+      <label class="field"><span>표시 배율</span><input id="clip-scale-range" type="range" ${limits} value="${size}"></label>
+      <label class="field"><span>배율 (%)</span><input id="clip-scale-number" type="number" ${limits} value="${size}"></label>
+    </div>
+    <p class="hint">100%는 자동 맞춤 크기입니다. 배율은 동작의 모든 프레임에 같이 적용됩니다.</p>
+    <div class="form-grid">
+      <label class="field"><span>원본이 보는 방향</span><select id="clip-source-facing">${option("right", "오른쪽", animation.sourceFacing ?? "right")}${option("left", "왼쪽", animation.sourceFacing ?? "right")}</select></label>
+      <label class="field"><span>가로 기준점 (%)</span><input id="clip-anchor-x" type="number" min="0" max="100" step="any" placeholder="공통값 ${anchorPercent(doc!.character.anchor.x)}%" value="${anchorPercent(animation.anchorX)}"></label>
+    </div>
+    <p class="hint">가로 기준점은 프레임 왼쪽에서 잰 위치입니다. 비워 두면 캐릭터 공통 기준점을 사용합니다.</p>
+    ${canCompare ? `<label class="field"><span>선택한 동작 미리보기 방향</span><select id="clip-preview-facing"><option value="">원본</option><option value="left">왼쪽 보기</option><option value="right">오른쪽 보기</option></select></label>
+    <div class="clip-scale-compare">
+      <figure><div class="clip-scale-stage checker"><canvas id="clip-scale-reference" aria-label="기준 대기 동작"></canvas></div><figcaption>${idle === selectedClip ? "저장한 대기" : "기준 대기"} · ${esc(idle)}</figcaption></figure>
+      <figure><div class="clip-scale-stage checker"><canvas id="clip-scale-preview" aria-label="선택한 동작의 크기"></canvas></div><figcaption>선택한 동작 · ${esc(selectedClip)}</figcaption></figure>
+    </div><p class="hint">중앙선은 방향을 바꿔도 움직이지 않는 기준점입니다.</p>` : '<p class="hint">동작을 한 번 저장하면 대기 동작과 나란히 비교할 수 있습니다.</p>'}
+  </div>`;
 }
 function gifFrameUrl(file: string, index: number) {
   return `/api/projects/${doc!.meta.id}/gif-frame/${encodeURIComponent(file)}/${index}`;
+}
+function showGifFrame(index: number, delay = 160) {
+  clearTimeout(gifFrameTimer);
+  const request = ++gifFrameRequest;
+  const animation = doc!.character.animations[selectedClip];
+  const filename = doc!.character.resources[animation.resource!].image.slice(10);
+  const status = document.querySelector<HTMLElement>("#gif-frame-status")!;
+  status.textContent = `${index}번 프레임을 불러오는 중…`;
+  gifFrameTimer = window.setTimeout(() => {
+    const image = new Image();
+    image.id = "gif-frame-preview";
+    image.alt = `GIF ${index}번 프레임`;
+    image.onload = () => {
+      if (request !== gifFrameRequest) return;
+      document.querySelector("#gif-frame-preview")!.replaceWith(image);
+      status.textContent = `${index}번 프레임`;
+    };
+    image.onerror = () => {
+      if (request === gifFrameRequest)
+        status.textContent = `${index}번 프레임을 불러오지 못했습니다.`;
+    };
+    image.src = gifFrameUrl(filename, index);
+  }, delay);
 }
 function gifFramesEditor(animation: Animation) {
   const filename = doc!.character.resources[animation.resource!].image.slice(10);
   const count = doc!.library[filename]?.frames;
   const first = animation.frames[0] ?? 0;
   return `<div class="card"><h3>GIF 프레임 선택</h3><p class="hint">재생 목록을 비우면 원본 전체를 재생합니다. 번호 순서대로 재생하며 같은 프레임을 반복해서 넣을 수 있습니다.</p>
-    <div class="gif-frame-preview checker"><img id="gif-frame-preview" src="${gifFrameUrl(filename, first)}" alt="GIF ${first}번 프레임"></div>
+    <div class="gif-frame-preview checker"><img id="gif-frame-preview" alt="" hidden></div>
+    <p id="gif-frame-status" class="hint" role="status"></p>
     <div class="row-actions"><label class="field"><span>확인할 프레임 번호${count ? ` (0~${count - 1})` : ""}</span><input id="gif-frame-number" type="number" min="0" max="${(count ?? 256) - 1}" value="${first}" step="1"></label>
     <button class="small" data-action="append-gif-frame">＋ 재생 목록에 추가</button><button class="small" data-action="clear-gif-frames">전체 프레임 사용</button></div>
     <label class="field"><span>재생 목록 (쉼표로 구분)</span><input id="clip-frames" value="${animation.frames.join(", ")}" placeholder="전체 프레임"></label></div>`;
@@ -540,6 +663,7 @@ const triggerNames: Record<string, string> = {
   keySequence: "숨겨진 키워드",
   mouseDown: "마우스 누름",
   mouseUp: "마우스 뗌",
+  buddyClick: "버디 클릭",
   wheel: "휠",
   drag: "버디 드래그",
 };
@@ -548,7 +672,27 @@ function events() {
   if (selectedBinding >= bindings.length)
     selectedBinding = Math.max(0, bindings.length - 1);
   const b = bindings[selectedBinding];
-  return `${title("EVENT MAPPINGS", "입력에 반응을 연결하세요.", "다른 앱에서 작업하는 동안에도 입력을 감지합니다. 버디를 드래그하는 동안의 동작도 지정할 수 있습니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 위쪽이 같은 우선순위에서 먼저 적용됩니다.</span><div class="row-actions"><button class="small" data-action="tab" data-id="idle">대기 상태 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[b.trigger.type]} ${esc((b.trigger as any).code ?? (b.trigger as any).keyword ?? "")}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
+  return `${title("EVENT MAPPINGS", "입력에 반응을 연결하세요.", "다른 앱에서 작업하는 동안의 입력과 버디를 직접 클릭하거나 드래그했을 때의 동작을 설정합니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 숫자가 클수록 우선합니다. 값이 같으면 보조 키 조건을 지정한 이벤트가 먼저 적용됩니다.</span><div class="row-actions"><button class="small" data-action="tab" data-id="idle">대기 상태 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[b.trigger.type]} ${esc(inputChoices(b.trigger).filter(Boolean).join(" / "))}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
+}
+function followSettings() {
+  const heading = title("CURSOR FOLLOW", "마우스 따라오기", "마우스까지의 거리에 따라 이동 속도와 애니메이션을 바꿉니다.");
+  const config = doc!.project.cursorFollow;
+  if (!config) return `${heading}<div class="card"><button class="small" data-action="configure-follow">따라오기 설정</button></div>`;
+  const path = "project.cursorFollow";
+  const looping = clips().filter(name => doc!.character.animations[name].loop);
+  return `${heading}<div class="card" id="follow-settings"><div class="card-heading"><h3>거리와 이동 동작</h3><button class="text-button" data-action="remove-follow">설정 제거</button></div>
+    ${check("설치 후 기본으로 켜기", `${path}.enabled`)}
+    <div class="form-grid">${field("마우스 앞에서 멈출 거리 (DIP)", `${path}.stopDistanceDip`, "number", 'min="0" max="2000" step="1"')}
+    <label class="field"><span>따라오기 우선순위 (0~100)</span><input id="follow-priority" type="number" min="0" max="100" step="1" placeholder="기본 순서" value="${config.priority ?? ""}"></label></div>
+    <p class="hint">숫자가 클수록 우선하고, 같으면 이벤트가 먼저 표시됩니다. 비워 두면 일회성 이벤트가 먼저 표시되고, 지속 이벤트보다 따라오기가 우선합니다.</p>
+    <p class="hint">0이면 캐릭터 중심이 포인터까지 이동합니다. 앱의 설정이나 우클릭 메뉴에서 켜고 끌 수 있습니다. 다른 화면에 있는 포인터는 따라가지 않습니다.</p>
+    ${config.bands.map((band, index) => {
+      const key = `${path}.bands.${index}`;
+      const current = band.animation ?? "";
+      return `<div class="form-grid">${field("이 거리부터 적용 (DIP)", `${key}.minDistanceDip`, "number", `min="0" max="10000" step="1" ${index === 0 ? "readonly" : ""}`)}${field("속도 (DIP/초)", `${key}.speedDipPerSecond`, "number", 'min="1" max="1000" step="1"')}</div><label class="field"><span>반복 애니메이션</span><select data-follow-band="${index}">${option("", "기본 대기 모습", current)}${looping.map(name => option(name, name, current)).join("")}</select></label>${index > 0 ? `<button class="text-button" data-action="remove-follow-band" data-id="${index}">이 구간 삭제</button>` : ""}`;
+    }).join("")}
+    <p class="hint">현재 거리가 여러 구간에 해당하면 가장 먼 구간부터 적용합니다. 예를 들어 가까우면 걷고 180 DIP부터 뛰도록 설정할 수 있습니다.</p>
+    <button class="small" data-action="add-follow-band" ${config.bands.length >= 8 ? "disabled" : ""}>＋ 거리 구간</button></div>`;
 }
 const cursorDirections: [CursorDirection, string][] = [
   ["upLeft", "↖ 왼쪽 위"], ["up", "↑ 위"], ["upRight", "↗ 오른쪽 위"],
@@ -606,7 +750,7 @@ function idleSettings() {
       const mirror = pose?.mirror == null ? "" : String(pose.mirror);
       return `<fieldset class="cursor-direction"><legend>${label}</legend>
         <label class="field"><span>애니메이션 또는 리소스</span><select data-cursor-direction="${direction}" data-pose-field="animation">${idleAppearanceOptions(pose?.animation ?? undefined, true)}</select></label>
-        <label class="field"><span>좌우 방향</span><select data-cursor-direction="${direction}" data-pose-field="mirror">${option("", "자동 (왼쪽에서 반전)", mirror)}${option("false", "원본", mirror)}${option("true", "좌우 반전", mirror)}</select></label>
+        <label class="field"><span>좌우 방향</span><select data-cursor-direction="${direction}" data-pose-field="mirror">${option("", "자동 (커서 방향)", mirror)}${option("false", "원본", mirror)}${option("true", "좌우 반전", mirror)}</select></label>
         <button class="small" data-action="test-cursor" data-id="${direction}" aria-label="${label} 미리보기">미리보기</button></fieldset>`;
     }).join("")}</div>` : ""}</div>`;
 }
@@ -634,6 +778,102 @@ function reactionSettings(binding: Binding, path: string) {
     ${finish ? "" : `<label class="field"><span>같은 이벤트가 반복되면</span><select data-path="${path}.effect.retrigger">${option("restart", "처음부터 재생", effect.retrigger)}${option("ignore", "현재 재생 유지", effect.retrigger)}</select></label>`}
     </div>${finish ? '<p class="hint">표시 시간이 끝날 때까지 다른 입력이나 같은 이벤트가 재생을 바꾸지 않습니다.</p>' : ["keyDown", "mouseDown"].includes(binding.trigger.type) ? check("키·버튼을 떼면 즉시 대기로 복귀", `${path}.effect.stopOnRelease`) : ""}`;
 }
+type KeyboardTrigger = Extract<Binding["trigger"], { code: string }>;
+type KeywordTrigger = Extract<Binding["trigger"], { type: "keySequence" }>;
+const modifierOptions = [
+  { id: "control", label: "Ctrl", flag: "ctrlKey", key: "Control" },
+  { id: "alt", label: "Alt", flag: "altKey", key: "Alt" },
+  { id: "shift", label: "Shift", flag: "shiftKey", key: "Shift" },
+  { id: "meta", label: /Win/.test(navigator.platform) ? "Win" : "Cmd", flag: "metaKey", key: "Meta" },
+] as const;
+const physicalKeys = new Set(supportedPhysicalKeys);
+let pendingModifier: { code: string; modifiers: KeyModifier[] } | undefined;
+
+function keyCombinationLabel({ code, modifiers }: KeyChord) {
+  const keyLabel = code === "*" ? "모든 일반 키" : code.replace(/^(Key|Digit)(?=.$)/, "") || "키를 입력하세요";
+  const labels = modifierOptions.filter((key) => modifiers?.includes(key.id)).map((key) => key.label);
+  return [...labels, keyLabel].join(" + ");
+}
+
+function inputChoices(trigger: Binding["trigger"]): string[] {
+  if ("code" in trigger) return [trigger, ...(trigger.alternatives ?? [])].map(keyCombinationLabel);
+  if (trigger.type === "keySequence") return [
+    trigger.keyword || (trigger.steps?.length ? "직접 지정한 키 순서" : ""),
+    ...(trigger.alternatives ?? []).map(({ keyword }) => keyword),
+  ];
+  return [];
+}
+
+function keyboardTriggerEditor(trigger: KeyboardTrigger, path: string) {
+  const keys = [trigger, ...(trigger.alternatives ?? [])];
+  return `<div class="key-capture-list"><div class="card-heading"><strong>키 입력</strong><button type="button" class="small" data-action="add-key-choice" ${keys.length >= 32 ? "disabled" : ""}>＋ 키 추가</button></div>
+    <p class="hint">등록한 키 조합 중 하나가 들어오면 이 이벤트를 실행합니다.</p>
+    ${keys.map((key, index) => keyboardChoiceEditor(key, index === 0 ? path : `${path}.alternatives.${index - 1}`, index, keys.length > 1, trigger.type !== "whileKeyDown")).join("")}
+    ${trigger.type === "keyDown" ? check("키를 길게 눌러 반복되는 입력에도 반응", `${path}.repeat`) : ""}
+  </div>`;
+}
+
+function keyboardChoiceEditor(key: KeyChord, path: string, index: number, removable: boolean, allowWildcard: boolean) {
+  const { code, modifiers } = key;
+  const summary = esc(keyCombinationLabel(key) + (modifiers == null ? " · 보조 키 무관" : ""));
+  return `<div class="key-capture" data-key-index="${index}">
+    <div class="card-heading"><p id="key-capture-status-${index}" data-key-status class="hint" aria-live="polite" data-summary="${summary}">${summary}</p><div class="row-actions">
+      <button type="button" class="small" aria-pressed="false" aria-describedby="key-capture-status-${index}" data-action="capture-key" data-id="${index}">키 녹화</button>
+      ${removable ? `<button type="button" class="text-button danger" data-action="remove-key-choice" data-id="${index}" aria-label="키 입력 ${index + 1} 삭제">삭제</button>` : ""}
+    </div></div>
+    <details><summary>키 코드와 보조 키 직접 설정</summary>
+      ${field("물리 키 코드", `${path}.code`)}
+      <label class="field"><span>보조 키 조건</span><select data-key-modifier-mode>${option("any", "보조 키 무관", modifiers == null ? "any" : "exact")}${option("exact", "지정한 보조 키만", modifiers == null ? "any" : "exact")}</select></label>
+      <div class="key-modifier-options">${modifierOptions.map(({ id, label, key }) =>
+        `<label class="toggle"><input type="checkbox" data-key-modifier="${id}" ${modifiers?.includes(id) ? "checked" : ""} ${modifiers == null || code.startsWith(key) ? "disabled" : ""}><span>${label}</span></label>`
+      ).join("")}</div>
+      ${allowWildcard ? '<p class="hint">키 코드에 *를 입력하면 모든 일반 키에 반응합니다.</p>' : ""}
+    </details>
+  </div>`;
+}
+
+function keywordTriggerEditor(trigger: KeywordTrigger, path: string) {
+  const choices = [trigger, ...(trigger.alternatives ?? [])];
+  return `<div class="key-capture-list"><div class="card-heading"><strong>키워드 입력</strong><button type="button" class="small" data-action="add-keyword-choice" ${choices.length >= 32 ? "disabled" : ""}>＋ 키워드 추가</button></div>
+    <p class="hint">각 키워드를 지정한 키 배열의 물리 키 순서로 입력하면 같은 이벤트가 실행됩니다.</p>
+    ${choices.map(({ layout }, index) => {
+      const choice = index === 0 ? path : `${path}.alternatives.${index - 1}`;
+      const remove = choices.length > 1 ? `<button type="button" class="text-button danger" data-action="remove-keyword-choice" data-id="${index}">키워드 ${index + 1} 삭제</button>` : "";
+      return `<div class="key-capture">${index === 0 && trigger.steps?.length ? '<p class="hint">직접 지정한 물리 키 순서</p>' :
+        `<div class="form-grid">${field(`키워드 ${index + 1}`, `${choice}.keyword`)}<label class="field"><span>키 배열</span><select data-path="${choice}.layout">${option("ko-KR-2set", "한글 두벌식", layout ?? "ko-KR-2set")}${option("en-US-qwerty", "영문 QWERTY", layout ?? "ko-KR-2set")}</select></label></div>`}${remove}</div>`;
+    }).join("")}
+    ${field("입력 제한 시간 (ms)", `${path}.timeoutMs`, "number", 'min="500" max="10000"')}
+  </div>`;
+}
+
+function captureButton(index: number) {
+  return document.querySelector<HTMLButtonElement>(`[data-action="capture-key"][data-id="${index}"]`);
+}
+
+function setKeyCapture(button: HTMLButtonElement, active: boolean) {
+  pendingModifier = undefined;
+  const status = button.closest(".key-capture")?.querySelector<HTMLElement>("[data-key-status]");
+  if (!status) return;
+  button.setAttribute("aria-pressed", String(active));
+  button.textContent = active ? "녹화 취소" : "키 녹화";
+  status.textContent = active ? "등록할 키나 키 조합을 눌러주세요." : status.dataset.summary!;
+  if (active) button.focus();
+}
+
+function saveCapturedKey(button: HTMLButtonElement, code: string, modifiers: KeyModifier[]) {
+  const trigger = doc?.project.bindings[selectedBinding]?.trigger;
+  if (!trigger || !("code" in trigger)) return;
+  const index = Number(button.dataset.id);
+  const key = index === 0 ? trigger : trigger.alternatives?.[index - 1];
+  if (!key) return;
+  setKeyCapture(button, false);
+  key.code = code;
+  key.modifiers = modifiers;
+  markDirty();
+  layout();
+  captureButton(index)?.focus();
+}
+
 function bindingEditor(b: Binding) {
   const t: any = b.trigger,
     e: any = b.effect,
@@ -644,7 +884,7 @@ function bindingEditor(b: Binding) {
     .map(([k, v]) => option(k, v, t.type))
     .join(
       "",
-    )}</select></label></div>${["keyDown", "keyUp", "whileKeyDown"].includes(t.type) ? `${field("물리 키 코드", `${p}.trigger.code`)}<p class="hint">예: Space, Enter, KeyA, ArrowRight. 키 누름·뗌에 *를 쓰면 일반 키 전체에 반응합니다.</p>${t.type === "keyDown" ? check("키를 길게 눌러 반복되는 입력에도 반응", `${p}.trigger.repeat`) : ""}` : ""}${t.type === "typingRate" ? `<div class="form-grid">${field("최소 입력 속도 (키/초)", `${p}.trigger.minKps`, "number", 'min="0.5" step="0.5"')}<label class="field"><span>최대 입력 속도 (비우면 제한 없음)</span><input id="max-kps" type="number" min="0.5" step="0.5" value="${t.maxKps ?? ""}"></label></div><p class="hint">최소값 이상, 최대값 미만에 적용합니다. 속도 구간은 서로 겹칠 수 없습니다.</p>` : ""}${t.type === "keySequence" ? `${field("키워드", `${p}.trigger.keyword`)}<div class="form-grid"><label class="field"><span>키 배열</span><select data-path="${p}.trigger.layout">${option("ko-KR-2set", "한글 두벌식", t.layout)}${option("en-US-qwerty", "영문 QWERTY", t.layout)}</select></label>${field("입력 제한 시간 (ms)", `${p}.trigger.timeoutMs`, "number", 'min="500" max="10000"')}</div><p class="hint">완성 문자열을 읽지 않고, 지정한 키워드의 물리 키 순서를 검사합니다.</p>` : ""}${["mouseDown", "mouseUp"].includes(t.type) ? `<label class="field"><span>마우스 버튼</span><select data-path="${p}.trigger.button">${["primary", "secondary", "middle"].map((v, i) => option(v, ["왼쪽", "오른쪽", "가운데"][i], t.button)).join("")}</select></label>` : ""}${t.type === "wheel" ? `<label class="field"><span>방향</span><select data-path="${p}.trigger.direction">${["up", "down", "left", "right"].map((v) => option(v, v, t.direction)).join("")}</select></label>` : ""}${t.type === "whileKeyDown" ? `<label class="field"><span>동작 종류</span><select id="held-effect">${option("sustainAnimation", "키를 누르는 동안 애니메이션", e.type)}${option("move", "키를 누르는 동안 이동", e.type)}</select></label>` : ""}${
+    )}</select></label></div>${"code" in b.trigger ? keyboardTriggerEditor(b.trigger, `${p}.trigger`) : ""}${t.type === "typingRate" ? `<div class="form-grid">${field("최소 입력 속도 (키/초)", `${p}.trigger.minKps`, "number", 'min="0.5" step="0.5"')}<label class="field"><span>최대 입력 속도 (비우면 제한 없음)</span><input id="max-kps" type="number" min="0.5" step="0.5" value="${t.maxKps ?? ""}"></label></div><p class="hint">최소값 이상, 최대값 미만에 적용합니다. 속도 구간은 서로 겹칠 수 없습니다.</p>` : ""}${b.trigger.type === "keySequence" ? keywordTriggerEditor(b.trigger, `${p}.trigger`) : ""}${["mouseDown", "mouseUp"].includes(t.type) ? `<label class="field"><span>마우스 버튼</span><select data-path="${p}.trigger.button">${["primary", "secondary", "middle"].map((v, i) => option(v, ["왼쪽", "오른쪽", "가운데"][i], t.button)).join("")}</select></label>` : ""}${t.type === "buddyClick" ? '<p class="hint">버디 위에서 기본 버튼을 누른 뒤 드래그 없이 놓으면 실행합니다.</p>' : ""}${t.type === "wheel" ? `<label class="field"><span>방향</span><select data-path="${p}.trigger.direction">${["up", "down", "left", "right"].map((v) => option(v, v, t.direction)).join("")}</select></label>` : ""}${t.type === "whileKeyDown" ? `<label class="field"><span>동작 종류</span><select id="held-effect">${option("sustainAnimation", "키를 누르는 동안 애니메이션", e.type)}${option("move", "키를 누르는 동안 이동", e.type)}</select></label>` : ""}${
     e.type !== "faceCursor"
       ? `<label class="field"><span>표시할 애니메이션</span><select data-path="${p}.effect.animation">${e.type === "move" ? option("", "기본 대기 모습", e.animation ?? "") : ""}${clips()
           .filter((n) =>
@@ -660,6 +900,38 @@ function bindingEditor(b: Binding) {
 function timing() {
   return `${title("RESPONSE TIMING", "버디의 반응 리듬", "입력을 멈춘 뒤 계속 움직이는 시간을 줄이고, 속도에 따른 전환을 조절하세요.")}<div class="timing-highlight"><span class="timing-icon">◷</span><div><h3>입력 중단 → 대기 전환</h3><p>마지막 일반 키 입력 후 ${doc!.project.defaults.timing.idleTimeoutMs}ms에 속도 애니메이션을 끝냅니다.</p></div><strong>${doc!.project.defaults.timing.idleTimeoutMs}<small>ms</small></strong></div><div class="card">${field("입력 중단 판정 (ms)", "project.defaults.timing.idleTimeoutMs", "number", 'min="50" max="5000" step="10"')}<p class="hint">기본 250ms. 더 빠른 복귀는 150~200ms, 여유 있는 복귀는 400~600ms를 사용해보세요. 일회성 동작의 길이는 이벤트의 표시 시간에서 조절합니다.</p><div class="form-grid">${field("속도 측정 구간 (ms)", "project.defaults.timing.rateWindowMs", "number", 'min="100" max="10000" step="50"')}${field("속도 평가 간격 (ms)", "project.defaults.timing.rateEvaluationMs", "number", 'min="10" max="250" step="10"')}${field("속도 구간 안정 시간 (ms)", "project.defaults.timing.rateStabilityMs", "number", 'min="0" max="2000" step="10"')}</div><p class="hint">속도 = 측정 구간의 키 입력 수 ÷ 구간(초). 안정 시간이 지나야 새 속도 구간으로 바뀝니다. 중단 판정은 안정 시간과 관계없이 즉시 대기로 돌아갑니다.</p></div><div class="card"><h3>시작 프리셋</h3><div class="preset-row"><button data-action="timing-preset" data-id="snappy">빠릿하게 <small>중단 150ms · 안정 50ms</small></button><button data-action="timing-preset" data-id="balanced">기본 <small>중단 250ms · 안정 100ms</small></button><button data-action="timing-preset" data-id="relaxed">부드럽게 <small>중단 500ms · 안정 200ms</small></button></div></div>`;
 }
+const defaultMacDmg = (): MacosDmg => ({
+  width: 660, height: 420, appPosition: { x: 180, y: 180 }, applicationsPosition: { x: 480, y: 180 },
+});
+function initialGuidePosition(dmg: MacosDmg) {
+  const xCenter = Math.floor(dmg.width / 2), bottom = dmg.height - 128;
+  for (const y of [bottom, 72, Math.floor(dmg.height / 2)]) {
+    for (const x of [xCenter, 72, dmg.width - 72]) {
+      if (x >= 72 && x <= dmg.width - 72 && y >= 72 && y <= bottom &&
+        [dmg.appPosition, dmg.applicationsPosition].every(icon =>
+          Math.abs(x - icon.x) >= 132 || Math.abs(y - icon.y) >= 132))
+        return { x, y };
+    }
+  }
+  return { x: xCenter, y: Math.max(72, bottom) };
+}
+function macInstallerSettings() {
+  const dmg = doc!.project.build.macosDmg;
+  if (!dmg) return `<div class="card"><h3>macOS 설치 화면</h3><p class="hint">DMG를 열었을 때 보이는 배경, 앱 아이콘 배치, 설치 가이드를 설정합니다.</p><button class="small" data-action="configure-dmg">설치 화면 설정</button></div>`;
+  const asset = (slot: "background" | "guide", label: string, accept: string) => {
+    const path = dmg[slot];
+    const filename = path?.split("/").at(-1);
+    return `<div class="library-row"><div><strong>${label}</strong>${filename ? `<small> · ${esc(doc!.library[filename]?.originalName ?? filename)}</small>` : ""}</div><div class="row-actions"><label class="button small">${path ? "교체" : "파일 선택"}<input type="file" data-install-asset="${slot}" accept="${accept}" hidden></label>${path ? `<button class="text-button" data-action="remove-install-asset" data-id="${slot}">제거</button>` : ""}</div></div>`;
+  };
+  const p = "project.build.macosDmg";
+  return `<div class="card" id="mac-dmg-settings"><div class="card-heading"><h3>macOS 설치 화면</h3><button class="text-button" data-action="remove-dmg">기본값으로</button></div>
+    ${asset("background", "DMG 배경 (PNG·JPEG)", ".png,.jpg,.jpeg")}
+    ${asset("guide", "설치 가이드 (PDF·HTML·PNG·JPEG)", ".pdf,.html,.png,.jpg,.jpeg")}
+    <p class="hint">macOS에서는 DMG 안에서, Windows에서는 설치 파일 옆의 별도 가이드로 제공됩니다. HTML은 이미지까지 포함된 단일 UTF-8 파일을 사용하세요.</p>
+    <div class="form-grid">${field("창 너비", `${p}.width`, "number", 'min="400" max="1600" step="1"')}${field("창 높이", `${p}.height`, "number", 'min="260" max="1200" step="1"')}${field("앱 아이콘 X", `${p}.appPosition.x`, "number", 'min="72" step="1"')}${field("앱 아이콘 Y", `${p}.appPosition.y`, "number", 'min="72" step="1"')}${field("Applications 아이콘 X", `${p}.applicationsPosition.x`, "number", 'min="72" step="1"')}${field("Applications 아이콘 Y", `${p}.applicationsPosition.y`, "number", 'min="72" step="1"')}</div>
+    ${dmg.guide ? `<div class="form-grid"><label class="field"><span>가이드 아이콘 배치</span><select id="dmg-guide-position-mode">${option("auto", "자동 배치", dmg.guidePosition ? "manual" : "auto")}${option("manual", "직접 지정", dmg.guidePosition ? "manual" : "auto")}</select></label>${dmg.guidePosition ? `${field("가이드 아이콘 X", `${p}.guidePosition.x`, "number", `min="72" max="${dmg.width - 72}" step="1"`)}${field("가이드 아이콘 Y", `${p}.guidePosition.y`, "number", `min="72" max="${dmg.height - 128}" step="1"`)}` : ""}</div>` : ""}
+    <p class="hint">좌표는 창의 왼쪽 위부터 잰 아이콘 중심입니다. 배경에 화살표와 설치 안내를 그려 넣을 수 있습니다.</p></div>`;
+}
 function builds() {
   const platform = config.target === "macos-arm64" ? "macOS" : "Windows";
   return `${title("BUILD & HISTORY", "프로젝트를 앱으로", "같은 프로젝트 정의와 리소스로 macOS·Windows 앱을 만듭니다.")}<div class="platform-grid">${[
@@ -669,11 +941,12 @@ function builds() {
     const enabled = doc!.project.build.targets.includes(target as any);
     const local = enabled && config.target === target;
     return `<div class="platform-card ${local ? "current" : ""}"><span class="pill">${!enabled ? "구성에서 제외됨" : github.ready ? "Actions에서 빌드" : local ? "이 컴퓨터에서 빌드 가능" : "GitHub 연결 필요"}</span><h3>${label}</h3><p>${format}</p></div>`;
-  }).join("")}</div><section id="github-panel">${githubPanel()}</section><div class="build-banner"><div><h3>macOS + Windows 함께 빌드</h3><p>현재 저장 버전과 참조 리소스·고정 엔진을 ${esc(github.repository)}에 업로드합니다. ${github.connected ? github.private ? "비공개 저장소입니다." : "공개 저장소이므로 업로드한 정의·이미지는 공개됩니다." : "먼저 저장소를 연결하세요."} 두 OS의 진행 상황과 검증한 결과물을 아래 이력에 가져옵니다.</p></div><button class="primary" data-action="build-remote" ${github.connected && github.ready && !doc!.meta.archived ? "" : "disabled"}>업로드하고 두 플랫폼 빌드 ↗</button></div><p class="hint">Actions 개발용 패키지 · 공개 배포 서명·공증과 실제 입력·설치 검증은 별도입니다. 비공개 저장소의 Actions 사용은 GitHub 요금제 한도를 따릅니다.</p><details class="card cross-platform"><summary>이 컴퓨터에서만 빌드 · 프로젝트 내보내기</summary><p>${platform}용 패키지를 로컬에서 만듭니다. 프로젝트를 GitHub에 업로드하지 않습니다.</p><div class="row-actions"><button class="small" data-action="build">${platform} 앱 로컬 빌드 ↗</button><button class="small" data-action="export-project">저장한 프로젝트 내보내기 ↓</button></div></details><div id="build-history">${buildHistory()}</div><details class="card"><summary>저장한 구성 버전 · 복원</summary><p class="hint">모든 저장은 새로운 버전입니다. 이전 리소스와 정의를 함께 복원할 수 있습니다.</p><button class="small" data-action="load-revisions">저장 이력 보기</button><div id="revision-history"></div></details>`;
+  }).join("")}</div>${macInstallerSettings()}<section id="github-panel">${githubPanel()}</section><div class="build-banner"><div><h3>macOS + Windows 함께 빌드</h3><p>현재 저장 버전과 참조 리소스·고정 엔진을 ${esc(github.repository)}에 업로드합니다. ${github.connected ? github.private ? "비공개 저장소입니다." : "공개 저장소이므로 업로드한 정의·이미지는 공개됩니다." : "먼저 저장소를 연결하세요."} 두 OS의 진행 상황과 검증한 결과물을 아래 이력에 가져옵니다.</p></div><button class="primary" data-action="build-remote" ${github.connected && github.ready && !doc!.meta.archived ? "" : "disabled"}>업로드하고 두 플랫폼 빌드 ↗</button></div><p class="hint">Actions 개발용 패키지 · 공개 배포 서명·공증과 실제 입력·설치 검증은 별도입니다. 비공개 저장소의 Actions 사용은 GitHub 요금제 한도를 따릅니다.</p><details class="card cross-platform"><summary>이 컴퓨터에서만 빌드 · 프로젝트 내보내기</summary><p>${platform}용 패키지를 로컬에서 만듭니다. 프로젝트를 GitHub에 업로드하지 않습니다.</p><div class="row-actions"><button class="small" data-action="build">${platform} 앱 로컬 빌드 ↗</button><button class="small" data-action="export-project">저장한 프로젝트 내보내기 ↓</button></div></details><div id="build-history">${buildHistory()}</div><details class="card"><summary>저장한 구성 버전 · 복원</summary><p class="hint">모든 저장은 새로운 버전입니다. 이전 리소스와 정의를 함께 복원할 수 있습니다.</p><button class="small" data-action="load-revisions">저장 이력 보기</button><div id="revision-history"></div></details>`;
 }
 function githubPanel() {
   return `<div class="card github-connection"><div class="card-heading"><h3>GitHub Actions</h3><span class="pill">${github.connected ? github.ready ? "빌드 준비 완료" : "워크플로 준비 필요" : "연결 안 됨"}</span></div>${github.connected ? `<p><strong>${esc(github.repository)}</strong> · ${github.private ? "비공개" : "공개"} · ${esc(github.login)}</p>${github.ready ? "" : `<p>기본 브랜치 ${esc(github.defaultBranch)}에 Studio 전용 워크플로 파일 하나를 ${github.workflowPresent ? "업데이트" : "추가"}합니다. 프로젝트는 빌드할 때 별도 브랜치에 업로드합니다.</p><button class="small" data-action="github-setup">워크플로 ${github.workflowPresent ? "업데이트" : "준비"}</button>`}` : `<p>Git 인증 또는 환경 변수의 GitHub 토큰으로 연결합니다. 다른 컴퓨터에서 빌드를 수행하므로 이 Mac에서도 Windows 결과물을 만들 수 있습니다.</p>`}<p id="github-error" class="error-text" role="alert" ${githubError || github.error ? "" : "hidden"}>${esc(githubError || github.error)}</p><details ${github.connected ? "" : "open"}><summary>${github.connected ? "연결 변경" : "저장소와 인증"}</summary><label class="field"><span>GitHub 저장소</span><input id="github-repository" value="${esc(github.repository)}" placeholder="owner/repository" spellcheck="false" autocomplete="off"></label><label class="field"><span>토큰 (선택 · 기존 Git 인증을 쓰면 비워두세요)</span><input id="github-token" type="password" autocomplete="off" placeholder="이 Studio 실행 중에만 보관"></label><p class="hint">선택한 저장소의 Contents·Actions·Workflows 읽기/쓰기 권한이 필요합니다. 직접 입력한 토큰은 디스크·프로젝트·URL에 저장하지 않습니다. 연결 해제는 원격 빌드를 취소하지 않습니다.</p><div class="row-actions"><button class="small" data-action="github-connect">저장소 연결</button>${github.connected ? '<button class="small quiet" data-action="github-disconnect">연결 해제</button>' : ""}</div></details></div>`;
 }
+const removableBuild = new Set(["succeeded", "failed", "cancelled", "interrupted", "partial", "import_failed"]);
 const remoteActive = ["preparing", "queued", "running", "downloading", "awaiting_auth", "dispatch_unknown", "cancelling"];
 const buildSteps: Record<string, string> = {
   "Set up job": "빌드 환경 준비",
@@ -697,6 +970,7 @@ function remoteJob(j: Job) {
 }
 function buildFiles(j: Job) {
   const installer = (name: string) => /\.(dmg|exe|msi)$/i.test(name);
+  const guide = (name: string) => /^Installation Guide\.(pdf|html|png|jpe?g)$/.test(name);
   const downloads = j.downloads ?? [];
   const link = (d: NonNullable<Job["downloads"]>[number]) => {
     const href = `/api/projects/${doc!.meta.id}/download/${j.id}/${encodeURIComponent(d.name)}`;
@@ -704,10 +978,11 @@ function buildFiles(j: Job) {
       const mac = /\.dmg$/i.test(d.name);
       return `<a class="button installer-link" href="${href}" download><strong>${mac ? "macOS 설치 파일" : "Windows 설치 파일"} ↓</strong><small>${esc(d.name)}${d.bytes ? ` · ${prettySize(d.bytes)}` : ""}</small></a>`;
     }
-    return `<a class="button small" href="${href}" download>${esc(d.name)} ↓</a>`;
+    return `<a class="button small" href="${href}" download>${guide(d.name) ? `설치 가이드 (${esc(d.name.split(".").at(-1)?.toUpperCase())})` : esc(d.name)} ↓</a>`;
   };
-  const installers = downloads.filter((d) => installer(d.name)), other = downloads.filter((d) => !installer(d.name));
-  return `${installers.length ? `<div class="downloads installers">${installers.map(link).join("")}</div>` : ""}${other.length || j.result ? `<details data-build-detail="files"><summary>${other.length ? `패키지·진단 파일 ${other.length}개` : "결과 위치"}</summary>${j.result ? `<p class="artifact-path">${esc(j.result.directory)}</p>` : ""}<div class="downloads">${other.map(link).join("")}</div></details>` : ""}`;
+  const installers = downloads.filter(d => installer(d.name)), guides = downloads.filter(d => guide(d.name));
+  const other = downloads.filter(d => !installer(d.name) && !guide(d.name));
+  return `${installers.length ? `<div class="downloads installers">${installers.map(link).join("")}</div>` : ""}${guides.length ? `<div class="downloads">${guides.map(link).join("")}</div>` : ""}${other.length || j.result ? `<details data-build-detail="files"><summary>${other.length ? `패키지·진단 파일 ${other.length}개` : "결과 위치"}</summary>${j.result ? `<p class="artifact-path">${esc(j.result.directory)}</p>` : ""}<div class="downloads">${other.map(link).join("")}</div></details>` : ""}`;
 }
 function buildHistory() {
   const names: Record<string, string> = {
@@ -725,51 +1000,72 @@ function buildHistory() {
     jobs
       .map(
         (j) =>
-          `<article class="build-card" data-job-id="${j.id}"><div class="card-heading"><div><span class="job-status ${j.status}">${names[j.status] ?? esc(j.status)}</span><strong>${date(j.createdAt)}</strong></div>${(j.provider === "github" ? remoteActive.filter(s => s !== "downloading" && s !== "cancelling") : ["queued", "running"]).includes(j.status) ? `<button class="small" data-action="cancel-build" data-id="${j.id}">빌드 취소</button>` : `<span class="hint">${j.development ? "개발용" : "배포용"}</span>`}</div><p class="build-revision">${j.provider === "github" ? "Actions / macOS + Windows" : j.target === "windows-x64" ? "Windows x64" : j.target === "macos-arm64" ? "macOS arm64" : "플랫폼 미기록"} · 구성 ${j.revision.slice(0, 8)} · ${j.id.slice(0, 8)}</p>${j.provider === "github" ? remoteJob(j) : ""}${j.error ? `<p class="error-text">${esc(j.error)}</p>` : ""}${buildFiles(j)}${j.logs ? `<details data-build-detail="logs"><summary>빌드 로그</summary><pre>${esc(j.logs)}</pre></details>` : ""}</article>`,
+          `<article class="build-card" data-job-id="${j.id}"><div class="card-heading"><div><span class="job-status ${j.status}">${names[j.status] ?? esc(j.status)}</span><strong>${date(j.createdAt)}</strong></div><div class="row-actions">${(j.provider === "github" ? remoteActive.filter(s => s !== "downloading" && s !== "cancelling") : ["queued", "running"]).includes(j.status) ? `<button class="small" data-action="cancel-build" data-id="${j.id}">빌드 취소</button>` : `<span class="hint">${j.development ? "개발용" : "배포용"}</span>`}${removableBuild.has(j.status) ? `<button class="text-button danger" data-action="delete-build" data-id="${j.id}">기록 삭제</button>` : ""}</div></div><p class="build-revision">${j.provider === "github" ? "Actions / macOS + Windows" : j.target === "windows-x64" ? "Windows x64" : j.target === "macos-arm64" ? "macOS arm64" : "플랫폼 미기록"} · 구성 ${j.revision.slice(0, 8)} · ${j.id.slice(0, 8)}</p>${j.provider === "github" ? remoteJob(j) : ""}${j.error ? `<p class="error-text">${esc(j.error)}</p>` : ""}${buildFiles(j)}${j.logs ? `<details data-build-detail="logs"><summary>빌드 로그</summary><pre>${esc(j.logs)}</pre></details>` : ""}</article>`,
       )
       .join("") ||
     '<div class="empty-build"><span>▤</span><h3>아직 빌드한 앱이 없습니다.</h3><p>구성을 저장하고 첫 번째 패키지를 만들어보세요.</p></div>'
   );
 }
 function previewPanel() {
+  const selected = doc!.project.bindings[selectedBinding];
+  const choices = selected ? inputChoices(selected.trigger) : [];
   return `<aside class="preview-panel"><div class="preview-heading"><h2>미리보기</h2><span class="preview-live"><i></i> PREVIEW</span></div><div class="preview-stage checker"><div class="preview-caption">YOUR LITTLE COMPANION</div><canvas id="preview-canvas" aria-label="버디 애니메이션 미리보기"></canvas><div class="preview-shadow"></div><span id="preview-state">idle</span></div><div class="preview-controls"><p id="preview-notice" class="hint"></p><button id="preview-save" class="primary small full-width" data-action="save" hidden>저장하고 미리보기</button><label class="field"><span>저장된 구성 · 애니메이션 재생</span><select id="preview-clip">${clips()
     .map((n) => option(n, n, selectedClip))
     .join(
       "",
-    )}</select></label><button class="small full-width" data-action="replay">↻ 처음부터 재생</button><div class="preview-divider"></div><h3>이벤트 테스트</h3><p class="hint">저장된 구성으로 실제 동작 엔진을 실행합니다.</p><label class="field"><span>테스트할 이벤트</span><select id="test-binding">${doc!.project.bindings.map((b, i) => option(String(i), `${triggerNames[b.trigger.type]} · ${b.id}`, String(selectedBinding))).join("")}</select></label><button class="small full-width" data-action="test-event" ${doc!.project.bindings.length ? "" : "disabled"}>이벤트 실행 →</button><div class="speed-test"><span>타이핑 속도</span><div><button data-action="test-speed" data-id="2">2 키/초</button><button data-action="test-speed" data-id="8">8 키/초</button></div><small>2초 입력 후 멈춤 → 대기 복귀 확인</small></div><p class="preview-note">웹 미리보기는 선택한 테스트 입력만 사용합니다. 완성된 앱은 다른 앱에서 작업할 때도 반응합니다.</p><div class="preview-divider"></div><div class="project-facts"><span>리소스<strong>${Object.keys(doc!.character.resources ?? {}).length + Object.keys(doc!.character.sounds).length + 1}</strong></span><span>동작<strong>${clips().length}</strong></span><span>이벤트<strong>${doc!.project.bindings.length}</strong></span></div></div></aside>`;
+    )}</select></label><button class="small full-width" data-action="replay">↻ 처음부터 재생</button><div class="preview-divider"></div><h3>이벤트 테스트</h3><p class="hint">저장된 구성으로 실제 동작 엔진을 실행합니다.</p><label class="field"><span>테스트할 이벤트</span><select id="test-binding">${doc!.project.bindings.map((b, i) => option(String(i), `${triggerNames[b.trigger.type]} · ${b.id}`, String(selectedBinding))).join("")}</select></label>${choices.length > 1 ? `<label class="field"><span>테스트할 입력</span><select id="test-variant">${choices.map((label, index) => option(String(index), label || `입력 ${index + 1}`, "0")).join("")}</select></label>` : ""}<button class="small full-width" data-action="test-event" ${doc!.project.bindings.length ? "" : "disabled"}>이벤트 실행 →</button><div class="speed-test"><span>타이핑 속도</span><div><button data-action="test-speed" data-id="2">2 키/초</button><button data-action="test-speed" data-id="8">8 키/초</button></div><small>2초 입력 후 멈춤 → 대기 복귀 확인</small></div><p class="preview-note">웹 미리보기는 선택한 테스트 입력만 사용합니다. 완성된 앱은 다른 앱에서 작업할 때도 반응합니다.</p><div class="preview-divider"></div><div class="project-facts"><span>리소스<strong>${Object.keys(doc!.character.resources ?? {}).length + Object.keys(doc!.character.sounds).length + 1}</strong></span><span>동작<strong>${clips().length}</strong></span><span>이벤트<strong>${doc!.project.bindings.length}</strong></span></div></div></aside>`;
+}
+function setPreviewWork(message = "") {
+  previewWork = message;
+  const panel = document.querySelector<HTMLElement>(".preview-panel");
+  if (!panel) return;
+  let status = panel.querySelector<HTMLElement>("#preview-work");
+  if (!status) {
+    status = document.createElement("p");
+    status.id = "preview-work";
+    status.className = "preview-work";
+    status.setAttribute("role", "status");
+    panel.querySelector(".preview-controls h3")?.after(status);
+  }
+  status.textContent = message;
+  status.hidden = !message;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action="test-event"],[data-action="test-speed"],[data-action="test-idle"],[data-action="test-cursor"]')) {
+    if (doc?.meta.archived && button.closest(".editor-content")) continue;
+    button.disabled = !!message
+      || (button.dataset.action === "test-event" && !doc?.project.bindings.length)
+      || (button.dataset.action === "test-cursor" && !doc?.project.defaults.input.mouse);
+  }
+}
+async function prepareSimulation(play: (request: number) => Promise<void>) {
+  const request = ++simulationRequest;
+  setPreviewWork("미리보기를 준비하는 중…");
+  try {
+    await play(request);
+  } catch (error) {
+    if (request === simulationRequest) throw error;
+  } finally {
+    if (request === simulationRequest) setPreviewWork();
+  }
 }
 const previewAudio = new ReactionAudio((id) => {
   const sound = saved?.character.sounds[id];
   return sound ? resourceUrl(sound.audio.slice(10)) : undefined;
 }, () => toast("미리보기에서 사운드를 재생하지 못했습니다.", true));
-function startPreview() {
-  if (!doc || !saved) return;
-  const canvas = document.querySelector<HTMLCanvasElement>("#preview-canvas");
-  if (!canvas) return;
-  const imageUrls = Object.fromEntries(
-    saved.images.map((name) => [
-      name,
-      `/api/projects/${saved!.meta.id}/frames/${saved!.meta.revision}/${name}`,
-    ]),
-  );
-  renderer = new CharacterRenderer(
-    canvas,
-    saved.character,
-    imageUrls,
-    () => {},
-    saved.renderPlan,
-  );
-  renderer.resize(240, 240);
-  playClip(selectedClip);
-  if (tab === "animations") setupCrop();
+function savedFrameUrls(document: Document) {
+  const base = `/api/projects/${document.meta.id}/frames/${document.meta.revision}`;
+  return Object.fromEntries(document.images.map(name => [name, `${base}/${name}`]));
 }
-function playClip(name: string) {
-  simulationRequest++;
-  if (!renderer || !saved) return;
-  simulationTimers.forEach(clearTimeout);
-  simulationTimers = [];
-  previewAudio.stop();
-  const state: CharacterState = {
+function sizePreview(
+  preview: CharacterRenderer, character: Character, limit: number,
+  extent = horizontalAnchorExtent(character),
+) {
+  const { frameWidth, frameHeight } = character.sheet;
+  const width = frameWidth * 2 * extent;
+  const fit = limit / Math.max(width, frameHeight);
+  preview.resize(width * fit, frameHeight * fit);
+}
+function clipPreviewState(name: string): CharacterState {
+  return {
     protocolVersion: 1,
     epoch: currentEpoch++,
     actionInstanceId: 1,
@@ -780,7 +1076,83 @@ function playClip(name: string) {
     position: { x: 0, y: 0 },
     typingBandId: null,
   };
-  renderer.update(state, 1);
+}
+function updateScaleComparison() {
+  if (!doc || !saved) return;
+  const comparingIdle = selectedClip === doc.character.defaultAnimation;
+  const extent = Math.max(horizontalAnchorExtent(saved.character), horizontalAnchorExtent(doc.character));
+  scalePreviews.forEach((preview, index) => {
+    const animations = index === 0 && comparingIdle
+      ? saved!.character.animations
+      : doc!.character.animations;
+    sizePreview(preview, saved!.character, 180, extent);
+    preview.setAnimationLayout(animations, animationScaleLimits.max / 100, extent);
+  });
+}
+function previewClipFacing() {
+  const preview = scalePreviews[1];
+  const animation = doc?.character.animations[selectedClip];
+  if (!preview || !animation) return;
+  const facing = document.querySelector<HTMLSelectElement>("#clip-preview-facing")?.value;
+  const state = clipPreviewState(selectedClip);
+  state.facingLeft = !!facing && facing !== (animation.sourceFacing ?? "right");
+  preview.update(state, 1);
+}
+function startScaleComparison() {
+  if (!doc || !saved) return;
+  const reference = document.querySelector<HTMLCanvasElement>("#clip-scale-reference");
+  const selected = document.querySelector<HTMLCanvasElement>("#clip-scale-preview");
+  if (!reference || !selected) return;
+  const names = [doc.character.defaultAnimation, selectedClip];
+  const imageUrls = savedFrameUrls(saved);
+  scalePreviews = [reference, selected].map((canvas, index) => {
+    const name = names[index];
+    const clip = saved!.renderPlan.animations[name]!;
+    const plan = { animations: { [name]: { ...clip, looping: true } } };
+    return new CharacterRenderer(canvas, saved!.character, imageUrls, () => {}, plan);
+  });
+  updateScaleComparison();
+  scalePreviews.forEach((preview, index) => preview.update(clipPreviewState(names[index]), 1));
+}
+function setClipScale(percent: number) {
+  if (!doc || doc.meta.archived || !Number.isInteger(percent) ||
+      percent < animationScaleLimits.min || percent > animationScaleLimits.max) return;
+  const animation = doc.character.animations[selectedClip];
+  for (const id of ["#clip-scale-range", "#clip-scale-number"]) {
+    const input = document.querySelector<HTMLInputElement>(id)!;
+    if (input.valueAsNumber !== percent) input.value = String(percent);
+  }
+  document.querySelector<HTMLButtonElement>("#reset-clip-scale")!.disabled = percent === 100;
+  if ((animation.scalePercent ?? 100) === percent) return;
+  if (percent === 100) delete animation.scalePercent;
+  else animation.scalePercent = percent;
+  markDirty();
+  updateScaleComparison();
+}
+function startPreview() {
+  if (!doc || !saved) return;
+  const canvas = document.querySelector<HTMLCanvasElement>("#preview-canvas");
+  if (!canvas) return;
+  renderer = new CharacterRenderer(
+    canvas,
+    saved.character,
+    savedFrameUrls(saved),
+    () => {},
+    saved.renderPlan,
+  );
+  previewDocument = saved;
+  sizePreview(renderer, saved.character, 240);
+  playClip(selectedClip);
+}
+function playClip(name: string) {
+  simulationRequest++;
+  setPreviewWork();
+  if (!renderer || !saved) return;
+  previewClip = name;
+  simulationTimers.forEach(clearTimeout);
+  simulationTimers = [];
+  previewAudio.stop();
+  renderer.update(clipPreviewState(name), 1);
   const label = document.querySelector("#preview-state");
   if (label)
     label.textContent = saved.character.animations[name]
@@ -792,10 +1164,10 @@ function updateProjectList(meta: Meta) {
 }
 async function save(icon?: string) {
   if (!doc || busy || projectLoading || !dirty) return;
-  busy = true;
-  app.inert = true;
+  setEditorBusy("편집 내용을 확인하는 중…");
   try {
     await flushDraft();
+    setEditorBusy("구성과 리소스를 저장하고 미리보기에 반영하는 중…");
     const value = await projectApi("", {
       method: "PUT",
       body: JSON.stringify({ ...payload(), ...(icon ? { icon } : {}) }),
@@ -815,12 +1187,12 @@ async function save(icon?: string) {
     showValidationError((error as Error).message);
     throw error;
   } finally {
-    busy = false;
-    app.inert = false;
+    setEditorBusy();
   }
 }
 function setProjectLoading(loading: boolean) {
   projectLoading = loading;
+  updateOperationStatus();
   const workspace = document.querySelector<HTMLElement>(".workspace");
   if (workspace) {
     workspace.inert = loading;
@@ -878,19 +1250,34 @@ async function openProject(id: string, route?: StudioRoute, push = !route) {
 async function ensureSaved() {
   if (dirty) await save();
 }
+async function uploadInstallAsset(slot: "background" | "guide", file: File) {
+  if (!doc || busy || projectLoading || doc.meta.archived) return;
+  if (slot === "background" && !/\.(png|jpe?g)$/i.test(file.name)) throw new Error("배경에는 PNG 또는 JPEG를 선택하세요.");
+  if (file.size > 16 * 1024 * 1024) throw new Error("파일당 최대 크기는 16 MiB입니다.");
+  setEditorBusy("설치 파일을 가져오는 중…");
+  try {
+    const resource = await projectApi<ResourceFile>(
+      `resources?purpose=installer&filename=${encodeURIComponent(file.name)}`,
+      { method: "POST", body: file },
+    );
+    doc.library[resource.name] = resource;
+    (doc.project.build.macosDmg ??= defaultMacDmg())[slot] = `assets/installer/${resource.name}`;
+    markDirty();
+    layout();
+  } finally { setEditorBusy(); }
+}
 async function upload(files: FileList | File[], icon = false) {
   if (!doc || busy || projectLoading) return;
   if (doc.meta.archived)
     throw new Error("보관된 프로젝트는 복원 후 수정하세요.");
-  busy = true;
-  app.inert = true;
+  setEditorBusy("리소스 가져오기를 준비하는 중…");
   const errors: string[] = [],
     list = Array.from(files);
   let imported = 0,
     selectedIcon: string | undefined;
   try {
     for (const [index, file] of list.entries()) {
-      toast(`리소스를 가져오는 중 (${index + 1}/${list.length})`);
+      setEditorBusy(`리소스를 가져오는 중 (${index + 1}/${list.length}) · ${file.name}`);
       try {
         if (file.size > 16 * 1024 * 1024)
           throw new Error("파일당 최대 크기는 16 MiB입니다.");
@@ -909,8 +1296,7 @@ async function upload(files: FileList | File[], icon = false) {
       }
     }
   } finally {
-    busy = false;
-    app.inert = false;
+    setEditorBusy();
     layout();
   }
   if (selectedIcon) await save(selectedIcon);
@@ -954,7 +1340,18 @@ function chooseDefaultAnimation(loop: boolean) {
 function changeTrigger(type: string) {
   const b = doc!.project.bindings[selectedBinding],
     t: any = { type };
-  if (["keyDown", "keyUp", "whileKeyDown"].includes(type)) t.code = "Space";
+  if (["keyDown", "keyUp", "whileKeyDown"].includes(type)) {
+    const previous = b.trigger;
+    t.code = "code" in previous ? previous.code : "Space";
+    if (type === "whileKeyDown" && t.code === "*") t.code = "Space";
+    if ("code" in previous && previous.modifiers != null) t.modifiers = previous.modifiers;
+    if ("code" in previous && previous.alternatives?.length) {
+      t.alternatives = previous.alternatives.map((key) => ({
+        ...key,
+        code: type === "whileKeyDown" && key.code === "*" ? "Space" : key.code,
+      }));
+    }
+  }
   if (type === "keyDown") t.repeat = false;
   if (type === "typingRate") {
     t.minKps = 0.5;
@@ -1067,7 +1464,7 @@ function paintCrop() {
 async function simulate(
   events: { atMs: number; event: any }[],
   untilMs: number,
-  request = ++simulationRequest,
+  request: number,
 ) {
   const projectId = doc!.meta.id;
   const timeline = await projectApi<{ atMs: number; state: CharacterState }[]>(
@@ -1095,8 +1492,7 @@ async function simulate(
   }
   toast("실제 동작 엔진으로 이벤트를 재생합니다.");
 }
-async function testBinding(index: number) {
-  const projectId = doc!.meta.id, request = ++simulationRequest;
+async function testBinding(index: number, variant: number, request: number) {
   const b = doc!.project.bindings[index];
   if (!b) return;
   if (b.effect.type === "move" && !doc!.project.defaults.movementEnabled)
@@ -1125,22 +1521,35 @@ async function testBinding(index: number) {
   switch (t.type) {
     case "keyDown":
     case "keyUp":
-    case "whileKeyDown":
+    case "whileKeyDown": {
+      const choice = variant === 0 ? t : t.alternatives?.[variant - 1];
+      if (!choice) throw new Error("테스트할 키를 선택하세요.");
+      for (const modifier of modifierOptions) {
+        if (choice.modifiers?.includes(modifier.id)) {
+          events.push({ atMs: 90, event: { type: "keyDown", code: modifier.key + "Left", repeat: false } });
+        }
+      }
       events.push(
         {
           atMs: 100,
           event: {
             type: "keyDown",
-            code: t.code === "*" ? "KeyA" : t.code,
+            code: choice.code === "*" ? "KeyA" : choice.code,
             repeat: false,
           },
         },
         {
           atMs: 800,
-          event: { type: "keyUp", code: t.code === "*" ? "KeyA" : t.code },
+          event: { type: "keyUp", code: choice.code === "*" ? "KeyA" : choice.code },
         },
       );
+      for (const modifier of modifierOptions) {
+        if (choice.modifiers?.includes(modifier.id)) {
+          events.push({ atMs: 810, event: { type: "keyUp", code: modifier.key + "Left" } });
+        }
+      }
       break;
+    }
     case "mouseDown":
     case "mouseUp":
       events.push(
@@ -1151,6 +1560,9 @@ async function testBinding(index: number) {
     case "wheel":
       events.push({ atMs: 100, event: t });
       break;
+    case "buddyClick":
+      events.push({ atMs: 100, event: { type: "buddyClick" } });
+      break;
     case "drag":
       events.push(
         { atMs: 100, event: { type: "dragStart" } },
@@ -1158,10 +1570,13 @@ async function testBinding(index: number) {
       );
       break;
     case "typingRate":
-      return testSpeed(t.minKps + 0.5);
+      return testSpeed(t.minKps + 0.5, request);
     case "keySequence": {
-      const steps = await compileSequence(b.id);
-      if (doc?.meta.id !== projectId || request !== simulationRequest) return;
+      const savedIndex = saved!.project.bindings.findIndex((binding) => binding.id === b.id);
+      const steps = variant === 0
+        ? saved!.sequences?.[savedIndex]
+        : saved!.sequenceAlternatives?.[savedIndex]?.[variant - 1];
+      if (!steps) throw new Error("키워드 입력을 선택하세요.");
       let at = 100;
       for (const step of steps) {
         if (step.shift)
@@ -1184,13 +1599,7 @@ async function testBinding(index: number) {
   }
   await simulate(events, end, request);
 }
-// Keyword compilation is supplied by the Rust validator, never duplicated here.
-async function compileSequence(
-  id: string,
-): Promise<{ code: string; shift: boolean }[]> {
-  return projectApi("sequence", post({ id }));
-}
-async function testSpeed(rate: number) {
+async function testSpeed(rate: number, request: number) {
   if (!doc!.project.defaults.input.keyboard)
     throw new Error("프로젝트 탭에서 키보드 감지를 먼저 켜주세요.");
   const events = [];
@@ -1203,7 +1612,7 @@ async function testSpeed(rate: number) {
       { atMs: Math.round(at) + 20, event: { type: "keyUp", code: "KeyA" } },
     );
   events.sort((a, b) => a.atMs - b.atMs);
-  await simulate(events, 3500);
+  await simulate(events, 3500, request);
 }
 function confirmDraftChange(title: string, message: string, label: string) {
   const dialog = document.createElement("dialog");
@@ -1221,22 +1630,50 @@ function confirmDraftChange(title: string, message: string, label: string) {
     dialog.showModal();
   });
 }
+function chooseBuildRemoval(job: Job) {
+  const dialog = document.createElement("dialog");
+  dialog.setAttribute("aria-labelledby", "build-removal-title");
+  dialog.innerHTML = `<h2 id="build-removal-title">빌드 기록을 삭제할까요?</h2>
+    <p>${date(job.createdAt)} 빌드가 목록에서 사라집니다. 파일도 함께 삭제하면 이 Studio가 보관한 설치 파일과 결과물이 제거됩니다. 이미 내려받은 파일과 GitHub Actions 실행은 유지됩니다.</p>
+    <footer class="row-actions"><button type="button" value="cancel" autofocus>취소</button><button type="button" value="record">기록만 삭제</button><button type="button" value="files" class="danger">파일도 삭제</button></footer>`;
+  document.body.append(dialog);
+  return new Promise<string>((resolve) => {
+    const finish = (choice: string) => {
+      dialog.close();
+      dialog.remove();
+      resolve(choice);
+    };
+    for (const button of dialog.querySelectorAll("button"))
+      button.onclick = () => finish(button.value);
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      finish("cancel");
+    });
+    dialog.showModal();
+  });
+}
 async function action(name: string, id?: string) {
   if (busy) return;
   if (projectLoading && !["open", "export-draft", "retry-connection"].includes(name)) return;
   if (
-    ["clone", "archive", "restore", "discard-draft", "cancel-build"].includes(
+    ["clone", "archive", "restore", "discard-draft", "cancel-build", "delete-build"].includes(
       name,
     )
   ) {
     if (["clone", "archive"].includes(name) && dirty) await save();
-    busy = true;
-    app.inert = true;
+    const messages: Record<string, string> = {
+      clone: "프로젝트를 복제하는 중…",
+      archive: "보관 상태를 바꾸는 중…",
+      restore: "이전 구성 복원을 준비하는 중…",
+      "discard-draft": "변경 취소를 준비하는 중…",
+      "cancel-build": "빌드 취소를 요청하는 중…",
+      "delete-build": "빌드 기록을 정리하는 중…",
+    };
+    setEditorBusy(messages[name]);
     try {
       return await performAction(name, id);
     } finally {
-      busy = false;
-      app.inert = false;
+      setEditorBusy();
     }
   }
   return performAction(name, id);
@@ -1249,7 +1686,7 @@ async function performAction(name: string, id?: string) {
       const repository = document.querySelector<HTMLInputElement>("#github-repository")?.value ?? github.repository;
       const input = document.querySelector<HTMLInputElement>("#github-token"), token = input?.value;
       if (input) input.value = "";
-      busy = true; app.inert = true; githubError = "";
+      setEditorBusy("GitHub 연결 설정을 적용하는 중…"); githubError = "";
       try {
         github = await api<GitHubState>(`github/${name.slice(7)}`, post({ repository, ...(token ? { token } : {}) }));
         layout(); toast(name === "github-setup" ? "두 플랫폼 빌드 워크플로를 준비했습니다." : name === "github-connect" ? "GitHub 저장소를 연결했습니다." : "GitHub 연결을 해제했습니다.");
@@ -1258,7 +1695,7 @@ async function performAction(name: string, id?: string) {
         const error = document.querySelector<HTMLElement>("#github-error");
         if (error) { error.textContent = githubError; error.hidden = false; }
         throw e;
-      } finally { busy = false; app.inert = false; }
+      } finally { setEditorBusy(); }
       break;
     }
     case "sync-build":
@@ -1278,8 +1715,7 @@ async function performAction(name: string, id?: string) {
     }
     case "export-project": {
       await ensureSaved();
-      busy = true;
-      app.inert = true;
+      setEditorBusy("프로젝트 파일을 내보내는 중…");
       try {
         const response = await fetch(`/api/projects/${doc!.meta.id}/export/${doc!.meta.revision}`);
         if (!response.ok) throw new Error((await response.json()).error ?? "내보내기에 실패했습니다.");
@@ -1291,8 +1727,7 @@ async function performAction(name: string, id?: string) {
         window.setTimeout(() => URL.revokeObjectURL(url), 1000);
         toast("저장한 구성과 원본 리소스를 내보냈습니다.");
       } finally {
-        busy = false;
-        app.inert = false;
+        setEditorBusy();
       }
       break;
     }
@@ -1359,8 +1794,7 @@ async function performAction(name: string, id?: string) {
       await save();
       break;
     case "validate":
-      busy = true;
-      app.inert = true;
+      setEditorBusy("리소스와 이벤트 연결을 검증하는 중…");
       try {
         await projectApi("validate", post(payload()));
         validationError = "";
@@ -1369,10 +1803,50 @@ async function performAction(name: string, id?: string) {
         showValidationError((error as Error).message);
         throw error;
       } finally {
-        busy = false;
-        app.inert = false;
+        setEditorBusy();
       }
       toast("구성, 리소스와 이벤트 연결을 검증했습니다.");
+      break;
+    case "configure-follow":
+      doc!.project.cursorFollow = { enabled: false, stopDistanceDip: 48, bands: [{ minDistanceDip: 0, speedDipPerSecond: 120 }] };
+      markDirty();
+      layout();
+      document.querySelector("#follow-settings")?.scrollIntoView({ block: "nearest" });
+      break;
+    case "configure-dmg":
+      doc!.project.build.macosDmg = defaultMacDmg();
+      markDirty();
+      layout();
+      break;
+    case "remove-dmg":
+      delete doc!.project.build.macosDmg;
+      markDirty();
+      layout();
+      break;
+    case "remove-install-asset":
+      if (id === "background" || id === "guide") delete doc!.project.build.macosDmg![id];
+      if (id === "guide") delete doc!.project.build.macosDmg!.guidePosition;
+      markDirty();
+      layout();
+      break;
+    case "remove-follow":
+      delete doc!.project.cursorFollow;
+      markDirty();
+      layout();
+      break;
+    case "add-follow-band": {
+      const bands = doc!.project.cursorFollow!.bands;
+      const previous = bands.at(-1)!;
+      if (bands.length >= 8 || previous.minDistanceDip >= 10000) throw new Error("더 높은 거리 구간을 추가할 수 없습니다.");
+      bands.push({ minDistanceDip: Math.min(10000, previous.minDistanceDip + 180), speedDipPerSecond: Math.min(1000, previous.speedDipPerSecond + 100) });
+      markDirty();
+      layout();
+      break;
+    }
+    case "remove-follow-band":
+      if (Number(id) > 0) doc!.project.cursorFollow!.bands.splice(Number(id), 1);
+      markDirty();
+      layout();
       break;
     case "clone":
       await ensureSaved();
@@ -1409,6 +1883,9 @@ async function performAction(name: string, id?: string) {
         (document.querySelector("#preview-clip") as HTMLSelectElement).value,
       );
       break;
+    case "reset-clip-scale":
+      setClipScale(100);
+      break;
     case "add-clip": {
       const n = prompt("새 동작 이름 (영문, 숫자, -, _)", "new-animation");
       if (!n) return;
@@ -1430,6 +1907,8 @@ async function performAction(name: string, id?: string) {
     case "remove-clip":
       if (usedByIdle(selectedClip))
         throw new Error("이 동작을 사용하는 대기 상태를 먼저 수정하세요.");
+      if (doc!.project.cursorFollow?.bands.some((band) => band.animation === selectedClip))
+        throw new Error("이 동작을 사용하는 마우스 따라오기 구간을 먼저 수정하세요.");
       if (
         doc!.project.bindings.some(
           (b) => usesAnimation(b.effect, selectedClip),
@@ -1554,9 +2033,70 @@ async function performAction(name: string, id?: string) {
       layout();
       break;
     }
+    case "capture-key": {
+      const button = captureButton(Number(id));
+      if (button) setKeyCapture(button, button.getAttribute("aria-pressed") !== "true");
+      break;
+    }
+    case "add-key-choice": {
+      const trigger = doc!.project.bindings[selectedBinding].trigger;
+      if (!("code" in trigger)) break;
+      const alternatives = trigger.alternatives ??= [];
+      if (alternatives.length >= 31) break;
+      alternatives.push({ code: "", modifiers: [] });
+      markDirty();
+      layout();
+      const button = captureButton(alternatives.length);
+      if (button) setKeyCapture(button, true);
+      break;
+    }
+    case "remove-key-choice": {
+      const trigger = doc!.project.bindings[selectedBinding].trigger;
+      if (!("code" in trigger) || !trigger.alternatives?.length) break;
+      const index = Number(id);
+      if (index === 0) {
+        const [next] = trigger.alternatives.splice(0, 1);
+        trigger.code = next.code;
+        trigger.modifiers = next.modifiers;
+      } else {
+        trigger.alternatives.splice(index - 1, 1);
+      }
+      markDirty();
+      layout();
+      break;
+    }
+    case "add-keyword-choice": {
+      const trigger = doc!.project.bindings[selectedBinding].trigger;
+      if (trigger.type !== "keySequence") break;
+      const alternatives = trigger.alternatives ??= [];
+      if (alternatives.length >= 31) break;
+      alternatives.push({ keyword: "", layout: trigger.layout === "en-US-qwerty" ? "ko-KR-2set" : "en-US-qwerty" });
+      markDirty();
+      layout();
+      document.querySelector<HTMLInputElement>(
+        `[data-path="project.bindings.${selectedBinding}.trigger.alternatives.${alternatives.length - 1}.keyword"]`,
+      )?.focus();
+      break;
+    }
+    case "remove-keyword-choice": {
+      const trigger = doc!.project.bindings[selectedBinding].trigger;
+      if (trigger.type !== "keySequence" || !trigger.alternatives?.length) break;
+      const index = Number(id);
+      if (index === 0) {
+        const [next] = trigger.alternatives.splice(0, 1);
+        trigger.keyword = next.keyword;
+        trigger.layout = next.layout;
+        delete trigger.steps;
+      } else {
+        trigger.alternatives.splice(index - 1, 1);
+      }
+      markDirty();
+      layout();
+      break;
+    }
     case "test-idle":
       await ensureSaved();
-      await simulate([], 0);
+      await prepareSimulation((request) => simulate([], 0, request));
       break;
     case "test-cursor": {
       const index = cursorDirections.findIndex(([direction]) => direction === id);
@@ -1565,7 +2105,8 @@ async function performAction(name: string, id?: string) {
         throw new Error("프로젝트 탭에서 마우스 감지를 먼저 켜주세요.");
       await ensureSaved();
       const positions = [120, 228, 330];
-      await simulate([{ atMs: 100, event: { type: "cursorMove", x: positions[index % 3], y: positions[Math.floor(index / 3)] } }], 1500);
+      const event = { type: "cursorMove", x: positions[index % 3], y: positions[Math.floor(index / 3)] };
+      await prepareSimulation((request) => simulate([{ atMs: 100, event }], 1500, request));
       break;
     }
     case "reorder-binding": {
@@ -1593,17 +2134,16 @@ async function performAction(name: string, id?: string) {
       markDirty();
       layout();
       break;
-    case "test-event":
+    case "test-event": {
+      const index = Number(document.querySelector<HTMLSelectElement>("#test-binding")?.value);
+      const variant = Number(document.querySelector<HTMLSelectElement>("#test-variant")?.value ?? 0);
       await ensureSaved();
-      await testBinding(
-        Number(
-          (document.querySelector("#test-binding") as HTMLSelectElement).value,
-        ),
-      );
+      await prepareSimulation((request) => testBinding(index, variant, request));
       break;
+    }
     case "test-speed":
       await ensureSaved();
-      await testSpeed(Number(id));
+      await prepareSimulation((request) => testSpeed(Number(id), request));
       break;
     case "build": {
       await ensureSaved();
@@ -1630,6 +2170,21 @@ async function performAction(name: string, id?: string) {
       jobs = await projectApi("builds");
       layout();
       break;
+    case "delete-build": {
+      const job = jobs.find(job => job.id === id);
+      if (!job || !removableBuild.has(job.status)) return;
+      const removal = await chooseBuildRemoval(job);
+      if (removal !== "record" && removal !== "files") return;
+      const result = await projectApi<{ builtSlug?: string }>(
+        `builds/${job.id}${removal === "files" ? "?files=true" : ""}`,
+        { method: "DELETE" },
+      );
+      if (result.builtSlug) doc!.meta.builtSlug = result.builtSlug;
+      jobs = await projectApi("builds");
+      layout();
+      toast(removal === "files" ? "빌드 기록과 파일을 삭제했습니다." : "빌드 기록을 삭제했습니다.");
+      break;
+    }
     case "load-revisions": {
       const history = await projectApi<
         {
@@ -1686,8 +2241,72 @@ app.addEventListener("click", (event) => {
       toast(e.message, true),
     );
 });
+function activeKeyCapture(target: EventTarget | null) {
+  return target instanceof HTMLButtonElement && target.dataset.action === "capture-key" &&
+    target.getAttribute("aria-pressed") === "true" ? target : null;
+}
+app.addEventListener("keydown", (event) => {
+  const button = activeKeyCapture(event.target);
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.repeat) return;
+  const status = button.closest(".key-capture")!.querySelector<HTMLElement>("[data-key-status]")!;
+  if (!physicalKeys.has(event.code)) {
+    pendingModifier = undefined;
+    status.textContent = "지원되는 키를 다시 눌러주세요.";
+    return;
+  }
+  const modifiers = modifierOptions
+    .filter(({ key, flag }) => event[flag] && !event.code.startsWith(key))
+    .map(({ id }) => id);
+  if (modifierOptions.some(({ key }) => event.code.startsWith(key))) {
+    pendingModifier = { code: event.code, modifiers };
+    status.textContent = "조합할 키를 누르거나, 보조 키를 떼서 그 키만 등록하세요.";
+    return;
+  }
+  saveCapturedKey(button, event.code, modifiers);
+});
+app.addEventListener("keyup", (event) => {
+  const button = activeKeyCapture(event.target);
+  if (button && pendingModifier?.code === event.code) {
+    event.preventDefault();
+    saveCapturedKey(button, pendingModifier.code, pendingModifier.modifiers);
+  }
+});
+app.addEventListener("focusout", (event) => {
+  const button = activeKeyCapture(event.target);
+  if (button) setKeyCapture(button, false);
+  const input = event.target;
+  if (input instanceof HTMLInputElement && input.id === "clip-scale-number" &&
+      (!input.value || !input.validity.valid)) {
+    input.value = String(doc?.character.animations[selectedClip]?.scalePercent ?? 100);
+  }
+  if (input instanceof HTMLInputElement && input.id === "clip-anchor-x" && !input.validity.valid) {
+    input.value = anchorPercent(doc?.character.animations[selectedClip]?.anchorX);
+  }
+});
+window.addEventListener("blur", () => {
+  const button = activeKeyCapture(document.activeElement);
+  if (button) setKeyCapture(button, false);
+});
 app.addEventListener("input", (event) => {
   const input = event.target as HTMLInputElement;
+  if (input.id === "clip-scale-number" || input.id === "clip-scale-range") {
+    if (input.validity.valid) setClipScale(input.valueAsNumber);
+    return;
+  }
+  if (input.id === "clip-anchor-x") {
+    const animation = doc?.character.animations[selectedClip];
+    if (!animation || doc?.meta.archived || !input.validity.valid) return;
+    const anchor = input.value === "" ? undefined : input.valueAsNumber / 100;
+    if ((animation.anchorX ?? undefined) === anchor) return;
+    if (anchor === undefined) delete animation.anchorX;
+    else animation.anchorX = anchor;
+    markDirty();
+    updateScaleComparison();
+    return;
+  }
   if (input.form?.id === "new-project-form") {
     const field = input.form.elements.namedItem(
       "packageId",
@@ -1721,12 +2340,13 @@ app.addEventListener("input", (event) => {
       paintCrop();
     }
   }
-  if (input.id === "gif-frame-number" && input.value !== "" && input.validity.valid) {
-    const animation = doc!.character.animations[selectedClip];
-    const filename = doc!.character.resources[animation.resource!].image.slice(10);
-    const preview = document.querySelector<HTMLImageElement>("#gif-frame-preview")!;
-    preview.src = gifFrameUrl(filename, input.valueAsNumber);
-    preview.alt = `GIF ${input.valueAsNumber}번 프레임`;
+  if (input.id === "gif-frame-number") {
+    if (input.value !== "" && input.validity.valid) showGifFrame(input.valueAsNumber);
+    else {
+      clearTimeout(gifFrameTimer);
+      gifFrameRequest++;
+      document.querySelector("#gif-frame-status")!.textContent = "범위 안의 프레임 번호를 입력하세요.";
+    }
   }
   if (input.id === "event-volume" && input.value !== "" && input.validity.valid) {
     const cue = doc!.project.bindings[selectedBinding].sound;
@@ -1759,6 +2379,74 @@ app.addEventListener("input", (event) => {
 });
 app.addEventListener("change", (event) => {
   const input = event.target as HTMLInputElement;
+  if (input.id === "clip-source-facing") {
+    const animation = doc?.character.animations[selectedClip];
+    if (!animation || doc?.meta.archived) return;
+    if (input.value === "left") animation.sourceFacing = "left";
+    else delete animation.sourceFacing;
+    markDirty();
+    previewClipFacing();
+    return;
+  }
+  if (input.id === "clip-preview-facing") {
+    previewClipFacing();
+    return;
+  }
+  if (input.id === "dmg-guide-position-mode") {
+    const dmg = doc!.project.build.macosDmg!;
+    if (input.value === "manual") dmg.guidePosition = initialGuidePosition(dmg);
+    else delete dmg.guidePosition;
+    markDirty();
+    layout();
+    document.querySelector<HTMLElement>("#dmg-guide-position-mode")?.focus();
+    return;
+  }
+  if (input.id === "display-size-mode") {
+    const defaults = doc!.project.defaults;
+    if (input.value === "height") {
+      const current = (doc!.idleHeightDipAtScaleOne ?? doc!.character.sheet.frameHeight) * defaults.scale;
+      defaults.displayHeightDip = Math.max(16, Math.min(1024, Math.round(current * 10) / 10));
+    } else {
+      delete defaults.displayHeightDip;
+    }
+    markDirty();
+    layout();
+    document.querySelector<HTMLElement>("#display-size-mode")?.focus();
+    return;
+  }
+  const slot = input.dataset.installAsset;
+  if (slot === "background" || slot === "guide") {
+    const file = input.files?.[0];
+    if (file) void uploadInstallAsset(slot, file).catch(error => toast(error.message, true));
+    return;
+  }
+  if (input.dataset.followBand !== undefined) {
+    doc!.project.cursorFollow!.bands[Number(input.dataset.followBand)].animation = input.value || undefined;
+    markDirty();
+    return;
+  }
+  if (input.hasAttribute("data-key-modifier-mode") || input.dataset.keyModifier ||
+      (input.dataset.path?.endsWith(".code") && input.closest("[data-key-index]"))) {
+    const trigger = doc!.project.bindings[selectedBinding].trigger;
+    if (!("code" in trigger)) return;
+    const index = Number(input.closest<HTMLElement>("[data-key-index]")?.dataset.keyIndex);
+    const chord = index === 0 ? trigger : trigger.alternatives?.[index - 1];
+    if (!chord) return;
+    if (input.hasAttribute("data-key-modifier-mode")) {
+      chord.modifiers = input.value === "exact" ? [] : undefined;
+    } else if (chord.modifiers != null) {
+      const selected = chord.modifiers;
+      chord.modifiers = modifierOptions
+        .filter(({ id, key }) => !chord.code.startsWith(key) &&
+          (input.dataset.keyModifier === id ? input.checked : selected.includes(id)))
+        .map(({ id }) => id);
+    }
+    markDirty();
+    layout();
+    const details = document.querySelector<HTMLDetailsElement>(`[data-key-index="${index}"] details`);
+    if (details) details.open = true;
+    return;
+  }
   if (input.id === "resource-upload" && input.files)
     void upload(input.files).catch((e) => toast(e.message, true));
   if (input.id === "icon-upload" && input.files)
@@ -1790,6 +2478,11 @@ app.addEventListener("change", (event) => {
       effect.priority = input.value === "" ? null : Number(input.value);
       markDirty();
     }
+  }
+  if (input.id === "follow-priority" && input.validity.valid && doc?.project.cursorFollow) {
+    if (input.value === "") delete doc.project.cursorFollow.priority;
+    else doc.project.cursorFollow.priority = input.valueAsNumber;
+    markDirty();
   }
   if (input.id === "idle-cursor-enabled") {
     const idle = doc!.project.idle ??= { cursorEnabled: false, directions: {} };
@@ -1845,7 +2538,7 @@ app.addEventListener("change", (event) => {
   }
   if (input.id === "test-binding") {
     selectedBinding = Number(input.value); syncRoute(true);
-    if (tab === "events") layout();
+    layout();
   }
 });
 app.addEventListener("dragover", (event) => {
@@ -1869,8 +2562,7 @@ app.addEventListener("submit", (event) => {
     form = new FormData(element),
     error = element.querySelector<HTMLElement>("#new-project-error")!;
   void (async () => {
-    busy = true;
-    app.inert = true;
+    setEditorBusy("새 프로젝트를 만드는 중…");
     error.hidden = true;
     try {
       await flushDraft();
@@ -1891,8 +2583,7 @@ app.addEventListener("submit", (event) => {
       error.textContent = (cause as Error).message;
       error.hidden = false;
     } finally {
-      busy = false;
-      app.inert = false;
+      setEditorBusy();
     }
   })();
 });

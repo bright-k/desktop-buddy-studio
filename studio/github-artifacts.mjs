@@ -62,7 +62,7 @@ export function artifactFiles(zip, expectedNames) {
 }
 export function tarReports(archive) {
   const tar = gunzipSync(archive, { maxOutputLength: maxSize });
-  const reports = [], installers = []; let pendingPath;
+  const reports = [], installers = [], guides = []; let pendingPath;
   for (let at = 0; at + 512 <= tar.length;) {
     const h = tar.subarray(at, at + 512);
     if (h.every((n) => n === 0)) break;
@@ -93,9 +93,11 @@ export function tarReports(archive) {
     }
     if (/^[^/]+\/[^/]+\.(exe|dmg)$/.test(name) && !name.slice(name.indexOf("/") + 1).startsWith("._") && [0, 48].includes(h[156]))
       installers.push({ name: name.slice(name.indexOf("/") + 1), bytes: tar.subarray(start, start + size) });
+    if (/^[^/]+\/Installation Guide\.(pdf|html|png|jpe?g)$/.test(name) && [0, 48].includes(h[156]))
+      guides.push({ name: name.slice(name.indexOf("/") + 1), bytes: tar.subarray(start, start + size) });
     at = start + Math.ceil(size / 512) * 512;
   }
-  return { reports, installers };
+  return { reports, installers, guides };
 }
 export function verifyArtifact(zip, artifact, job, target) {
   if (!/^sha256:[a-f0-9]{64}$/.test(artifact.digest || "") || artifact.digest !== `sha256:${sha256(zip)}`) fail();
@@ -104,16 +106,17 @@ export function verifyArtifact(zip, artifact, job, target) {
   const archive = files.get(archiveName), receipt = JSON.parse(files.get(receiptName));
   if (receipt.jobId !== job.id || receipt.target !== target || receipt.projectHash !== job.contentHash || receipt.engineHash !== job.github.engineHash ||
       receipt.identifier !== job.projectId || receipt.sha256 !== sha256(archive) || receipt.bytes !== archive.length) fail();
-  const { reports, installers } = tarReports(archive), sources = reports.filter((r) => r.name === "source.json"), builds = reports.filter((r) => r.name.endsWith("/build-report.json"));
+  const { reports, installers, guides } = tarReports(archive), sources = reports.filter((r) => r.name === "source.json"), builds = reports.filter((r) => r.name.endsWith("/build-report.json"));
   if (sources.length !== 1 || builds.length !== 1) fail();
   const source = sources[0].value, report = builds[0].value;
   if (source.contentHash !== job.contentHash || source.identifier !== job.projectId || report.projectHash !== job.contentHash ||
       report.identifier !== job.projectId || report.target !== target || report.development !== true || report.staticInspection !== "passed" ||
       receipt.templateHash !== job.github.engineHash || report.templateHash !== job.github.engineHash) fail();
-  for (const installer of installers) {
+  if (guides.length > 1) fail();
+  for (const installer of [...installers, ...guides]) {
     const expected = report.artifacts?.find((a) => a.path === installer.name);
     if (!expected || expected.bytes !== installer.bytes.length || expected.sha256 !== sha256(installer.bytes) ||
         installer.name.startsWith(".") || installer.name.includes("\\")) fail();
   }
-  return { archive, archiveName, receipt: files.get(receiptName), receiptName, report, installers };
+  return { archive, archiveName, receipt: files.get(receiptName), receiptName, report, installers, guides };
 }

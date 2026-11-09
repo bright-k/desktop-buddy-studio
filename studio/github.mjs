@@ -277,7 +277,7 @@ export class ActionsBuilds {
           await atomicJson(join(directory, `report-${target}.json`), verified.report);
           const downloads = new Map((job.downloads || []).map((d) => [d.name, d]));
           for (const name of [verified.archiveName, verified.receiptName, `report-${target}.json`]) downloads.set(name, { name, path: `actions-${job.id}/${name}` });
-          for (const installer of verified.installers) {
+          for (const installer of [...verified.installers, ...verified.guides]) {
             await fs.mkdir(join(directory, target), { recursive: true });
             await fs.writeFile(join(directory, target, installer.name), installer.bytes);
             downloads.set(installer.name, { name: installer.name, path: `actions-${job.id}/${target}/${installer.name}`, bytes: installer.bytes.length });
@@ -312,6 +312,11 @@ export class ActionsBuilds {
       return job;
     });
     this.wake(); return result;
+  }
+  async removeHistory(projectId, id, removeFiles) {
+    // A retry must not be able to put back a record it read before deletion.
+    return this.store.exclusive("@github-poll", () =>
+      this.store.exclusive(this.jobLock(id), () => this.jobs.removeHistory(projectId, id, removeFiles)));
   }
   async retryImport(projectId, id) {
     return this.store.exclusive("@github-poll", async () => {

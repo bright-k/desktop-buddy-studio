@@ -1,6 +1,7 @@
 mod bundle;
 mod keys;
 mod media;
+mod prepared;
 mod sequence;
 mod sound;
 mod types;
@@ -9,6 +10,7 @@ mod validation;
 pub use bundle::*;
 pub use keys::*;
 pub use media::*;
+pub use prepared::write_prepared_rendering;
 pub use sequence::*;
 pub use sound::*;
 pub use types::*;

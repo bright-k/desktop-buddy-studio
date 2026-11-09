@@ -108,6 +108,27 @@ fn resources_crops_hashes_and_gif_timing_survive_loading() {
     assert_eq!(frames[0].image, clip.frames[1].image);
     assert_eq!(frames[1].image, clip.frames[0].image);
     assert_eq!(frames[2].image, clip.frames[1].image);
+    let prepared = dir.path().join("prepared-render");
+    write_prepared_rendering(&selected, &prepared).unwrap();
+    let packaged = load_project_with_prepared(dir.path(), &prepared).unwrap();
+    assert!(packaged.render_assets.is_empty());
+    assert_eq!(
+        serde_json::to_value(&packaged.data.render_plan).unwrap(),
+        serde_json::to_value(&selected.data.render_plan).unwrap()
+    );
+    for (name, path) in &packaged.prepared_render_paths {
+        assert_eq!(fs::read(path).unwrap(), selected.render_assets[name]);
+    }
+    fs::write(prepared.join(&frames[0].image), b"damaged frame").unwrap();
+    let recovered = load_project_with_prepared(dir.path(), &prepared).unwrap();
+    assert!(recovered.prepared_render_paths.is_empty());
+    assert_eq!(recovered.render_assets, selected.render_assets);
+
+    write_prepared_rendering(&selected, &prepared).unwrap();
+    fs::write(dir.path().join("character/LICENSE.txt"), "updated license").unwrap();
+    let changed = load_project_with_prepared(dir.path(), &prepared).unwrap();
+    assert!(changed.prepared_render_paths.is_empty());
+    assert_ne!(changed.content_hash, selected.content_hash);
     c["animations"]["idle"]["regions"][0]["x"] = 1000.into();
     fs::write(&manifest, serde_json::to_vec(&c).unwrap()).unwrap();
     assert!(load_project(dir.path())
@@ -116,11 +137,49 @@ fn resources_crops_hashes_and_gif_timing_survive_loading() {
         .contains("outside image bounds"));
 }
 #[test]
+fn a_gif_uses_one_visible_crop_for_the_entire_selected_motion() {
+    let dir = fixture();
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+        for x in [4, 8] {
+            let mut image = RgbaImage::new(16, 20);
+            for y in 3..10 {
+                image.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+            encoder
+                .encode_frame(Frame::from_parts(
+                    image,
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(80, 1),
+                ))
+                .unwrap();
+        }
+    }
+    fs::write(dir.path().join("character/padded.gif"), bytes).unwrap();
+    let manifest = dir.path().join("character/manifest.json");
+    let mut c: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    c["resources"] = serde_json::json!({"padded":{"image":"padded.gif"}});
+    c["animations"]["idle"] = serde_json::json!({"resource":"padded","loop":true});
+    fs::write(&manifest, serde_json::to_vec(&c).unwrap()).unwrap();
+    let loaded = load_project(dir.path()).unwrap();
+    let frames = &loaded.data.render_plan.animations["idle"].frames;
+    for frame in frames {
+        let crop = frame.region;
+        assert_eq!((crop.x, crop.y, crop.width, crop.height), (4, 3, 5, 7));
+    }
+}
+#[test]
 fn decoded_budget_and_resource_path_escape_are_rejected() {
-    let mut budget = DECODED_LIMIT;
-    assert!(decode_media(&gif(), &mut budget, &mut BTreeMap::new())
+    let bytes = gif();
+    let mut budget = 128 * 1024 * 1024 - 2 * 16 * 16 * 4;
+    let mut assets = BTreeMap::new();
+    decode_media(&bytes, &mut budget, &mut assets).unwrap();
+    assert_eq!(budget, 128 * 1024 * 1024);
+    assert!(decode_media(&bytes, &mut budget, &mut assets)
         .unwrap_err()
-        .contains("64 MiB"));
+        .contains("128 MiB"));
     let dir = fixture();
     let manifest = dir.path().join("character/manifest.json");
     let mut c: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
@@ -130,4 +189,75 @@ fn decoded_budget_and_resource_path_escape_are_rejected() {
         .unwrap_err()
         .to_string()
         .contains("UNSAFE_PATH"));
+}
+
+#[test]
+fn project_height_uses_idle_ink_and_placement_reserves_larger_mirrored_motions() {
+    let dir = fixture();
+    let character = dir.path().join("character");
+    let mut idle = RgbaImage::new(32, 32);
+    for y in 8..24 {
+        for x in 8..16 {
+            idle.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+        }
+    }
+    idle.save(character.join("small.png")).unwrap();
+    RgbaImage::from_pixel(32, 8, Rgba([255, 255, 255, 255]))
+        .save(character.join("wide.png"))
+        .unwrap();
+    let manifest = character.join("manifest.json");
+    let mut c: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    c["anchor"] = serde_json::json!({"x": 0.25, "y": 1.0});
+    c["resources"] =
+        serde_json::json!({"small":{"image":"small.png"}, "wide":{"image":"wide.png"}});
+    c["animations"]["idle"] = serde_json::json!({"resource":"small","scalePercent":50,"loop":true});
+    c["animations"]["jump"] =
+        serde_json::json!({"resource":"wide","scalePercent":200,"loop":false});
+    fs::write(&manifest, serde_json::to_vec(&c).unwrap()).unwrap();
+    let project = dir.path().join("buddy.project.json");
+    let mut p: serde_json::Value = serde_json::from_slice(&fs::read(&project).unwrap()).unwrap();
+    p["defaults"]["scale"] = 0.5.into();
+    fs::write(&project, serde_json::to_vec(&p).unwrap()).unwrap();
+    let legacy = load_project(dir.path()).unwrap();
+    let (idle_min, idle_max) = legacy.footprints.idle.unwrap();
+    let (all_min, all_max) = legacy.footprints.all.unwrap();
+    assert_eq!(legacy.idle_height_at_scale_one(), 128.0);
+    assert_eq!(legacy.canvas_size(legacy.default_scale()).y, 256.0);
+    assert!(all_min.x < idle_min.x && all_max.x > idle_max.x);
+    assert_eq!((all_min.x, all_max.x), (0.0, 1.0));
+    p["defaults"]["displayHeightDip"] = 72.into();
+    fs::write(&project, serde_json::to_vec(&p).unwrap()).unwrap();
+    let absolute = load_project(dir.path()).unwrap();
+    let height = absolute.canvas_size(absolute.default_scale()).y * (idle_max.y - idle_min.y);
+    assert_eq!(height, 72.0);
+    assert_eq!(
+        absolute.canvas_size(0.5).y * (idle_max.y - idle_min.y),
+        36.0
+    );
+
+    c["animations"]["jump"]["anchorX"] = 0.0.into();
+    fs::write(&manifest, serde_json::to_vec(&c).unwrap()).unwrap();
+    let offset = load_project(dir.path()).unwrap();
+    let size = offset.canvas_size(1.0);
+    assert_eq!(size.x, 2.0 * size.y);
+    let (left, right) = offset.footprints.all.unwrap();
+    assert_eq!((left.x, right.x), (0.0, 1.0));
+    c["animations"]["jump"]["anchorX"] = 1.1.into();
+    fs::write(&manifest, serde_json::to_vec(&c).unwrap()).unwrap();
+    assert!(load_project(dir.path())
+        .unwrap_err()
+        .to_string()
+        .contains("anchorX"));
+    c["animations"]["jump"]
+        .as_object_mut()
+        .unwrap()
+        .remove("anchorX");
+    fs::write(&manifest, serde_json::to_vec(&c).unwrap()).unwrap();
+
+    p["defaults"]["displayHeightDip"] = 0.into();
+    fs::write(&project, serde_json::to_vec(&p).unwrap()).unwrap();
+    assert!(load_project(dir.path())
+        .unwrap_err()
+        .to_string()
+        .contains("displayHeightDip"));
 }

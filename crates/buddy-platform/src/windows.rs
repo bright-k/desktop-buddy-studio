@@ -1,4 +1,6 @@
-use crate::{queue::EventSender, CaptureState, InputOptions, InputStatus, PermissionState};
+use crate::{
+    queue::EventSender, CaptureState, InputOptions, InputStatus, OverlayMouseRoute, PermissionState,
+};
 use buddy_project::{MouseButton, WheelDirection};
 use buddy_runtime::InputEvent;
 use std::{
@@ -34,10 +36,12 @@ struct Context {
     options: InputOptions,
     status: Arc<Mutex<InputStatus>>,
     rearm_keys: BTreeMap<String, u16>,
+    overlay_mouse: OverlayMouseRoute,
     queue_epoch: u64,
 }
 impl Context {
     unsafe fn rearm(&mut self) {
+        self.overlay_mouse.reset();
         self.devices.clear();
         self.rearm_keys.clear();
         for scan in 0..128 {
@@ -72,6 +76,7 @@ impl Context {
             (4, MouseButton::Middle),
         ]
         .into_iter()
+        .filter(|(_, button)| !self.overlay_mouse.routes(*button))
         .filter_map(|(vk, button)| (GetAsyncKeyState(vk) < 0).then_some(button))
         .collect();
         self.queue_epoch = self.sender.epoch();
@@ -252,6 +257,22 @@ unsafe fn mouse(context: &mut Context, mouse: RAWMOUSE, received_at: Instant) {
                 (0, true) | (1, false) => MouseButton::Secondary,
                 _ => MouseButton::Middle,
             };
+            if context.overlay_mouse.routes(button) {
+                let target = if pressed {
+                    let position = GetMessagePos();
+                    let point = POINT {
+                        x: i32::from(position as i16),
+                        y: i32::from((position >> 16) as i16),
+                    };
+                    let hit = WindowFromPoint(point);
+                    (!hit.is_null()).then(|| GetAncestor(hit, GA_ROOT) as usize)
+                } else {
+                    None
+                };
+                if !context.overlay_mouse.forward(button, pressed, target) {
+                    continue;
+                }
+            }
             context.sender.send_at(
                 if pressed {
                     InputEvent::MouseDown { button }
@@ -303,12 +324,19 @@ unsafe fn mouse(context: &mut Context, mouse: RAWMOUSE, received_at: Instant) {
         }
     }
 }
+pub(crate) fn mouse_button_down() -> bool {
+    [1, 2, 4, 5, 6]
+        .into_iter()
+        .any(|key| unsafe { GetAsyncKeyState(key) < 0 })
+}
+
 pub(crate) fn run(
     options: InputOptions,
     sender: EventSender,
     status: Arc<Mutex<InputStatus>>,
     stop: Arc<AtomicBool>,
     ready: SyncSender<()>,
+    overlay: Option<usize>,
 ) {
     if !options.keyboard && !options.mouse {
         let _ = ready.send(());
@@ -324,6 +352,7 @@ pub(crate) fn run(
         options,
         status: status.clone(),
         rearm_keys: BTreeMap::new(),
+        overlay_mouse: OverlayMouseRoute::new(overlay),
         queue_epoch: 0,
     });
     unsafe {

@@ -27,6 +27,7 @@ pub enum InputEvent {
         x: f64,
         y: f64,
     },
+    BuddyClick,
     DragStart,
     DragEnd,
     Reset,

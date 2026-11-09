@@ -48,6 +48,16 @@
     "Build": {
       "additionalProperties": false,
       "properties": {
+        "macosDmg": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MacosDmg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "signing": {
           "$ref": "#/$defs/Signing",
           "default": {
@@ -63,6 +73,63 @@
           "type": "array"
         }
       },
+      "type": "object"
+    },
+    "CursorFollow": {
+      "additionalProperties": false,
+      "properties": {
+        "bands": {
+          "items": {
+            "$ref": "#/$defs/CursorFollowBand"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "priority": {
+          "format": "uint8",
+          "maximum": 100,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stopDistanceDip": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "stopDistanceDip",
+        "bands"
+      ],
+      "type": "object"
+    },
+    "CursorFollowBand": {
+      "additionalProperties": false,
+      "properties": {
+        "animation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minDistanceDip": {
+          "format": "double",
+          "type": "number"
+        },
+        "speedDipPerSecond": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "minDistanceDip",
+        "speedDipPerSecond"
+      ],
       "type": "object"
     },
     "CursorPose": {
@@ -90,6 +157,15 @@
           "default": true,
           "type": "boolean"
         },
+        "displayHeightDip": {
+          "format": "double",
+          "maximum": 1024,
+          "minimum": 16,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "input": {
           "$ref": "#/$defs/InputPreferences",
           "default": {
@@ -105,7 +181,7 @@
           "$ref": "#/$defs/InitialPosition",
           "default": {
             "anchor": "bottomRight",
-            "marginDip": 24.0,
+            "marginDip": 10.0,
             "monitor": "primary"
           }
         },
@@ -124,6 +200,26 @@
           }
         }
       },
+      "type": "object"
+    },
+    "DmgIconPosition": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "y": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
       "type": "object"
     },
     "Effect": {
@@ -356,7 +452,7 @@
           "default": "bottomRight"
         },
         "marginDip": {
-          "default": 24.0,
+          "default": 10.0,
           "format": "double",
           "type": "number"
         },
@@ -389,6 +485,36 @@
       ],
       "type": "string"
     },
+    "KeyChord": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "modifiers": {
+          "items": {
+            "$ref": "#/$defs/KeyModifier"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
+    "KeyModifier": {
+      "enum": [
+        "control",
+        "alt",
+        "shift",
+        "meta"
+      ],
+      "type": "string"
+    },
     "KeyStep": {
       "additionalProperties": false,
       "properties": {
@@ -412,12 +538,82 @@
       ],
       "type": "string"
     },
+    "KeywordAlternative": {
+      "additionalProperties": false,
+      "properties": {
+        "keyword": {
+          "type": "string"
+        },
+        "layout": {
+          "$ref": "#/$defs/KeyboardLayout"
+        }
+      },
+      "required": [
+        "keyword",
+        "layout"
+      ],
+      "type": "object"
+    },
     "MacSigning": {
       "enum": [
         "ad-hoc",
         "self-signed"
       ],
       "type": "string"
+    },
+    "MacosDmg": {
+      "additionalProperties": false,
+      "properties": {
+        "appPosition": {
+          "$ref": "#/$defs/DmgIconPosition",
+          "default": {
+            "x": 180,
+            "y": 180
+          }
+        },
+        "applicationsPosition": {
+          "$ref": "#/$defs/DmgIconPosition",
+          "default": {
+            "x": 480,
+            "y": 180
+          }
+        },
+        "background": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guide": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guidePosition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DmgIconPosition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "height": {
+          "default": 420,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "default": 660,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
     },
     "MouseButton": {
       "enum": [
@@ -535,8 +731,23 @@
         {
           "additionalProperties": false,
           "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/KeyChord"
+              },
+              "type": "array"
+            },
             "code": {
               "type": "string"
+            },
+            "modifiers": {
+              "items": {
+                "$ref": "#/$defs/KeyModifier"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "repeat": {
               "default": false,
@@ -556,8 +767,23 @@
         {
           "additionalProperties": false,
           "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/KeyChord"
+              },
+              "type": "array"
+            },
             "code": {
               "type": "string"
+            },
+            "modifiers": {
+              "items": {
+                "$ref": "#/$defs/KeyModifier"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "type": {
               "const": "keyUp",
@@ -573,8 +799,23 @@
         {
           "additionalProperties": false,
           "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/KeyChord"
+              },
+              "type": "array"
+            },
             "code": {
               "type": "string"
+            },
+            "modifiers": {
+              "items": {
+                "$ref": "#/$defs/KeyModifier"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "type": {
               "const": "whileKeyDown",
@@ -655,6 +896,19 @@
           "additionalProperties": false,
           "properties": {
             "type": {
+              "const": "buddyClick",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
               "const": "drag",
               "type": "string"
             }
@@ -692,6 +946,12 @@
         {
           "additionalProperties": false,
           "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/KeywordAlternative"
+              },
+              "type": "array"
+            },
             "keyword": {
               "type": [
                 "string",
@@ -775,6 +1035,16 @@
     "character": {
       "type": "string"
     },
+    "cursorFollow": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CursorFollow"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "defaults": {
       "$ref": "#/$defs/Defaults",
       "default": {
@@ -786,7 +1056,7 @@
         "movementEnabled": false,
         "position": {
           "anchor": "bottomRight",
-          "marginDip": 24.0,
+          "marginDip": 10.0,
           "monitor": "primary"
         },
         "scale": 1.0,

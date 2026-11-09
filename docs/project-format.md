@@ -106,7 +106,7 @@ typing-cat/
 
 필수 필드는 `schemaVersion`, `projectId`, `product`, `character`다. 나머지 생략값은 이 문서의 defaults와 동일한 기본값, bindings 빈 배열, 현재 호스트의 지원 대상, Windows none/macOS ad-hoc로 정규화한다. 명시한 필드에 잘못된 값이 있으면 기본값으로 조용히 대체하지 않는다.
 
-defaults의 부분 객체도 필드별로 기본값을 채운다. scale은 0.25~3.0, alwaysOnTop·입력 토글·movementEnabled는 boolean이다. position.monitor는 v1에서 `primary`, anchor는 `topLeft`/`topRight`/`bottomLeft`/`bottomRight`, marginDip은 0~256이다. 실제 모니터 선택과 로컬 DIP 좌표는 사용자 preferences에 저장한다. 화면보다 큰 경우 Host의 작업 영역 제한이 우선한다. binding.id는 프로젝트 안에서 고유한 1~64자 영문·숫자·하이픈·밑줄이다. 숫자는 유한값만 허용한다.
+defaults의 부분 객체도 필드별로 기본값을 채운다. scale은 0.25~3.0이다. 선택 항목 `displayHeightDip`(16~1024)가 있으면 배율 대신 기본 대기 모션의 투명 여백을 뺀 높이를 DIP로 맞춘다. 설치 앱의 사용자 크기 100%는 이 높이를 기준으로 한다. alwaysOnTop·입력 토글·movementEnabled는 boolean이다. position.monitor는 v1에서 `primary`, anchor는 `topLeft`/`topRight`/`bottomLeft`/`bottomRight`, marginDip은 0~256(기본 10)이다. 처음 배치할 때는 캐릭터가 실제로 보이는 부분을 기준으로 하고, 화면 가장자리에는 최소 6 DIP를 둔다. 실제 모니터 선택과 로컬 DIP 좌표는 사용자 preferences에 저장한다. 화면보다 큰 경우 Host의 작업 영역 제한이 우선한다. binding.id는 프로젝트 안에서 고유한 1~64자 영문·숫자·하이픈·밑줄이다. 숫자는 유한값만 허용한다.
 
 ## 3. 캐릭터 manifest 예시
 
@@ -140,15 +140,20 @@ manifest의 이미지·라이선스 경로는 manifest가 있는 디렉토리 �
 
 | Trigger type | 허용 effect | 의미 |
 | --- | --- | --- |
-| `keyDown`, `keyUp` | `playAnimation` | 물리 키 ID. `*`는 지원 목록 중 modifier를 제외한 일반 키 전체 |
-| `whileKeyDown` | `move`, `sustainAnimation` | 해당 키의 held 상태에서 이동 또는 반복 동작. `*` 금지 |
-| `mouseDown`, `mouseUp` | `playAnimation` | `primary`, `secondary`, `middle` 버튼 |
+| `keyDown`, `keyUp` | `playAnimation` | 물리 키와 선택적 보조 키 조합. `*`는 지원 목록 중 보조 키를 제외한 일반 키 전체 |
+| `whileKeyDown` | `move`, `sustainAnimation` | 물리 키와 지정한 조합을 유지하는 동안 이동 또는 반복 동작. `*` 금지 |
+| `mouseDown`, `mouseUp` | `playAnimation` | 전역 `primary`, `secondary`, `middle` 버튼. 버디 위에서 시작한 기본 버튼 입력은 버디가 처리한다. |
+| `buddyClick` | `playAnimation` | 버디 위에서 기본 버튼을 눌렀다가 드래그 없이 놓았을 때 한 번 실행. |
 | `wheel` | `playAnimation` | `up`, `down`, `left`, `right` 방향. OS 델타는 정규화한다. |
 | `typingRate` | `sustainAnimation` | 설정한 측정 창(기본 2초)의 실제 키 입력 속도 구간에 머무르는 동안 반복 애니메이션 |
 | `keySequence` | `playAnimation` | keyword+layout으로 변환한 물리 키 순서 또는 명시적 steps의 매칭 |
 | `drag` | `sustainAnimation` | 버디를 직접 드래그하는 동안 반복 동작. 놓으면 즉시 해제 |
 
 typingRate.minKps는 0.5~1000, maxKps는 minKps보다 큰 1000 이하 값이며 생략하면 상한 없음이다. 구간은 `[minKps, maxKps)`이고 프로젝트당 최대 8개, 서로 겹치면 검증 오류다. sustainAnimation은 loop=true인 animation을 참조한다. 키 유지·속도 동작과 이동은 priority를 정수 0~100으로 지정할 수 있다. 생략하면 일회성 → 키 유지 → 속도 → 이동 순서가 적용된다. 드래그 중에는 편집용 동작을 표시한다.
+
+키 이벤트의 `modifiers`에는 `control`, `alt`, `shift`, `meta`를 중복 없이 지정할 수 있다. Ctrl+C는 `code: "KeyC", modifiers: ["control"]`, macOS의 Cmd+V는 `code: "KeyV", modifiers: ["meta"]`로 설정한다. 좌우 보조 키는 같은 조건으로 처리한다. 배열을 지정하면 누른 보조 키가 배열과 정확히 일치해야 하며, 빈 배열은 보조 키가 없는 입력에 해당한다. 생략하면 기존처럼 보조 키 상태와 상관없이 매칭한다. 키 뗌은 주 키를 뗄 때, 키 유지는 유지하는 동안 조건을 검사한다. 같은 우선순위에서는 보조 키 조건을 지정한 이벤트가 먼저다.
+
+같은 키 이벤트에 `alternatives` 배열로 `{ code, modifiers }`를 더할 수 있다. 키워드 이벤트의 `alternatives`에는 `{ keyword, layout }`를 넣어 입력마다 키 배열을 선택한다. 기본 입력과 추가 입력 중 하나만 일치해도 같은 이벤트가 실행된다. 재반응 대기 시간, 반복 입력 옵션, 키워드 입력 제한 시간은 이벤트 단위로 적용한다. 한 키 이벤트에는 최대 32개 입력을 둘 수 있고, 키워드는 추가 입력을 포함해 프로젝트 전체에서 최대 32개를 쓸 수 있다.
 
 keySequence는 keyword+layout 또는 steps 중 하나만 가진다. keyword는 NFC 후 1~32 Unicode scalar, layout은 ko-KR-2set/en-US-qwerty다. steps는 1~128개의 `{ code, shift }`이며 shift는 필수 boolean이다. timeoutMs는 정수 500~10000, 기본 5000이다. sequence는 최대 32개, 변환 후 동일 패턴 중복은 오류다. 지원 문자·두벌식 변환표·중단 키·겹침 규칙은 [입력 계약](input-and-keywords.md)이 기준이다. 한 이벤트에서 키·wildcard·완성 sequence 후보를 함께 비교한다.
 
@@ -166,7 +171,9 @@ move의 x/y는 -1~1, 0 벡터는 금지하고 speedDipPerSecond는 1~1000이다.
 
 실제 이동이 있으면 활성 move 중 우선순위가 높은 동작을 후보로 삼는다. 기본 우선순위가 같은 이동은 애니메이션이 지정된 정의가 우선하고, 선택한 이동에 애니메이션이 없으면 기본 대기 모습을 사용한다. 일회성 반응 중에도 이동 계산은 계속한다. 편집·일시 정지에서는 모든 입력 동작을 중지하고, movementEnabled=false는 이동과 walk만 중지한다. 범용 effect 배열과 유지 조건의 독립 playAnimation은 v1에 넣지 않는다.
 
-프로젝트의 선택 필드 `idle`에서 `cursorEnabled: true`이면, 대기 중 캐릭터 영역을 3×3으로 나눠 최신 커서가 있는 구역을 선택한다. 밖에 있는 커서는 가장 가까운 행과 열에 대응한다. `idle.directions`의 키는 upLeft, up, upRight, left, center, right, downLeft, down, downRight다. 각 키에 반복 `animation`과 `mirror`를 따로 지정할 수 있다. 비어 있으면 기본 대기 동작을 쓰며, 자동 방향은 왼쪽 열에서 반전한다. 다른 이벤트는 binding의 `followCursor`를 켠 경우에만 좌우로 커서를 따라본다. 이전 프로젝트의 `cursorMove`와 `faceCursor` 조합은 `idle`이 생략된 경우에 대기 방향 설정으로 적용된다.
+프로젝트의 선택 필드 `idle`에서 `cursorEnabled: true`이면, 대기 중 캐릭터 영역을 3×3으로 나눠 최신 커서가 있는 구역을 선택한다. 밖에 있는 커서는 가장 가까운 행과 열에 대응한다. `idle.directions`의 키는 upLeft, up, upRight, left, center, right, downLeft, down, downRight다. 각 키에 반복 `animation`과 `mirror`를 따로 지정할 수 있다. 비어 있으면 기본 대기 동작을 쓴다. 자동 방향은 왼쪽 열을 왼쪽 보기로, 나머지 칸을 오른쪽 보기로 처리하며 동작의 원본 방향에 맞춰 반전한다. `mirror`를 지정하면 원본 또는 반전을 직접 선택한다. 다른 이벤트는 binding의 `followCursor`를 켠 경우에만 좌우로 커서를 따라본다. 이전 프로젝트의 `cursorMove`와 `faceCursor` 조합은 `idle`이 생략된 경우에 대기 방향 설정으로 적용된다.
+
+`cursorFollow.priority`는 생략하거나 0~100으로 지정한다. 따라오는 중에는 이 값 이상인 이벤트가 애니메이션을 바꿀 수 있고 이동은 계속한다. 이미 재생 중인 일회성 이벤트는 자신의 전환 규칙을 따른다. 생략하면 일회성 이벤트와 따라오기, 지속 이벤트 순으로 표시한다. 키로 직접 이동하거나 드래그할 때는 마우스 따라오기를 일시 중지한다.
 
 ### 이벤트 사운드
 
@@ -181,16 +188,16 @@ move의 x/y는 -1~1, 0 벡터는 금지하고 speedDipPerSecond는 1~1000이다.
 | `ShiftLeft/Right`, `ControlLeft/Right`, `AltLeft/Right`, `MetaLeft/Right` | 지원 | 지원, Meta는 Command·Alt는 Option |
 | `Backquote`, `Minus`, `Equal`, `BracketLeft/Right`, `Backslash`, `Semicolon`, `Quote`, `Comma`, `Period`, `Slash` | 지원 | 지원 |
 
-위 표에서 `/`는 각각의 code를 축약한 표기다. 예: ArrowLeft, ArrowRight, ArrowUp, ArrowDown. 물리 키를 기준으로 하며 자판에 인쇄된 문자·IME 결과와 다를 수 있다. `*`는 modifier 8개를 제외한 위 목록만 매칭한다. CapsLock·국제 전용 키·Insert·숫자패드·F13 이상·멀티미디어 키는 v1 매핑 목록에서 제외하고 이벤트는 Unknown으로 무시한다. 문자 추정·임의 코드 등록은 금지한다. modifier 조합 조건과 앱별 입력 제외는 P1 이후다.
+위 표에서 `/`는 각각의 code를 축약한 표기다. 예: ArrowLeft, ArrowRight, ArrowUp, ArrowDown. 물리 키를 기준으로 하며 자판에 인쇄된 문자·IME 결과와 다를 수 있다. `*`는 modifier 8개를 제외한 위 목록만 매칭한다. CapsLock·국제 전용 키·Insert·숫자패드·F13 이상·멀티미디어 키는 v1 매핑 목록에서 제외하고 이벤트는 Unknown으로 무시한다. 문자 추정·임의 코드 등록은 금지한다. 앱별 입력 제외는 P1 이후다.
 
-repeat는 keyDown에서만 허용하며 기본 false다. true이면 최초 down과 OS 반복 down을 모두 후보로 삼는다. repeat는 held 집합에 중복 추가하지 않으며 reset 이후 새 held 상태를 만들지 않는다. keyUp에는 repeat 필드를 받지 않는다. 마우스 primary/secondary는 OS 기본/보조 버튼 설정에 맞추고 middle을 별도로 처리한다. wheel은 OS 논리 스크롤을 X 양수=오른쪽, Y 양수=아래로 정규화하고, 각 0이 아닌 축을 X→Y 순서로 평가한다. 어댑터가 노치·연속 델타를 구분하며 동일 물리 휠 거리나 이벤트 횟수를 OS 간 동일하다고 보장하지 않는다.
+repeat는 keyDown에서만 허용하며 기본 false다. true이면 최초 down과 OS 반복 down을 모두 후보로 삼는다. repeat는 held 집합에 중복 추가하지 않으며 reset 이후 새 held 상태를 만들지 않는다. keyUp에는 repeat 필드를 받지 않는다. 마우스 primary/secondary는 OS 기본/보조 버튼 설정에 맞추고 middle을 별도로 처리한다. 버디에서 시작한 우클릭은 버디 메뉴에만 전달한다. wheel은 OS 논리 스크롤을 X 양수=오른쪽, Y 양수=아래로 정규화하고, 각 0이 아닌 축을 X→Y 순서로 평가한다. 어댑터가 노치·연속 델타를 구분하며 동일 물리 휠 거리나 이벤트 횟수를 OS 간 동일하다고 보장하지 않는다.
 
 ## 5. 검증과 자산 한도
 
 아래는 v1 검증 한도다. 실측으로 변경이 필요하면 ADR·스키마·fixture를 함께 갱신한다.
 
 - JSON은 UTF-8, 각 JSON 최대 1 MiB, 중복 JSON 필드 금지, 총 매핑 최대 256개다. license 텍스트도 UTF-8, 파일당 1 MiB 이하로 제한한다.
-- 기본 스프라이트와 앱 아이콘은 PNG다. 추가 resources는 PNG/JPEG/GIF/정적 WebP/BMP를 지원한다. 파일 1개 16 MiB, 한 변 4096 px, 프로젝트 전체 디코딩 RGBA 64 MiB, 참조 자산 합계 64 MiB 이하로 제한한다. GIF는 최대 256프레임이며 애니메이션 WebP/APNG·SVG는 거부한다.
+- 기본 스프라이트와 앱 아이콘은 PNG다. 추가 resources는 PNG/JPEG/GIF/정적 WebP/BMP를 지원한다. 파일 1개 16 MiB, 한 변 4096 px, 프로젝트 전체 디코딩 RGBA 128 MiB, 참조 자산 합계 64 MiB 이하로 제한한다. GIF는 최대 256프레임이며 애니메이션 WebP/APNG·SVG는 거부한다.
 - 프레임 한 변 16~512 px, frameCount 1~256, 시트의 실제 이미지 크기와 선언값이 일치해야 한다.
 - 시트 크기는 프레임 크기의 정수 배이며 `1 <= frameCount <= (width / frameWidth) * (height / frameHeight)`다. 모든 인덱스는 `0 <= index < frameCount`를 만족한다. 미사용 셀은 허용하되 참조하지 않는다.
 - 절대 경로·상위 경로 탈출·루트 밖 symlink·원격 URL·실행 파일·HTML·스크립트는 프로젝트 자산으로 허용하지 않는다.
@@ -230,7 +237,9 @@ preferences v1은 자체 schemaVersion=1과 scale·alwaysOnTop·basePlacement·i
 }
 ```
 
-이는 manifest의 부분 예시이며 기존 schemaVersion/id/name/license/image/sheet/anchor/defaultAnimation과 함께 사용한다. frames와 regions는 동시에 채우지 않는다. regions는 실제 정적 이미지 안의 양수 너비·높이 사각형이며 최대 256개다. resource를 생략하면 기본 PNG를 자른다. resource와 frames를 함께 쓰면 그 원본의 프레임 번호를 선택한다. 정적 추가 이미지는 0번 한 프레임이다. GIF의 전체 프레임을 쓰려면 frames를 생략한다. GIF의 regions는 거부한다. useSourceTiming은 기본 true, false이면 fps(기본 12, 1~30)를 적용한다. GIF 프레임 시간 합계가 일회성 종료 시점이며 loop는 GIF 파일의 반복 메타데이터보다 우선한다. 표시 비율을 유지해 기준 프레임 안에 맞춘다.
+이는 manifest의 부분 예시이며 기존 schemaVersion/id/name/license/image/sheet/anchor/defaultAnimation과 함께 사용한다. frames와 regions는 동시에 채우지 않는다. regions는 실제 정적 이미지 안의 양수 너비·높이 사각형이며 최대 256개다. resource를 생략하면 기본 PNG를 자른다. resource와 frames를 함께 쓰면 그 원본의 프레임 번호를 선택한다. 정적 추가 이미지는 0번 한 프레임이다. GIF의 전체 프레임을 쓰려면 frames를 생략한다. GIF의 regions는 거부한다. useSourceTiming은 기본 true, false이면 fps(기본 12, 1~30)를 적용한다. GIF 프레임 시간 합계가 일회성 종료 시점이며 loop는 GIF 파일의 반복 메타데이터보다 우선한다. 표시 비율을 유지해 기준 프레임 안에 맞춘다. 선택적 `scalePercent`(정수 50~200, 기본 100)로 자동 맞춤 결과에 동작별 배율을 적용한다.
+
+동작의 `sourceFacing`은 원본이 보는 방향이며 `left` 또는 `right`를 사용한다. 생략하면 오른쪽을 기준으로 자동 반전을 판단한다. 선택적 `anchorX`(0~1)는 프레임 왼쪽에서 잰 가로 기준점이다. 생략하면 캐릭터의 `anchor.x`를 사용한다. 반전할 때 기준점은 화면에서 같은 위치에 놓인다. Player 창은 모든 동작의 기준점과 배율을 고려해 좌우 공간을 확보한다.
 
 `defaults.timing`은 `{ "rateWindowMs": 2000, "rateEvaluationMs": 50, "rateStabilityMs": 100, "idleTimeoutMs": 250 }`가 기본이다. 순서대로 범위는 100~10000, 10~250, 0~2000, 50~5000ms이고 평가 간격은 유휴 시간 이하여야 한다. 앱 사용자 설정은 프로젝트 기본값을 덮어쓰며 프로젝트 원본을 변경하지 않는다.
 

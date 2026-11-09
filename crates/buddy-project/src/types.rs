@@ -14,10 +14,47 @@ pub struct Project {
     pub defaults: Defaults,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle: Option<IdleSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_follow: Option<CursorFollow>,
     #[serde(default)]
     pub bindings: Vec<Binding>,
     #[serde(default)]
     pub build: Build,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CursorFollow {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 100))]
+    pub priority: Option<u8>,
+    pub stop_distance_dip: f64,
+    pub bands: Vec<CursorFollowBand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CursorFollowBand {
+    pub min_distance_dip: f64,
+    pub speed_dip_per_second: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<String>,
+}
+impl Default for CursorFollow {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            priority: None,
+            stop_distance_dip: 48.0,
+            bands: vec![CursorFollowBand {
+                min_distance_dip: 0.0,
+                speed_dip_per_second: 120.0,
+                animation: None,
+            }],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -34,6 +71,9 @@ pub struct Product {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Defaults {
     pub scale: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 16, max = 1024))]
+    pub display_height_dip: Option<f64>,
     pub always_on_top: bool,
     pub position: InitialPosition,
     pub input: InputPreferences,
@@ -44,6 +84,7 @@ impl Default for Defaults {
     fn default() -> Self {
         Self {
             scale: 1.0,
+            display_height_dip: None,
             always_on_top: true,
             position: InitialPosition::default(),
             input: InputPreferences::default(),
@@ -93,7 +134,7 @@ impl Default for InitialPosition {
         Self {
             monitor: "primary".into(),
             anchor: Anchor::BottomRight,
-            margin_dip: 24.0,
+            margin_dip: 10.0,
         }
     }
 }
@@ -127,6 +168,75 @@ impl Default for InputPreferences {
 pub struct Build {
     pub targets: Vec<Target>,
     pub signing: Signing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_dmg: Option<MacosDmg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct MacosDmg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide_position: Option<DmgIconPosition>,
+    pub width: u32,
+    pub height: u32,
+    pub app_position: DmgIconPosition,
+    pub applications_position: DmgIconPosition,
+}
+impl Default for MacosDmg {
+    fn default() -> Self {
+        Self {
+            background: None,
+            guide: None,
+            guide_position: None,
+            width: 660,
+            height: 420,
+            app_position: DmgIconPosition { x: 180, y: 180 },
+            applications_position: DmgIconPosition { x: 480, y: 180 },
+        }
+    }
+}
+impl MacosDmg {
+    pub const ICON_BOTTOM_MARGIN: u32 = 128;
+
+    fn guide_position_fits(&self, position: DmgIconPosition) -> bool {
+        position.x >= 72
+            && position.x <= self.width.saturating_sub(72)
+            && position.y >= 72
+            && position.y <= self.height.saturating_sub(Self::ICON_BOTTOM_MARGIN)
+            && [self.app_position, self.applications_position]
+                .into_iter()
+                .all(|icon| {
+                    position.x.abs_diff(icon.x) >= 132 || position.y.abs_diff(icon.y) >= 132
+                })
+    }
+
+    pub fn guide_position(&self) -> Option<DmgIconPosition> {
+        if let Some(position) = self.guide_position {
+            return self.guide_position_fits(position).then_some(position);
+        }
+        let right = self.width.checked_sub(72)?;
+        // Leave room for Finder's title bar and the icon label.
+        let bottom = self.height.checked_sub(Self::ICON_BOTTOM_MARGIN)?;
+        [bottom, 72, self.height / 2]
+            .into_iter()
+            .flat_map(|y| {
+                [self.width / 2, 72, right]
+                    .into_iter()
+                    .map(move |x| DmgIconPosition { x, y })
+            })
+            .find(|position| self.guide_position_fits(*position))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DmgIconPosition {
+    pub x: u32,
+    pub y: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -204,12 +314,24 @@ pub enum Trigger {
         code: String,
         #[serde(default)]
         repeat: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifiers: Option<Vec<KeyModifier>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alternatives: Vec<KeyChord>,
     },
     KeyUp {
         code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifiers: Option<Vec<KeyModifier>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alternatives: Vec<KeyChord>,
     },
     WhileKeyDown {
         code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifiers: Option<Vec<KeyModifier>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alternatives: Vec<KeyChord>,
     },
     MouseDown {
         button: MouseButton,
@@ -221,6 +343,7 @@ pub enum Trigger {
         direction: WheelDirection,
     },
     CursorMove,
+    BuddyClick,
     Drag,
     TypingRate {
         #[serde(rename = "minKps")]
@@ -237,8 +360,83 @@ pub enum Trigger {
         steps: Option<Vec<KeyStep>>,
         #[serde(rename = "timeoutMs", default = "default_timeout")]
         timeout_ms: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alternatives: Vec<KeywordAlternative>,
     },
 }
+
+impl Trigger {
+    pub fn key_conditions(&self) -> impl Iterator<Item = (&str, Option<&[KeyModifier]>)> {
+        let (primary, alternatives) = match self {
+            Self::KeyDown {
+                code,
+                modifiers,
+                alternatives,
+                ..
+            }
+            | Self::KeyUp {
+                code,
+                modifiers,
+                alternatives,
+            }
+            | Self::WhileKeyDown {
+                code,
+                modifiers,
+                alternatives,
+            } => (
+                Some((code.as_str(), modifiers.as_deref())),
+                alternatives.as_slice(),
+            ),
+            _ => (None, &[][..]),
+        };
+        primary.into_iter().chain(
+            alternatives
+                .iter()
+                .map(|key| (key.code.as_str(), key.modifiers.as_deref())),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct KeyChord {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifiers: Option<Vec<KeyModifier>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct KeywordAlternative {
+    pub keyword: String,
+    pub layout: KeyboardLayout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyModifier {
+    Control,
+    Alt,
+    Shift,
+    Meta,
+}
+
+impl KeyModifier {
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "ControlLeft" | "ControlRight" => Some(Self::Control),
+            "AltLeft" | "AltRight" => Some(Self::Alt),
+            "ShiftLeft" | "ShiftRight" => Some(Self::Shift),
+            "MetaLeft" | "MetaRight" => Some(Self::Meta),
+            _ => None,
+        }
+    }
+
+    pub fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
 fn default_timeout() -> u32 {
     5000
 }
@@ -383,6 +581,39 @@ pub struct Character {
     pub default_animation: String,
     pub animations: BTreeMap<String, Animation>,
 }
+
+pub const MIN_ANIMATION_SCALE_PERCENT: u16 = 50;
+pub const MAX_ANIMATION_SCALE_PERCENT: u16 = 200;
+
+impl Character {
+    pub fn canvas_size(&self, scale: f64) -> Point {
+        let scale = scale * self.animation_scale_envelope();
+        Point {
+            x: f64::from(self.sheet.frame_width) * 2.0 * self.horizontal_anchor_extent() * scale,
+            y: f64::from(self.sheet.frame_height) * scale,
+        }
+    }
+
+    pub(crate) fn horizontal_anchor_extent(&self) -> f64 {
+        self.animations
+            .values()
+            .filter_map(|animation| animation.anchor_x)
+            .chain(std::iter::once(self.anchor.x))
+            .map(|x| x.max(1.0 - x))
+            .fold(0.5, f64::max)
+    }
+
+    /// A fixed viewport for the whole project keeps large clips in bounds.
+    pub fn animation_scale_envelope(&self) -> f64 {
+        let largest = self
+            .animations
+            .values()
+            .filter_map(|animation| animation.scale_percent)
+            .fold(100, u16::max);
+        f64::from(largest) / 100.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Sheet {
@@ -398,6 +629,13 @@ pub struct Point {
     pub x: f64,
     pub y: f64,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceFacing {
+    Left,
+    Right,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Animation {
@@ -411,6 +649,14 @@ pub struct Animation {
     pub regions: Vec<FrameRegion>,
     #[serde(default = "default_source_timing")]
     pub use_source_timing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 50, max = 200))]
+    pub scale_percent: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_facing: Option<SourceFacing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub anchor_x: Option<f64>,
     #[serde(rename = "loop")]
     pub looping: bool,
 }
@@ -465,11 +711,15 @@ pub fn typescript_declarations() -> String {
         Project::decl(),
         Product::decl(),
         Defaults::decl(),
+        CursorFollow::decl(),
+        CursorFollowBand::decl(),
         Timing::decl(),
         InitialPosition::decl(),
         Anchor::decl(),
         InputPreferences::decl(),
         Build::decl(),
+        MacosDmg::decl(),
+        DmgIconPosition::decl(),
         Signing::decl(),
         WindowsSigning::decl(),
         MacSigning::decl(),
@@ -477,6 +727,9 @@ pub fn typescript_declarations() -> String {
         Binding::decl(),
         SoundCue::decl(),
         Trigger::decl(),
+        KeyModifier::decl(),
+        KeyChord::decl(),
+        KeywordAlternative::decl(),
         Effect::decl(),
         Interruption::decl(),
         CursorDirection::decl(),
@@ -490,6 +743,7 @@ pub fn typescript_declarations() -> String {
         Character::decl(),
         Sheet::decl(),
         Point::decl(),
+        SourceFacing::decl(),
         Animation::decl(),
         Resource::decl(),
         SoundResource::decl(),
@@ -498,8 +752,17 @@ pub fn typescript_declarations() -> String {
         RenderAnimation::decl(),
         RenderPlan::decl(),
     ];
-    declarations
+    let mut output: String = declarations
         .into_iter()
         .map(|line| format!("export {line}\n"))
-        .collect()
+        .collect();
+    let keys: Vec<_> = crate::supported_keys().collect();
+    output.push_str(&format!(
+        "export const supportedPhysicalKeys: readonly string[] = {};\n",
+        serde_json::to_string(&keys).expect("key codes are serializable")
+    ));
+    output.push_str(&format!(
+        "export const animationScaleLimits = {{ min: {MIN_ANIMATION_SCALE_PERCENT}, max: {MAX_ANIMATION_SCALE_PERCENT} }} as const;\n"
+    ));
+    output
 }

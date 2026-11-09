@@ -303,8 +303,9 @@ export class ProjectStore {
     id,
     meta,
     path = join(this.path(id), "revisions", requireId(meta.revision)),
+    prepared,
   ) {
-    const info = await this.inspectPath(
+    const info = prepared ?? await this.inspectPath(
       path,
       join(this.path(id), "previews", meta.revision),
     );
@@ -325,7 +326,9 @@ export class ProjectStore {
     const project = editableProject(info.project);
     const sequences = project === info.project ? info.sequences
       : info.sequences.filter((_, index) => project.bindings.includes(info.project.bindings[index]));
-    return { ...info, project, sequences, meta, library, license, draft };
+    const sequenceAlternatives = project === info.project ? info.sequenceAlternatives
+      : info.sequenceAlternatives?.filter((_, index) => project.bindings.includes(info.project.bindings[index]));
+    return { ...info, project, sequences, sequenceAlternatives, meta, library, license, draft };
   }
   async readDraft(id) {
     return JSON.parse(
@@ -469,16 +472,16 @@ export class ProjectStore {
       await fs.rm(staging, { recursive: true, force: true });
     }
   }
-  async stage(id, payload) {
+  async stage(id, payload, preparePreview = false) {
     const base = this.path(id),
       source = await this.currentPath(id),
       revision = randomUUID();
     const path = join(this.root, ".staging", revision);
     const { project, character, license } = payload;
-    const current = await this.inspectPath(source);
+    const current = JSON.parse(await fs.readFile(join(source, "buddy.project.json"), "utf8"));
     if (
-      project.projectId !== current.project.projectId ||
-      project.product.identifier !== current.project.product.identifier
+      project.projectId !== current.projectId ||
+      project.product.identifier !== current.product.identifier
     )
       throw new StudioError(
         "프로젝트 ID와 앱 식별자는 생성 후 변경할 수 없습니다. 복제를 사용하세요.",
@@ -513,6 +516,23 @@ export class ProjectStore {
           join(path, "character", relative),
         );
       }
+      const installerAssets = (definition) => [definition.build?.macosDmg?.background, definition.build?.macosDmg?.guide]
+        .filter((name) => typeof name === "string" && /^assets\/installer\/[a-f0-9]{64}\.(?:png|jpg|jpeg|html|pdf)$/.test(name));
+      const nextAssets = new Set(installerAssets(project));
+      const previousAssets = installerAssets(current);
+      if (nextAssets.size || previousAssets.length) {
+        const folder = join(path, "assets", "installer");
+        if (!(await fs.lstat(join(path, "assets"))).isDirectory()) throw new StudioError("잘못된 설치 파일 폴더입니다.");
+        await fs.mkdir(folder, { recursive: true });
+        if (!(await fs.lstat(folder)).isDirectory()) throw new StudioError("잘못된 설치 파일 폴더입니다.");
+        for (const relative of new Set([...previousAssets, ...nextAssets])) {
+          const target = join(path, relative);
+          await fs.rm(target, { force: true });
+          if (nextAssets.has(relative)) {
+            await fs.copyFile(await scopedFile(join(base, "resources"), relative.slice("assets/installer/".length)), target);
+          }
+        }
+      }
       if (payload.icon) {
         if (!/^[a-f0-9]{64}\.png$/.test(payload.icon))
           throw new StudioError("아이콘은 PNG여야 합니다.");
@@ -525,10 +545,13 @@ export class ProjectStore {
       await atomicJson(join(path, "character", "manifest.json"), character);
       if (typeof license === "string")
         await fs.writeFile(join(path, "character", "LICENSE.txt"), license);
-      const info = await this.inspectPath(path);
+      const info = await this.inspectPath(path, preparePreview ? join(base, "previews", revision) : undefined);
       return { path, revision, info };
     } catch (error) {
-      await fs.rm(path, { recursive: true, force: true });
+      await Promise.allSettled([
+        fs.rm(path, { recursive: true, force: true }),
+        ...(preparePreview ? [fs.rm(join(base, "previews", revision), { recursive: true, force: true })] : []),
+      ]);
       throw error;
     }
   }
@@ -559,7 +582,9 @@ export class ProjectStore {
           "다른 창에서 임시 편집을 변경했습니다. 현재 편집을 JSON으로 보관한 뒤 프로젝트를 다시 여세요.",
           409,
         );
-      const staged = await this.stage(id, payload);
+      if (meta.builtSlug && payload.project?.product?.slug !== meta.builtSlug)
+        throw new StudioError("설치된 앱의 업데이트를 위해 빌드에 사용한 실행 파일 이름을 유지하세요.", 409);
+      const staged = await this.stage(id, payload, true);
       const revisionPath = join(this.path(id), "revisions", staged.revision);
       const nextMeta = {
         ...meta,
@@ -571,7 +596,7 @@ export class ProjectStore {
       let view;
       let moved = false;
       try {
-        view = await this.loadRevision(id, nextMeta, staged.path);
+        view = await this.loadRevision(id, nextMeta, staged.path, staged.info);
         await fs.rename(staged.path, revisionPath);
         moved = true;
         await atomicJson(join(this.path(id), "project.json"), nextMeta);
@@ -648,6 +673,12 @@ export class ProjectStore {
         join(source, "assets", "app-icon.png"),
         join(current, "assets", "app-icon.png"),
       );
+      for (const name of [project.build?.macosDmg?.background, project.build?.macosDmg?.guide].filter(Boolean)) {
+        const asset = await scopedFile(source, name);
+        const destination = join(current, name);
+        await fs.mkdir(dirname(destination), { recursive: true });
+        await fs.copyFile(asset, destination);
+      }
       return this.save(fresh.meta.id, {
         revision: fresh.meta.revision,
         project,
@@ -656,23 +687,36 @@ export class ProjectStore {
       });
     });
   }
-  async upload(id, bytes, filename) {
+  async upload(id, bytes, filename, installer = false) {
     return this.exclusive(id, async () => {
       await this.metadata(id);
       const extension = extname(filename).slice(1).toLowerCase();
-      if (!["png", "jpg", "jpeg", "gif", "webp", "bmp", "wav", "mp3"].includes(extension))
+      if (installer ? !["png", "jpg", "jpeg", "html", "pdf"].includes(extension)
+        : !["png", "jpg", "jpeg", "gif", "webp", "bmp", "wav", "mp3"].includes(extension))
         throw new StudioError(
-          "PNG · JPG · GIF · WebP · BMP 이미지 또는 WAV · MP3 사운드를 선택하세요.",
+          installer ? "설치 파일에는 PNG · JPEG 이미지 또는 PDF · HTML 가이드를 선택하세요."
+            : "PNG · JPG · GIF · WebP · BMP 이미지 또는 WAV · MP3 사운드를 선택하세요.",
         );
       if (!bytes.length || bytes.length > 16 * 1024 * 1024)
         throw new StudioError("리소스는 16 MiB 이하여야 합니다.");
       const probe = join(this.root, ".staging", `${randomUUID()}.${extension}`);
       let media;
-      try {
-        await fs.writeFile(probe, bytes, { flag: "wx" });
-        media = JSON.parse(await run(this.cli, ["media-info", probe]));
-      } finally {
-        await fs.rm(probe, { force: true });
+      if (extension === "html") {
+        try { new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+        catch { throw new StudioError("설치 가이드는 UTF-8 HTML이어야 합니다."); }
+        media = {};
+      } else if (extension === "pdf") {
+        if (!bytes.subarray(0, 5).equals(Buffer.from("%PDF-")) ||
+            !bytes.subarray(-1024).includes("%%EOF"))
+          throw new StudioError("올바른 PDF 설치 가이드 파일을 선택하세요.");
+        media = {};
+      } else {
+        try {
+          await fs.writeFile(probe, bytes, { flag: "wx" });
+          media = JSON.parse(await run(this.cli, ["media-info", probe]));
+        } finally {
+          await fs.rm(probe, { force: true });
+        }
       }
       const name =
         createHash("sha256").update(bytes).digest("hex") + "." + extension;
@@ -732,6 +776,8 @@ export class ProjectStore {
           409,
         );
       const view = await this.loadRevision(id, { ...meta, revision });
+      if (meta.builtSlug && view.project.product.slug !== meta.builtSlug)
+        throw new StudioError("빌드에 사용한 실행 파일 이름이 다른 버전은 복원할 수 없습니다.", 409);
       const nextMeta = {
         ...view.meta,
         name: view.project.product.name,

@@ -45,6 +45,115 @@ fn down(runtime: &mut Runtime, now: u64, code: &str) {
         },
     );
 }
+
+#[test]
+fn cursor_follow_switches_bands_and_stops_without_overshoot() {
+    let mut data = data(json!([movement("ArrowLeft", -1.0, 0.0)]));
+    data.project.cursor_follow = Some(
+        serde_json::from_value(json!({
+            "enabled": true, "stopDistanceDip": 40,
+            "bands": [
+                {"minDistanceDip": 0, "speedDipPerSecond": 100, "animation": "walk"},
+                {"minDistanceDip": 180, "speedDipPerSecond": 300, "animation": "typingFast"}
+            ]
+        }))
+        .unwrap(),
+    );
+    let data = validate_parts(data.project, data.character).unwrap();
+    let mut buddy = Runtime::new(
+        data,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        },
+        Point { x: 100.0, y: 100.0 },
+        Point { x: 100.0, y: 100.0 },
+    );
+    buddy.handle(0, InputEvent::CursorMove { x: 500.0, y: 150.0 });
+    assert_eq!(buddy.state().source, AnimationSource::CursorFollow);
+    assert_eq!(buddy.state().animation, "typingFast");
+    for now in (50..=600).step_by(50) {
+        buddy.advance(now);
+    }
+    assert_eq!(buddy.state().position.x, 280.0);
+    assert_eq!(buddy.state().animation, "walk");
+    for now in (650..=2200).step_by(50) {
+        buddy.advance(now);
+    }
+    assert_eq!(buddy.state().position.x, 410.0);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    down(&mut buddy, 2200, "ArrowLeft");
+    buddy.advance(2250);
+    assert_eq!(buddy.state().position.x, 405.0);
+    assert_eq!(buddy.state().source, AnimationSource::Movement);
+    buddy.handle(2250, InputEvent::DragStart);
+    buddy.set_native_cursor_follow(
+        false,
+        Some(Point { x: 900.0, y: 150.0 }),
+        Point { x: 0.5, y: 0.5 },
+    );
+    buddy.handle(
+        2300,
+        InputEvent::KeyUp {
+            code: "ArrowLeft".into(),
+        },
+    );
+    buddy.handle(2300, InputEvent::DragEnd);
+    let stopped = buddy.state().position;
+    buddy.advance(2350);
+    assert_eq!(buddy.state().position, stopped);
+}
+#[test]
+fn cursor_follow_priority_controls_reactions_without_stopping_movement() {
+    let mut project = data(json!([
+        shot("low", "KeyA", "jump", 49),
+        shot("equal", "KeyB", "jump", 50),
+        shot("high", "KeyC", "jump", 51),
+        {"id":"held-low","trigger":{"type":"whileKeyDown","code":"KeyD"},
+         "effect":{"type":"sustainAnimation","animation":"typingFast","priority":49}},
+        {"id":"held-high","trigger":{"type":"whileKeyDown","code":"KeyE"},
+         "effect":{"type":"sustainAnimation","animation":"typingFast","priority":51}}
+    ]));
+    project.project.cursor_follow = Some(
+        serde_json::from_value(json!({
+            "enabled":true, "priority":50, "stopDistanceDip":0,
+            "bands":[{"minDistanceDip":0,"speedDipPerSecond":100,"animation":"walk"}]
+        }))
+        .unwrap(),
+    );
+    let mut buddy = Runtime::new(
+        validate_parts(project.project, project.character).unwrap(),
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        },
+        Point { x: 100.0, y: 100.0 },
+        Point { x: 100.0, y: 100.0 },
+    );
+    buddy.handle(0, InputEvent::CursorMove { x: 950.0, y: 150.0 });
+    tap(&mut buddy, 1, "KeyA");
+    down(&mut buddy, 2, "KeyD");
+    assert_eq!(buddy.state().source, AnimationSource::CursorFollow);
+    down(&mut buddy, 3, "KeyE");
+    assert_eq!(buddy.state().source, AnimationSource::HeldKey);
+    up(&mut buddy, 4, "KeyE");
+    assert_eq!(buddy.state().source, AnimationSource::CursorFollow);
+    tap(&mut buddy, 5, "KeyB");
+    assert_eq!(buddy.state().source, AnimationSource::OneShot);
+    let equal = buddy.state();
+    tap(&mut buddy, 6, "KeyC");
+    assert_ne!(buddy.state().action_instance_id, equal.action_instance_id);
+    buddy.advance(56);
+    assert!(buddy.state().position.x > equal.position.x);
+    for now in (106..=2106).step_by(50) {
+        buddy.advance(now);
+    }
+    assert_eq!(buddy.state().source, AnimationSource::CursorFollow);
+}
 fn up(runtime: &mut Runtime, now: u64, code: &str) {
     runtime.handle(now, InputEvent::KeyUp { code: code.into() });
 }
@@ -61,6 +170,124 @@ fn idle_has_no_rust_tick_deadline() {
     let runtime = runtime(json!([]));
     assert_eq!(runtime.state().animation, "idle");
     assert_eq!(runtime.next_deadline_ms(), None);
+}
+
+#[test]
+fn recorded_shortcuts_match_the_exact_modifier_groups_and_prefer_ties() {
+    let mut plain = shot("plain", "KeyC", "click", 60);
+    plain["trigger"]["modifiers"] = json!([]);
+    let mut copy = shot("copy", "KeyC", "jump", 60);
+    copy["trigger"]["modifiers"] = json!(["control"]);
+    let mut mac_copy = shot("mac-copy", "KeyC", "celebrate", 60);
+    mac_copy["trigger"]["modifiers"] = json!(["meta"]);
+    let fallback = shot("fallback", "KeyC", "click", 60);
+    let mut runtime = runtime(json!([fallback, plain, copy, mac_copy]));
+
+    tap(&mut runtime, 10, "KeyC");
+    assert_eq!(runtime.state().animation, "click");
+    runtime.advance(1000);
+    down(&mut runtime, 1010, "ControlRight");
+    tap(&mut runtime, 1020, "KeyC");
+    assert_eq!(runtime.state().animation, "jump");
+    up(&mut runtime, 1030, "ControlRight");
+    runtime.advance(2000);
+    down(&mut runtime, 2010, "MetaLeft");
+    tap(&mut runtime, 2020, "KeyC");
+    assert_eq!(runtime.state().animation, "celebrate");
+    runtime.advance(3000);
+    down(&mut runtime, 3010, "ShiftLeft");
+    tap(&mut runtime, 3020, "KeyC");
+    assert_eq!(runtime.state().animation, "click");
+}
+
+#[test]
+fn alternate_shortcuts_and_keywords_share_one_event_and_cooldown() {
+    let mut copy = shot("copy", "KeyC", "click", 60);
+    copy["trigger"]["modifiers"] = json!(["control"]);
+    copy["trigger"]["alternatives"] = json!([{"code":"KeyC","modifiers":["meta"]}]);
+    copy["effect"]["cooldownMs"] = json!(1000);
+    let mut dance = pattern("춤", 5000);
+    dance["trigger"]["alternatives"] = json!([
+        {"keyword":"dance","layout":"en-US-qwerty"},
+        {"keyword":"ance","layout":"en-US-qwerty"}
+    ]);
+    dance["effect"]["cooldownMs"] = json!(1000);
+    let mut runtime = runtime(json!([copy, dance]));
+
+    down(&mut runtime, 10, "ControlLeft");
+    tap(&mut runtime, 20, "KeyC");
+    up(&mut runtime, 30, "ControlLeft");
+    assert_eq!(runtime.state().animation, "click");
+    down(&mut runtime, 100, "MetaRight");
+    tap(&mut runtime, 110, "KeyC");
+    assert_eq!(runtime.performance(110).reactions_started, 1);
+    tap(&mut runtime, 1200, "KeyC");
+    up(&mut runtime, 1210, "MetaRight");
+    assert_eq!(runtime.performance(1210).reactions_started, 2);
+
+    for (offset, code) in ["KeyC", "KeyN", "KeyA"].into_iter().enumerate() {
+        tap(&mut runtime, 2000 + offset as u64 * 10, code);
+    }
+    assert_eq!(runtime.state().animation, "celebrate");
+    let input_dance = |runtime: &mut Runtime, at: u64| {
+        for (offset, code) in ["KeyD", "KeyA", "KeyN", "KeyC", "KeyE"]
+            .into_iter()
+            .enumerate()
+        {
+            tap(runtime, at + offset as u64 * 10, code);
+        }
+    };
+    input_dance(&mut runtime, 2200);
+    assert_eq!(runtime.performance(2240).reactions_started, 3);
+    input_dance(&mut runtime, 3300);
+    let stats = runtime.performance(3340);
+    assert_eq!(stats.reactions_started, 4);
+    assert_eq!(stats.candidates, 6);
+    assert_eq!(stats.ignored_cooldown, 2);
+}
+
+#[test]
+fn modifier_conditions_are_checked_on_release_and_during_held_actions() {
+    let release = json!({
+        "id":"release",
+        "trigger":{"type":"keyUp","code":"KeyV","modifiers":["meta","shift"]},
+        "effect":{"type":"playAnimation","animation":"click","priority":60}
+    });
+    let held = json!({
+        "id":"held",
+        "trigger":{"type":"whileKeyDown","code":"KeyC","modifiers":["control"]},
+        "effect":{"type":"sustainAnimation","animation":"typing"}
+    });
+    let mut move_right = movement("ArrowRight", 1.0, 0.0);
+    move_right["trigger"]["modifiers"] = json!(["alt"]);
+    let mut runtime = runtime(json!([release, held, move_right]));
+    runtime.handle(
+        0,
+        InputEvent::Rearm {
+            keys: vec!["ControlLeft".into()],
+            buttons: vec![],
+        },
+    );
+    down(&mut runtime, 10, "KeyC");
+    assert_eq!(runtime.state().animation, "typing");
+    up(&mut runtime, 20, "ControlLeft");
+    assert_eq!(runtime.state().animation, "idle");
+    down(&mut runtime, 30, "ArrowRight");
+    runtime.advance(60);
+    assert_eq!(runtime.state().position.x, 100.0);
+    down(&mut runtime, 70, "AltRight");
+    runtime.advance(100);
+    assert_eq!(runtime.state().position.x, 103.0);
+    up(&mut runtime, 110, "AltRight");
+    down(&mut runtime, 120, "MetaRight");
+    down(&mut runtime, 130, "ShiftRight");
+    tap(&mut runtime, 140, "KeyV");
+    assert_eq!(runtime.state().animation, "click");
+    runtime.advance(1000);
+    down(&mut runtime, 1010, "KeyV");
+    up(&mut runtime, 1020, "MetaRight");
+    up(&mut runtime, 1030, "KeyV");
+    assert_eq!(runtime.state().animation, "idle");
 }
 
 #[test]
@@ -155,6 +382,71 @@ fn all_nine_cursor_poses_are_idle_only_unless_an_event_opts_into_mirroring() {
         runtime.handle(1000, cursor);
         assert_eq!(runtime.state().animation, "walk");
     }
+}
+
+#[test]
+fn left_facing_clips_follow_requested_directions_and_respect_explicit_mirroring() {
+    let mut reaction = shot("looks", "KeyB", "click", 60);
+    reaction["followCursor"] = json!(true);
+    let mut data = data(json!([reaction, movement("ArrowRight", 1.0, 0.0)]));
+    for name in ["idle", "walk", "click"] {
+        data.character
+            .animations
+            .get_mut(name)
+            .unwrap()
+            .source_facing = Some(SourceFacing::Left);
+    }
+    data.project.cursor_follow = Some(
+        serde_json::from_value(json!({
+            "enabled": true, "stopDistanceDip": 40,
+            "bands": [{"minDistanceDip": 0, "speedDipPerSecond": 100, "animation": "walk"}]
+        }))
+        .unwrap(),
+    );
+    data.project.idle = Some(
+        serde_json::from_value(json!({
+            "cursorEnabled": true,
+            "directions": {
+                "right": {"animation": "walk"},
+                "upRight": {"animation": "walk", "mirror": false}
+            }
+        }))
+        .unwrap(),
+    );
+    let mut buddy = Runtime::new(
+        validate_parts(data.project, data.character).unwrap(),
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        },
+        Point { x: 100.0, y: 100.0 },
+        Point { x: 100.0, y: 100.0 },
+    );
+    assert!(!buddy.state().facing_left);
+    buddy.handle(0, InputEvent::CursorMove { x: 0.0, y: 150.0 });
+    assert_eq!(buddy.state().source, AnimationSource::CursorFollow);
+    assert!(!buddy.state().facing_left);
+    buddy.handle(0, InputEvent::CursorMove { x: 500.0, y: 150.0 });
+    assert!(buddy.state().facing_left);
+    tap(&mut buddy, 0, "KeyB");
+    assert_eq!(buddy.state().source, AnimationSource::OneShot);
+    assert!(buddy.state().facing_left);
+    buddy.handle(1, InputEvent::CursorMove { x: 0.0, y: 150.0 });
+    assert!(!buddy.state().facing_left);
+
+    buddy.set_native_cursor_follow(false, None, Point { x: 0.5, y: 0.5 });
+    buddy.handle(1000, InputEvent::CursorMove { x: 185.0, y: 150.0 });
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    assert_eq!(buddy.state().animation, "walk");
+    assert!(buddy.state().facing_left);
+    buddy.handle(1000, InputEvent::CursorMove { x: 185.0, y: 110.0 });
+    assert!(!buddy.state().facing_left);
+    down(&mut buddy, 1000, "ArrowRight");
+    buddy.advance(1050);
+    assert_eq!(buddy.state().source, AnimationSource::Movement);
+    assert!(buddy.state().facing_left);
 }
 
 #[test]
@@ -614,6 +906,38 @@ fn typing_aggregation_is_bounded_even_without_rate_bindings_and_reports_only_cou
     assert_eq!(diagnostics.as_object().unwrap().len(), 2);
     runtime.advance(2000);
     assert_eq!(runtime.next_deadline_ms(), None);
+}
+
+#[test]
+fn buddy_click_is_distinct_from_global_mouse_events_and_drag() {
+    let mut runtime = runtime(json!([
+        {"id":"global","trigger":{"type":"mouseDown","button":"primary"},"effect":{"type":"playAnimation","animation":"jump"}},
+        {"id":"buddy-click","trigger":{"type":"buddyClick"},"effect":{"type":"playAnimation","animation":"celebrate"}},
+        {"id":"drag","trigger":{"type":"drag"},"effect":{"type":"sustainAnimation","animation":"walk"}}
+    ]));
+    runtime.handle(
+        10,
+        InputEvent::MouseDown {
+            button: MouseButton::Primary,
+        },
+    );
+    assert_eq!(runtime.state().animation, "jump");
+    runtime.handle(20, InputEvent::DragStart);
+    runtime.handle(30, InputEvent::BuddyClick);
+    assert_eq!(runtime.state().animation, "walk");
+    assert_eq!(runtime.performance(30).reactions_started, 1);
+
+    runtime.handle(40, InputEvent::DragEnd);
+    let mut controls = runtime.controls();
+    controls.mouse = false;
+    runtime.set_controls(50, controls);
+    runtime.handle(60, InputEvent::BuddyClick);
+    assert_eq!(runtime.state().animation, "celebrate");
+
+    controls.active = false;
+    runtime.set_controls(70, controls);
+    runtime.handle(80, InputEvent::BuddyClick);
+    assert_eq!(runtime.state().animation, "idle");
 }
 
 #[test]

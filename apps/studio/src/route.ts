@@ -3,6 +3,7 @@ export const tabs = [
   "resources",
   "animations",
   "idle",
+  "follow",
   "events",
   "timing",
   "builds",

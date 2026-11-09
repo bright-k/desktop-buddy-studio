@@ -42,6 +42,8 @@ enum Command {
         development: bool,
         #[arg(long)]
         signing_identity: Option<String>,
+        #[arg(long, hide = true)]
+        job_id: Option<uuid::Uuid>,
     },
     /// Create a data-only project with a fresh product identity.
     New {
@@ -147,6 +149,7 @@ fn run(cli: Cli) -> Result<(), String> {
             target,
             development,
             signing_identity,
+            job_id,
         } => {
             let target = match target.as_deref() {
                 Some("windows-x64") => buddy_project::Target::WindowsX64,
@@ -164,6 +167,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     target,
                     development,
                     signing_identity,
+                    job_id,
                 },
                 cancellation,
                 |line| eprintln!("{line}"),
@@ -212,18 +216,13 @@ fn run(cli: Cli) -> Result<(), String> {
                 );
                 return Ok(());
             }
-            let mut assets = std::collections::BTreeMap::new();
-            let media = buddy_project::decode_media(&bytes, &mut 0, &mut assets)?;
-            if let (Some(index), Some(output)) = (frame, frame_output) {
-                let frame = media
-                    .frames
-                    .get(index)
-                    .ok_or("frame index outside resource")?;
-                fs::write(output, &assets[&frame.image]).map_err(|e| e.to_string())?;
+            let (media, png) = buddy_project::probe_media(&bytes, frame)?;
+            if let (Some(output), Some(png)) = (frame_output, png) {
+                fs::write(output, png).map_err(|e| e.to_string())?;
             }
             println!(
                 "{}",
-                serde_json::json!({"width":media.width,"height":media.height,"frames":media.frames.len(),"animated":media.animated,"durationMs":media.frames.iter().map(|f|f.duration_ms).sum::<f64>()})
+                serde_json::json!({"width":media.width,"height":media.height,"frames":media.frames,"animated":media.animated,"durationMs":media.duration_ms})
             );
             Ok(())
         }
@@ -237,7 +236,7 @@ fn run(cli: Cli) -> Result<(), String> {
             }
             println!(
                 "{}",
-                serde_json::json!({"project": loaded.data.project, "character": loaded.data.character, "renderPlan": loaded.data.render_plan, "contentHash": loaded.content_hash, "sequences": loaded.data.sequences, "images": loaded.render_assets.keys().collect::<Vec<_>>()})
+                serde_json::json!({"project": loaded.data.project, "character": loaded.data.character, "renderPlan": loaded.data.render_plan, "contentHash": loaded.content_hash, "sequences": loaded.data.sequences, "sequenceAlternatives": loaded.data.sequence_alternatives, "idleHeightDipAtScaleOne": loaded.idle_height_at_scale_one(), "images": loaded.render_assets.keys().collect::<Vec<_>>()})
             );
             Ok(())
         }

@@ -50,7 +50,7 @@ keyword 입력은 현대 완성형 한글 음절 가~힣, ASCII 영문·숫자·
 1. 정규화한 non-repeat down만 matcher에 전달한다. Shift 자체는 소비하지 않고 현재 좌우 Shift의 합집합 상태를 각 step의 shift와 비교한다. native 재개 시 이미 눌린 modifier는 동작을 재생하지 않지만 현재 조합 상태에는 반영한다. 따라서 기존 Shift를 누른 채 새 키를 입력하면 Shift=true이며, 기존 Control·Alt·Meta를 누른 동안 sequence는 초기화한다. repeat·modifier-only 입력은 진행도와 timeout을 갱신하지 않는다.
 2. Control·Alt·Meta 자체 down과 이들이 눌린 일반 키, Unknown, Backspace·Delete, 마우스 버튼 down은 모든 sequence의 진행도를 초기화한다. 일반 불일치는 KMP 접두 전이로 처리해 겹치는 접미부를 다음 시도의 시작으로 재사용한다. steps로 작성한 방향키·Enter·Tab 등은 일반 step으로 처리한다.
 3. timeout 초과 후 다음 적격 down을 받으면 먼저 접두 길이를 0으로 만든다. 입력 순서는 OS 정규화 seq 기준이며 두 장치의 입력도 세션 순서로 합친다. 특정 앱의 문서나 입력란 경계는 추적하지 않는다. 따라서 클릭 없이 앱을 바꾼 경우에도 reset 키·timeout이 없다면 순서가 이어질 수 있다.
-4. 한 down이 특정 키·wildcard·하나 이상의 완성 sequence를 동시에 만족하면 모든 일회성 후보를 합쳐 priority 내림차순·정의 순서 오름차순으로 하나만 선택한다. 예시의 키워드 priority=95는 Space=80보다 높다. 같은 입력에서 두 반응을 연달아 재생하지 않는다.
+4. 한 down이 특정 키·wildcard·하나 이상의 완성 sequence를 동시에 만족하면 모든 일회성 후보에서 priority가 가장 높은 하나를 선택한다. priority가 같으면 보조 키 조건을 지정한 키 이벤트가 먼저고, 그다음에는 정의 순서를 따른다. 예시의 키워드 priority=95는 Space=80보다 높다. 같은 입력에서 두 반응을 연달아 재생하지 않는다.
 5. 완성 후 KMP의 겹치는 접두 상태를 유지해 다음 일치를 찾는다. 쿨다운·현재 우선순위로 실행이 거절돼도 매칭 진행 자체는 소비한다. matcher는 같은 입력을 재전송하거나 동작 대기열에 저장하지 않는다.
 6. epoch reset·일시 정지·편집·설정·숨김·권한/감지 중단·종료 시 진행도와 timeout을 초기화한다. 재개 후 새 입력부터 시작하며 기존 prefix·눌린 키를 복원하지 않는다.
 

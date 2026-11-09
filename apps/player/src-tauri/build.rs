@@ -2,8 +2,10 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "get_bootstrap",
+            "read_reaction_audio",
             "subscribe_character_state",
             "ack_character_frame",
+            "set_character_hit_mask",
             "get_runtime_status",
             "reset_performance_session",
             "export_runtime_diagnostics",
@@ -14,6 +16,8 @@ fn main() {
             "update_character_edit",
             "finish_character_edit",
             "cancel_character_edit",
+            "character_click",
+            "show_buddy_menu",
         ]),
     ))
     .expect("Tauri build configuration");

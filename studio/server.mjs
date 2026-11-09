@@ -2,7 +2,7 @@ import { pipeline } from "node:stream/promises";
 import { createServer } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { join, extname, dirname } from "node:path";
+import { join, extname, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProjectStore, StudioError, scopedFile, requireId } from "./store.mjs";
 import { BuildQueue } from "./jobs.mjs";
@@ -12,6 +12,7 @@ import { ActionsBuilds } from "./github.mjs";
 const defaultAppRoot = fileURLToPath(new URL("../apps/studio/dist", import.meta.url));
 const mime = {
   ".html": "text/html; charset=utf-8",
+  ".pdf": "application/pdf",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".png": "image/png",
@@ -106,12 +107,16 @@ export async function createStudio(options) {
       });
       res.end(JSON.stringify(value));
     };
+    let apiRequest = false;
     const serve = async (path, download) => {
+      const extension = extname(path).toLowerCase();
+      const guide = extension === ".html" && apiRequest;
+      if (guide || (extension === ".pdf" && apiRequest)) download ??= basename(path);
       const stat = await fs.stat(path);
       if (stat.size > 256 * 1024 * 1024 && !download)
         throw new StudioError("파일이 너무 큽니다.");
       res.writeHead(200, {
-        "Content-Type": mime[extname(path)] ?? "application/octet-stream",
+        "Content-Type": guide ? "application/octet-stream" : mime[extension] ?? "application/octet-stream",
         "Content-Length": stat.size,
         ...(download
           ? {
@@ -133,7 +138,8 @@ export async function createStudio(options) {
         throw new StudioError("Origin rejected", 403);
       const url = new URL(req.url, origin),
         pathname = decodeURIComponent(url.pathname);
-      if (pathname.startsWith("/api/")) {
+      apiRequest = pathname.startsWith("/api/");
+      if (apiRequest) {
         const bearer = req.headers.authorization?.replace(/^Bearer /, "");
         const cookie = req.headers.cookie
           ?.split(";")
@@ -200,6 +206,7 @@ export async function createStudio(options) {
               id,
               await body(req, 16 * 1024 * 1024),
               url.searchParams.get("filename") ?? "",
+              url.searchParams.get("purpose") === "installer",
             ),
             201,
           );
@@ -242,9 +249,12 @@ export async function createStudio(options) {
           const index = typeof b.id === "string"
             ? info.project.bindings.findIndex((binding) => binding.id === b.id)
             : b.index;
-          if (!Number.isInteger(index) || !info.sequences[index])
+          const variant = b.variant ?? 0;
+          if (!Number.isInteger(index) || !Number.isInteger(variant) || variant < 0)
             throw new StudioError("키워드 이벤트를 선택하세요.");
-          return json(info.sequences[index]);
+          const steps = variant === 0 ? info.sequences[index] : info.sequenceAlternatives?.[index]?.[variant - 1];
+          if (!steps) throw new StudioError("키워드 입력을 선택하세요.");
+          return json(steps);
         }
         if (action === "simulate" && req.method === "POST") {
           const b = JSON.parse(await body(req));
@@ -295,6 +305,12 @@ export async function createStudio(options) {
         ) {
           const jobId = action.split("/")[1], job = (await jobs.list(id)).find((j) => j.id === jobId);
           return json(await (job?.provider === "github" ? actions.cancel(id, jobId) : jobs.cancel(id, jobId)));
+        }
+        if (/^builds\/[a-f0-9-]{36}$/.test(action) && req.method === "DELETE") {
+          const jobId = action.split("/")[1];
+          const job = (await jobs.list(id)).find((j) => j.id === jobId);
+          const removeFiles = url.searchParams.get("files") === "true";
+          return json(await (job?.provider === "github" ? actions.removeHistory(id, jobId, removeFiles) : jobs.removeHistory(id, jobId, removeFiles)));
         }
         if (/^builds\/[a-f0-9-]{36}\/sync$/.test(action) && req.method === "POST")
           return json(await actions.retryImport(id, action.split("/")[1]));

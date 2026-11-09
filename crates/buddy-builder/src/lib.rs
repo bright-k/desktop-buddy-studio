@@ -1,4 +1,5 @@
 mod build;
+mod dmg;
 mod environment;
 mod identity;
 mod notices;

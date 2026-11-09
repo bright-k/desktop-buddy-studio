@@ -59,6 +59,7 @@ pub struct ValidatedProject {
     pub project: Project,
     pub character: Character,
     pub sequences: Vec<Option<Vec<KeyStep>>>,
+    pub sequence_alternatives: Vec<Vec<Vec<KeyStep>>>,
     pub render_plan: RenderPlan,
 }
 #[derive(Debug, Clone)]
@@ -70,7 +71,29 @@ pub struct LoadedProject {
     pub image_relative_path: String,
     pub content_hash: String,
     pub render_assets: BTreeMap<String, Vec<u8>>,
+    /// Only populated when the native Player loads verified bundled frames.
+    pub prepared_render_paths: BTreeMap<String, PathBuf>,
     pub sound_files: BTreeMap<String, String>,
+    pub footprints: crate::RenderFootprints,
+}
+
+impl LoadedProject {
+    pub fn idle_height_at_scale_one(&self) -> f64 {
+        self.data.character.canvas_size(1.0).y
+            * self.footprints.idle.map_or(1.0, |(min, max)| max.y - min.y)
+    }
+
+    pub fn default_scale(&self) -> f64 {
+        let defaults = &self.data.project.defaults;
+        defaults.display_height_dip.map_or(defaults.scale, |_| 1.0)
+    }
+
+    pub fn canvas_size(&self, scale: f64) -> Point {
+        let height = self.data.project.defaults.display_height_dip;
+        self.data
+            .character
+            .canvas_size(scale * height.map_or(1.0, |h| h / self.idle_height_at_scale_one()))
+    }
 }
 
 pub fn sha256(bytes: &[u8]) -> String {
@@ -246,6 +269,15 @@ pub fn validate_parts(
         "scale must be 0.25..3.0",
     );
     check(
+        project
+            .defaults
+            .display_height_dip
+            .is_none_or(|height| (16.0..=1024.0).contains(&height)),
+        file,
+        "$.defaults.displayHeightDip",
+        "display height must be 16..1024 DIP",
+    );
+    check(
         project.defaults.position.monitor == "primary",
         file,
         "$.defaults.position.monitor",
@@ -279,6 +311,32 @@ pub fn validate_parts(
         "$.bindings",
         "at most 256 mappings",
     );
+    if let Some(dmg) = &project.build.macos_dmg {
+        check(
+            (400..=1600).contains(&dmg.width)
+                && (260..=1200).contains(&dmg.height)
+                && [dmg.app_position, dmg.applications_position]
+                    .into_iter()
+                    .all(|point| {
+                        point.x >= 72
+                            && point.y >= 72
+                            && point.x <= dmg.width - 72
+                            && point.y <= dmg.height - crate::MacosDmg::ICON_BOTTOM_MARGIN
+                    })
+                && (f64::from(dmg.app_position.x) - f64::from(dmg.applications_position.x))
+                    .hypot(f64::from(dmg.app_position.y) - f64::from(dmg.applications_position.y))
+                    >= 150.0,
+            file,
+            "$.build.macosDmg",
+            "window 400..1600 × 260..1200; keep icons separated and inside the window",
+        );
+        check(
+            dmg.guide.is_none() || dmg.guide_position().is_some(),
+            file,
+            "$.build.macosDmg.guidePosition",
+            "keep the guide icon inside the window and separated from the other icons",
+        );
+    }
     let timing = project.defaults.timing;
     check(timing.is_valid(),
         file, "$.defaults.timing", "window 100..10000, evaluation 10..250, stability 0..2000, idle 50..5000 ms; evaluation <= idle");
@@ -338,6 +396,44 @@ pub fn validate_parts(
         "anchor must be 0..1",
     );
     let is_looping = |name: &str| character.animations.get(name).is_some_and(|a| a.looping);
+    if let Some(follow) = &project.cursor_follow {
+        check(
+            follow.priority.is_none_or(|priority| priority <= 100),
+            file,
+            "$.cursorFollow.priority",
+            "priority must be 0..100",
+        );
+        check(
+            (0.0..=2000.0).contains(&follow.stop_distance_dip),
+            file,
+            "$.cursorFollow.stopDistanceDip",
+            "stop distance must be 0..2000 DIP",
+        );
+        check(
+            (1..=8).contains(&follow.bands.len())
+                && follow
+                    .bands
+                    .first()
+                    .is_some_and(|band| band.min_distance_dip == 0.0)
+                && follow
+                    .bands
+                    .windows(2)
+                    .all(|pair| pair[0].min_distance_dip < pair[1].min_distance_dip),
+            file,
+            "$.cursorFollow.bands",
+            "use 1..8 bands starting at zero, in strictly increasing distance order",
+        );
+        for (i, band) in follow.bands.iter().enumerate() {
+            check(
+                (0.0..=10000.0).contains(&band.min_distance_dip)
+                    && (1.0..=1000.0).contains(&band.speed_dip_per_second)
+                    && band.animation.as_deref().is_none_or(is_looping),
+                file,
+                &format!("$.cursorFollow.bands[{i}]"),
+                "distance must be 0..10000 DIP, speed 1..1000 DIP/s, animation must loop",
+            );
+        }
+    }
     check(
         is_looping(&character.default_animation),
         char_file,
@@ -386,6 +482,20 @@ pub fn validate_parts(
             "fps must be 1..30",
         );
         check(
+            animation.scale_percent.is_none_or(|scale| {
+                (MIN_ANIMATION_SCALE_PERCENT..=MAX_ANIMATION_SCALE_PERCENT).contains(&scale)
+            }),
+            char_file,
+            &format!("{path}.scalePercent"),
+            "scalePercent must be 50..200",
+        );
+        check(
+            animation.anchor_x.is_none_or(|x| (0.0..=1.0).contains(&x)),
+            char_file,
+            &format!("{path}.anchorX"),
+            "anchorX must be 0..1",
+        );
+        check(
             animation.frames.len() <= 256 && animation.regions.len() <= 256
                 && (animation.frames.is_empty() || animation.regions.is_empty())
                 && if let Some(id) = &animation.resource { character.resources.contains_key(id) }
@@ -397,6 +507,7 @@ pub fn validate_parts(
     }
     let mut ids = HashSet::new();
     let mut sequences = Vec::new();
+    let mut sequence_alternatives = Vec::new();
     let mut patterns = HashSet::new();
     let mut bands = Vec::new();
     let mut cursor_count = 0;
@@ -416,6 +527,7 @@ pub fn validate_parts(
                     | Trigger::KeyUp { .. }
                     | Trigger::MouseDown { .. }
                     | Trigger::MouseUp { .. }
+                    | Trigger::BuddyClick
                     | Trigger::Wheel { .. }
                     | Trigger::KeySequence { .. },
                 Effect::PlayAnimation { .. }
@@ -443,19 +555,47 @@ pub fn validate_parts(
             );
         }
         let mut compiled = None;
+        let mut compiled_alternatives = Vec::new();
         match &binding.trigger {
-            Trigger::KeyDown { code, .. } | Trigger::KeyUp { code } => check(
-                code == "*" || is_supported_key(code),
-                file,
-                &format!("{path}.trigger.code"),
-                "unsupported physical key",
-            ),
-            Trigger::WhileKeyDown { code } => check(
-                is_supported_key(code),
-                file,
-                &format!("{path}.trigger.code"),
-                "held key must be a supported physical key",
-            ),
+            Trigger::KeyDown { alternatives, .. }
+            | Trigger::KeyUp { alternatives, .. }
+            | Trigger::WhileKeyDown { alternatives, .. } => {
+                let held = matches!(binding.trigger, Trigger::WhileKeyDown { .. });
+                check(
+                    alternatives.len() < 32,
+                    file,
+                    &format!("{path}.trigger.alternatives"),
+                    "maximum 32 key conditions per event",
+                );
+                for (index, (code, modifiers)) in binding.trigger.key_conditions().enumerate() {
+                    let key_path = if index == 0 {
+                        format!("{path}.trigger")
+                    } else {
+                        format!("{path}.trigger.alternatives[{}]", index - 1)
+                    };
+                    check(
+                        is_supported_key(code) || (!held && code == "*"),
+                        file,
+                        &format!("{key_path}.code"),
+                        if held {
+                            "held key must be a supported physical key"
+                        } else {
+                            "unsupported physical key"
+                        },
+                    );
+                    if let Some(modifiers) = modifiers {
+                        check(
+                            modifiers.iter().enumerate().all(|(index, modifier)| {
+                                Some(*modifier) != KeyModifier::from_code(code)
+                                    && !modifiers[..index].contains(modifier)
+                            }),
+                            file,
+                            &format!("{key_path}.modifiers"),
+                            "modifiers must be distinct and cannot include the main key's modifier",
+                        );
+                    }
+                }
+            }
             Trigger::TypingRate { min_kps, max_kps } => {
                 let max = max_kps.unwrap_or(f64::INFINITY);
                 check(
@@ -473,8 +613,9 @@ pub fn validate_parts(
                 layout,
                 steps,
                 timeout_ms,
+                alternatives,
             } => {
-                sequence_count += 1;
+                sequence_count += 1 + alternatives.len();
                 check(
                     (500..=10000).contains(timeout_ms),
                     file,
@@ -486,18 +627,34 @@ pub fn validate_parts(
                     (None, None, Some(steps)) => validate_steps(steps).map(|_| steps.clone()),
                     _ => Err("provide keyword+layout or steps, exclusively".into()),
                 };
-                match result {
-                    Ok(steps) => {
-                        let key = serde_json::to_string(&steps).expect("serializable steps");
-                        check(
-                            patterns.insert(key),
-                            file,
-                            &format!("{path}.trigger"),
-                            "duplicate compiled key sequence",
-                        );
-                        compiled = Some(steps);
+                let results = std::iter::once(result).chain(
+                    alternatives
+                        .iter()
+                        .map(|alias| compile_keyword(&alias.keyword, alias.layout)),
+                );
+                for (index, result) in results.enumerate() {
+                    let keyword_path = if index == 0 {
+                        format!("{path}.trigger")
+                    } else {
+                        format!("{path}.trigger.alternatives[{}]", index - 1)
+                    };
+                    match result {
+                        Ok(steps) => {
+                            let key = serde_json::to_string(&steps).expect("serializable steps");
+                            check(
+                                patterns.insert(key),
+                                file,
+                                &keyword_path,
+                                "duplicate compiled key sequence",
+                            );
+                            if index == 0 {
+                                compiled = Some(steps);
+                            } else {
+                                compiled_alternatives.push(steps);
+                            }
+                        }
+                        Err(message) => check(false, file, &keyword_path, &message),
                     }
-                    Err(message) => check(false, file, &format!("{path}.trigger"), &message),
                 }
             }
             Trigger::CursorMove => cursor_count += 1,
@@ -595,6 +752,7 @@ pub fn validate_parts(
             }
         }
         sequences.push(compiled);
+        sequence_alternatives.push(compiled_alternatives);
     }
     bands.sort_by(|a, b| a.0.total_cmp(&b.0));
     check(
@@ -617,6 +775,7 @@ pub fn validate_parts(
         project,
         character,
         sequences,
+        sequence_alternatives,
     })
 }
 
@@ -761,7 +920,22 @@ fn check_png(bytes: &[u8], file: &str) -> Result<(u32, u32), ValidationError> {
 }
 
 pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationError> {
-    let input = path.as_ref();
+    load_project_inner(path.as_ref(), None)
+}
+
+/// Read the same source snapshot, using bundled frames if they are complete and current.
+/// When prepared paths are returned, the frame bytes are not retained in render_assets.
+pub fn load_project_with_prepared(
+    path: impl AsRef<Path>,
+    prepared: &Path,
+) -> Result<LoadedProject, ValidationError> {
+    load_project_inner(path.as_ref(), Some(prepared))
+}
+
+fn load_project_inner(
+    input: &Path,
+    prepared: Option<&Path>,
+) -> Result<LoadedProject, ValidationError> {
     let entry = if input.is_dir() {
         input.join("buddy.project.json")
     } else {
@@ -896,12 +1070,51 @@ pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationE
         }
         error
     })?;
-    let mut render_assets = BTreeMap::new();
-    let mut budget = 0;
-    let base = decode_media(&png, &mut budget, &mut render_assets)
-        .map_err(|e| problem(&image_relative, "$", "INVALID_IMAGE", e))?;
-    data.render_plan = legacy_plan(&data.character, &base.frames[0].image);
-    let mut decoded = BTreeMap::new();
+    if let Some(dmg) = &data.project.build.macos_dmg {
+        for (asset, guide) in [
+            (dmg.background.as_deref(), false),
+            (dmg.guide.as_deref(), true),
+        ] {
+            let Some(path) = asset else { continue };
+            let ext = Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let bytes = read_source(&root, path, PNG_LIMIT, &mut files)?;
+            let valid = match ext.as_str() {
+                "png" => {
+                    check_png(&bytes, path)?;
+                    true
+                }
+                "jpg" | "jpeg" => {
+                    matches!(image::guess_format(&bytes), Ok(image::ImageFormat::Jpeg))
+                        && crate::probe_media(&bytes, None).is_ok()
+                }
+                "html" if guide => !bytes.is_empty() && std::str::from_utf8(&bytes).is_ok(),
+                "pdf" if guide => {
+                    bytes.starts_with(b"%PDF-")
+                        && bytes[bytes.len().saturating_sub(1024)..]
+                            .windows(5)
+                            .any(|bytes| bytes == b"%%EOF")
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(problem(
+                    path,
+                    "$",
+                    "INVALID_INSTALL_ASSET",
+                    if guide {
+                        "expected a PDF, PNG, JPEG or UTF-8 HTML guide"
+                    } else {
+                        "expected a PNG or JPEG background"
+                    },
+                ));
+            }
+        }
+    }
+    let mut resource_paths = BTreeMap::new();
     for (id, resource) in &data.character.resources {
         let relative = character_dir
             .join(&resource.image)
@@ -920,33 +1133,8 @@ pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationE
                 "supported: PNG, JPEG, GIF, WebP, BMP",
             ));
         }
-        let bytes = read_source(&root, &relative, PNG_LIMIT, &mut files)?;
-        let media = decode_media(&bytes, &mut budget, &mut render_assets)
-            .map_err(|e| problem(&relative, "$", "INVALID_IMAGE", e))?;
-        decoded.insert(id.clone(), media);
-    }
-    for (name, animation) in &data.character.animations {
-        if let Some(id) = &animation.resource {
-            let clip = compile_animation(animation, &decoded[id]).map_err(|e| {
-                problem(
-                    &data.project.character,
-                    &format!("$.animations.{name}"),
-                    "INVALID_ANIMATION",
-                    e,
-                )
-            })?;
-            data.render_plan.animations.insert(name.clone(), clip);
-        } else if !animation.regions.is_empty() {
-            let clip = compile_animation(animation, &base).map_err(|e| {
-                problem(
-                    &data.project.character,
-                    &format!("$.animations.{name}"),
-                    "INVALID_ANIMATION",
-                    e,
-                )
-            })?;
-            data.render_plan.animations.insert(name.clone(), clip);
-        }
+        read_source(&root, &relative, PNG_LIMIT, &mut files)?;
+        resource_paths.insert(id.as_str(), relative);
     }
     let mut sound_files = BTreeMap::new();
     for (id, sound) in &data.character.sounds {
@@ -971,14 +1159,63 @@ pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationE
         hash.update((file.bytes.len() as u64).to_le_bytes());
         hash.update(&file.bytes);
     }
+    let content_hash = format!("{:x}", hash.finalize());
+    let mut render_assets = BTreeMap::new();
+    let (footprints, prepared_render_paths) = if let Some((plan, footprints, paths)) = prepared
+        .and_then(|directory| {
+            crate::prepared::read_prepared_rendering(directory, &content_hash, &data.character)
+        }) {
+        data.render_plan = plan;
+        (footprints, paths)
+    } else {
+        let mut budget = 0;
+        let base = decode_media(&png, &mut budget, &mut render_assets)
+            .map_err(|e| problem(&image_relative, "$", "INVALID_IMAGE", e))?;
+        data.render_plan = legacy_plan(&data.character, &base.frames[0].image);
+        let mut decoded = BTreeMap::new();
+        for (id, relative) in resource_paths {
+            let media = decode_media(&files[&relative].bytes, &mut budget, &mut render_assets)
+                .map_err(|e| problem(&relative, "$", "INVALID_IMAGE", e))?;
+            decoded.insert(id, media);
+        }
+        for (name, animation) in &data.character.animations {
+            let media = if let Some(id) = &animation.resource {
+                &decoded[id.as_str()]
+            } else if !animation.regions.is_empty() {
+                &base
+            } else {
+                continue;
+            };
+            let clip = compile_animation(animation, media).map_err(|e| {
+                problem(
+                    &data.project.character,
+                    &format!("$.animations.{name}"),
+                    "INVALID_ANIMATION",
+                    e,
+                )
+            })?;
+            data.render_plan.animations.insert(name.clone(), clip);
+        }
+        (
+            crate::render_footprints(
+                &data.character,
+                &data.render_plan,
+                std::iter::once(&base).chain(decoded.values()),
+                &render_assets,
+            ),
+            BTreeMap::new(),
+        )
+    };
     Ok(LoadedProject {
         root,
         entry_relative_path: entry_name.into(),
         data,
         files,
         image_relative_path: image_relative,
-        content_hash: format!("{:x}", hash.finalize()),
+        content_hash,
         render_assets,
+        prepared_render_paths,
         sound_files,
+        footprints,
     })
 }

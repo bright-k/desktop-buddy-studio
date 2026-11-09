@@ -89,10 +89,12 @@ async function completeArtifact(root, fake, job, target, id) {
   await fs.mkdir(join(dir, bundle), { recursive: true });
   const installer = target === "windows-x64" ? "buddy-setup.exe" : "Buddy.dmg", binary = Buffer.from("fixture installer");
   await fs.writeFile(join(dir, bundle, installer), binary);
+  const guide = "Installation Guide.pdf", pdf = Buffer.from("fixture PDF guide");
+  await fs.writeFile(join(dir, bundle, guide), pdf);
   // macOS tar may preserve AppleDouble metadata beside the actual installer.
   await fs.writeFile(join(dir, bundle, "._" + installer), "metadata");
   const report = { projectHash: job.contentHash, identifier: job.projectId, templateHash: job.github.engineHash, target, development: true, staticInspection: "passed",
-    artifacts: [{ path: installer, bytes: binary.length, sha256: sha(binary) }] };
+    artifacts: [{ path: installer, bytes: binary.length, sha256: sha(binary) }, { path: guide, bytes: pdf.length, sha256: sha(pdf) }] };
   await fs.writeFile(join(dir, "source.json"), JSON.stringify({ contentHash: job.contentHash, identifier: job.projectId }));
   await fs.writeFile(join(dir, bundle, "build-report.json"), JSON.stringify(report));
   const name = `project-${target}.tar.gz`;
@@ -144,7 +146,7 @@ test("cancelling while a project is uploading responds before the upload finishe
   assert.equal((await jobs.list(doc.meta.id))[0].status, "cancelled");
 });
 test("dispatch timeout recovers without duplicate runs; completed platform artifacts are verified and imported, partial success is preserved", async (t) => {
-  const { root, doc, jobs, fake, remote } = await fixture(t);
+  const { root, store, doc, jobs, fake, remote } = await fixture(t);
   await remote.connect({ repository: "owner/repo" }); await remote.setup();
   await remote.enqueue(doc.meta.id, doc.meta.revision, { acknowledgeUpload: true }); fake.timeout = true;
   await remote.tick(); assert.equal((await jobs.list(doc.meta.id))[0].status, "dispatch_unknown");
@@ -158,7 +160,9 @@ test("dispatch timeout recovers without duplicate runs; completed platform artif
   assert.equal(job.status, "partial"); assert.equal(job.platforms["macos-arm64"].imported, true);
   await completeArtifact(root, fake, job, "windows-x64", 2);
   fake.conclusion = "success"; await remote.retryImport(doc.meta.id, job.id); await remote.tick(); job = (await jobs.list(doc.meta.id))[0];
-  assert.equal(job.status, "succeeded"); assert.equal(job.downloads.length, 8); assert.equal(fake.dispatches, 1);
+  assert.equal(job.status, "succeeded"); assert.equal(job.downloads.length, 9);
+  const guide = job.downloads.find(d => d.name === "Installation Guide.pdf");
+  assert.equal(await fs.readFile(join(store.path(doc.meta.id), "builds", guide.path), "utf8"), "fixture PDF guide"); assert.equal(fake.dispatches, 1);
   const zip = Buffer.from(first.zip); zip[50] ^= 1;
   assert.throws(() => artifactFiles(zip, ["project-macos-arm64.tar.gz", "receipt-macos-arm64.json"]));
   assert.throws(() => artifactFiles(first.zip, ["../escape", "receipt-macos-arm64.json"]));

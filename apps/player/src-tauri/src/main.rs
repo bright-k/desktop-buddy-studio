@@ -2,6 +2,7 @@
 
 mod display;
 mod edit;
+mod hit_test;
 mod navigation;
 mod preferences;
 use buddy_platform::{InputOptions, InputSession, WakeSignal};
@@ -13,7 +14,7 @@ use fs2::FileExt;
 use preferences::PreferencesStore;
 use std::{
     fs::{self, File, OpenOptions},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
@@ -43,18 +44,21 @@ struct Controller {
     keyboard: bool,
     mouse: bool,
     movement: bool,
+    cursor_follow: bool,
     scale: f64,
     always_on_top: bool,
     revision: u64,
     edit: Option<EditSession>,
 }
 struct TrayControls {
+    menu: Menu<tauri::Wry>,
     status: MenuItem<tauri::Wry>,
     visible: CheckMenuItem<tauri::Wry>,
     pause: CheckMenuItem<tauri::Wry>,
     keyboard: CheckMenuItem<tauri::Wry>,
     mouse: CheckMenuItem<tauri::Wry>,
     movement: CheckMenuItem<tauri::Wry>,
+    cursor_follow: CheckMenuItem<tauri::Wry>,
 }
 struct Host {
     loaded: LoadedProject,
@@ -75,6 +79,10 @@ struct Host {
     monitors: Mutex<Vec<Display>>,
     _instance_lock: File,
     edit_operation: Mutex<()>,
+    buddy_clicks: Mutex<Vec<(u64, u64)>>,
+    hit_mask: Mutex<hit_test::HitMask>,
+    follow_target: Mutex<Option<Point>>,
+    menu_open: AtomicBool,
 }
 impl Host {
     fn now(&self) -> u64 {
@@ -84,20 +92,45 @@ impl Host {
         self.display
             .lock()
             .unwrap()
-            .character_size(&self.loaded.data.character, scale)
+            .fit_size(self.loaded.canvas_size(scale))
     }
     fn base_position(&self, bounds: Rect, size: Point) -> Point {
         let defaults = &self.loaded.data.project.defaults.position;
-        let margin = defaults.margin_dip;
+        let bounds = display::placement_with_margin(
+            bounds,
+            size,
+            self.placement_footprint(),
+            defaults.margin_dip,
+        );
         let x = match defaults.anchor {
-            Anchor::TopLeft | Anchor::BottomLeft => bounds.x + margin,
-            _ => bounds.x + bounds.width - size.x - margin,
+            Anchor::TopLeft | Anchor::BottomLeft => bounds.x,
+            _ => bounds.x + bounds.width - size.x,
         };
         let y = match defaults.anchor {
-            Anchor::TopLeft | Anchor::TopRight => bounds.y + margin,
-            _ => bounds.y + bounds.height - size.y - margin,
+            Anchor::TopLeft | Anchor::TopRight => bounds.y,
+            _ => bounds.y + bounds.height - size.y,
         };
         bounds.clamp(x, y, size)
+    }
+    fn placement_footprint(&self) -> Option<(Point, Point)> {
+        self.loaded.footprints.idle.or(self.loaded.footprints.all)
+    }
+    fn placement_bounds(&self, display: &Display, size: Point) -> Rect {
+        display::placement_bounds(display.bounds, size, self.placement_footprint())
+    }
+    fn render_position(&self, display: &Display, size: Point, state: &CharacterState) -> Point {
+        let footprint = self
+            .loaded
+            .footprints
+            .animations
+            .get(&state.animation)
+            .copied();
+        display::placement_bounds(
+            display.bounds,
+            size,
+            footprint.or(self.placement_footprint()),
+        )
+        .clamp(state.position.x, state.position.y, size)
     }
     fn place_on_display(
         &self,
@@ -107,7 +140,12 @@ impl Host {
         drag_cursor: Option<Point>,
     ) {
         let mut runtime = self.runtime.lock().unwrap();
-        runtime.place(self.now(), position, size, display.bounds);
+        runtime.place(
+            self.now(),
+            position,
+            size,
+            self.placement_bounds(&display, size),
+        );
         if let Some(cursor) = drag_cursor {
             runtime.set_drag_cursor(cursor);
         }
@@ -120,14 +158,48 @@ impl Host {
         let prefs = self.preferences.lock().unwrap().clone();
         let mut c = self.controller.lock().unwrap();
         c.timing = prefs.timing.unwrap_or(defaults.timing);
-        c.scale = prefs.scale.unwrap_or(defaults.scale);
+        c.scale = prefs.scale.unwrap_or_else(|| self.loaded.default_scale());
         c.always_on_top = prefs.always_on_top.unwrap_or(defaults.always_on_top);
         c.keyboard = prefs.keyboard.unwrap_or(defaults.input.keyboard);
         c.mouse = prefs.mouse.unwrap_or(defaults.input.mouse);
         c.movement = prefs.movement_enabled.unwrap_or(defaults.movement_enabled);
+        c.cursor_follow = self.cursor_follow_enabled(&prefs);
         c.revision += 1;
         drop(c);
         self.wake.wake();
+    }
+    fn cursor_follow_enabled(&self, prefs: &PreferenceOverrides) -> bool {
+        prefs.cursor_follow.unwrap_or_else(|| {
+            self.loaded
+                .data
+                .project
+                .cursor_follow
+                .as_ref()
+                .is_some_and(|config| config.enabled)
+        })
+    }
+    fn track_follow_cursor(&self, cursor: Option<tauri::PhysicalPosition<f64>>) {
+        let target = cursor.and_then(|cursor| {
+            let monitors = self.monitors.lock().unwrap();
+            let macos = cfg!(target_os = "macos");
+            let scale = if macos {
+                monitors.iter().find(|m| m.primary)?.scale
+            } else {
+                1.0
+            };
+            let point = Point {
+                x: cursor.x / scale,
+                y: cursor.y / scale,
+            };
+            let monitor = display::at_cursor(&monitors, point)?;
+            let current = self.display.lock().unwrap();
+            (monitor.id == current.id).then(|| current.local_cursor(point.x, point.y, macos))
+        });
+        let mut previous = self.follow_target.lock().unwrap();
+        if *previous != target {
+            *previous = target;
+            self.wake.wake();
+        }
     }
     fn save(&self, prefs: PreferenceOverrides) -> Result<(), String> {
         self.store.lock().unwrap().save(&prefs)?;
@@ -145,12 +217,20 @@ impl Host {
             .sequence
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
-        let (state, size) = {
+        let (state, size, canvas_offset) = {
             let mut runtime = self.runtime.lock().unwrap();
             runtime.advance(self.now());
             let state = runtime.state();
             runtime.prepare_frame(seq, &state, c.mode != Mode::Hidden);
-            (state, self.size(c.scale))
+            let display = self.display.lock().unwrap();
+            let size = display.fit_size(self.loaded.canvas_size(c.scale));
+            let position = self.render_position(&display, size, &state);
+            let origin = display.bounds.clamp(position.x, position.y, size);
+            let offset = Point {
+                x: position.x - origin.x,
+                y: position.y - origin.y,
+            };
+            (state, size, offset)
         };
         let wire = WireState {
             seq,
@@ -160,6 +240,7 @@ impl Host {
             edit_session_id: c.edit.as_ref().map(|session| session.id.clone()),
             width: size.x,
             height: size.y,
+            canvas_offset,
         };
         if sender.send(wire).is_err() {
             self.runtime.lock().unwrap().frame_send_failed(seq);
@@ -177,7 +258,7 @@ impl Host {
             return Ok(session.id.clone());
         }
         let display = self.display.lock().unwrap();
-        let size = display.character_size(&self.loaded.data.character, controller.scale);
+        let size = display.fit_size(self.loaded.canvas_size(controller.scale));
         if !(0.0..=size.x).contains(&grab.x) || !(0.0..=size.y).contains(&grab.y) {
             return Err("버디 안에서 드래그를 시작하세요.".into());
         }
@@ -214,7 +295,7 @@ impl Host {
         };
         drop(monitors);
         let cursor = display.local_cursor(cursor.x, cursor.y, macos);
-        let size = display.character_size(&self.loaded.data.character, c.scale);
+        let size = display.fit_size(self.loaded.canvas_size(c.scale));
         let position = Point {
             x: cursor.x - session.grab.x,
             y: cursor.y - session.grab.y,
@@ -249,7 +330,7 @@ impl Host {
             self.controller.lock().unwrap().scale = session.scale;
             let display = display::choose(&self.monitors.lock().unwrap(), Some(&session.monitor));
             if let Some(display) = display {
-                let size = display.character_size(&self.loaded.data.character, session.scale);
+                let size = display.fit_size(self.loaded.canvas_size(session.scale));
                 let origin = if display.id == session.monitor {
                     session.origin
                 } else {
@@ -283,7 +364,7 @@ impl Host {
         }
         .unwrap_or_else(|| self.display.lock().unwrap().clone());
         let scale = self.controller.lock().unwrap().scale;
-        let size = display.character_size(&self.loaded.data.character, scale);
+        let size = display.fit_size(self.loaded.canvas_size(scale));
         let position = self.base_position(display.bounds, size);
         if !all {
             let mut prefs = self.preferences.lock().unwrap().clone();
@@ -308,7 +389,7 @@ impl Host {
         *self.monitors.lock().unwrap() = monitors;
         if selected != current {
             let scale = self.controller.lock().unwrap().scale;
-            let size = selected.character_size(&self.loaded.data.character, scale);
+            let size = selected.fit_size(self.loaded.canvas_size(scale));
             let position = if selected.id != current.id {
                 self.base_position(selected.bounds, size)
             } else {
@@ -325,6 +406,7 @@ impl Host {
             "keyboard" => prefs.keyboard = Some(!c.keyboard),
             "mouse" => prefs.mouse = Some(!c.mouse),
             "movement" => prefs.movement_enabled = Some(!c.movement),
+            "cursor-follow" => prefs.cursor_follow = Some(!c.cursor_follow),
             _ => return Err("지원하지 않는 입력 소스입니다.".into()),
         }
         self.save(prefs)
@@ -386,11 +468,35 @@ fn get_bootstrap(
         character: host.loaded.data.character.clone(),
         product: host.loaded.data.project.product.clone(),
         image_paths: host.render_paths.clone(),
-        sound_paths: host.sound_paths.clone(),
+        sound_paths: host
+            .loaded
+            .data
+            .project
+            .bindings
+            .iter()
+            .filter_map(|binding| binding.sound.as_ref())
+            .filter_map(|sound| host.sound_paths.get_key_value(&sound.resource))
+            .map(|(id, path)| (id.clone(), path.clone()))
+            .collect(),
         render_plan: host.loaded.data.render_plan.clone(),
         width: size.x,
         height: size.y,
     })
+}
+#[tauri::command]
+fn read_reaction_audio(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    resource: String,
+) -> Result<tauri::ipc::Response, String> {
+    require(&window, "overlay")?;
+    let asset = host
+        .loaded
+        .sound_files
+        .get(&resource)
+        .and_then(|name| host.loaded.files.get(name))
+        .ok_or("사운드 리소스를 찾을 수 없습니다.")?;
+    Ok(tauri::ipc::Response::new(asset.bytes.clone()))
 }
 #[tauri::command]
 fn subscribe_character_state(
@@ -404,6 +510,7 @@ fn subscribe_character_state(
         host.runtime.lock().unwrap().frame_reconnect();
         *target = Some(channel);
     }
+    *host.hit_mask.lock().unwrap() = hit_test::HitMask::default();
     host.send_state();
     Ok(())
 }
@@ -430,6 +537,19 @@ fn ack_character_frame(
         .unwrap()
         .ack_frame(host.now(), &ack, visible);
     host.wake.wake();
+    Ok(())
+}
+#[tauri::command]
+fn set_character_hit_mask(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    mask: hit_test::HitMask,
+) -> Result<(), String> {
+    require(&window, "overlay")?;
+    if !mask.valid() {
+        return Err("잘못된 클릭 영역입니다.".into());
+    }
+    *host.hit_mask.lock().unwrap() = mask;
     Ok(())
 }
 #[tauri::command]
@@ -460,10 +580,13 @@ fn get_runtime_status(
         .collect();
     let selected = host.display.lock().unwrap().clone();
     let saved = host.preferences.lock().unwrap().base_placement.clone();
-    let size = selected.character_size(&host.loaded.data.character, c.scale);
+    let size = selected.fit_size(host.loaded.canvas_size(c.scale));
     let position = saved
         .filter(|p| p.monitor_hint == selected.id)
-        .map(|p| selected.bounds.clamp(p.position.x, p.position.y, size))
+        .map(|p| {
+            host.placement_bounds(&selected, size)
+                .clamp(p.position.x, p.position.y, size)
+        })
         .unwrap_or_else(|| host.base_position(selected.bounds, size));
     Ok(RuntimeStatus {
         product_name: host.loaded.data.project.product.name.clone(),
@@ -474,6 +597,7 @@ fn get_runtime_status(
         keyboard: c.keyboard,
         mouse: c.mouse,
         movement_enabled: c.movement,
+        cursor_follow: c.cursor_follow,
         always_on_top: c.always_on_top,
         scale: c.scale,
         input,
@@ -615,6 +739,9 @@ fn apply_user_preferences(
     if let Some(value) = update.movement_enabled {
         prefs.movement_enabled = Some(value);
     }
+    if let Some(value) = update.cursor_follow {
+        prefs.cursor_follow = Some(value);
+    }
     if let Some(value) = update.always_on_top {
         prefs.always_on_top = Some(value);
     }
@@ -634,10 +761,12 @@ fn apply_user_preferences(
             .find(|m| m.id == placement.monitor_hint)
             .cloned()
             .ok_or("선택한 디스플레이가 연결되어 있지 않습니다.")?;
-        let size = display.character_size(&host.loaded.data.character, scale);
-        placement.position = display
-            .bounds
-            .clamp(placement.position.x, placement.position.y, size);
+        let size = display.fit_size(host.loaded.canvas_size(scale));
+        placement.position = host.placement_bounds(&display, size).clamp(
+            placement.position.x,
+            placement.position.y,
+            size,
+        );
         prefs.base_placement = Some(placement.clone());
         Some((display, placement.position, size))
     } else {
@@ -707,7 +836,49 @@ fn cancel_character_edit(
     host.finish_edit(false, Some(&session_id))
 }
 
-fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
+#[tauri::command]
+fn character_click(window: WebviewWindow, host: State<'_, Arc<Host>>) -> Result<(), String> {
+    require(&window, "overlay")?;
+    let controller = host.controller.lock().unwrap();
+    if controller.mode == Mode::Normal && !controller.settings_open && !controller.paused {
+        let mut clicks = host.buddy_clicks.lock().unwrap();
+        if clicks.len() < 32 {
+            clicks.push((controller.revision, host.now()));
+            host.wake.wake();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_buddy_menu(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    controls: State<'_, TrayControls>,
+    position: Point,
+) -> Result<(), String> {
+    require(&window, "overlay")?;
+    if host.controller.lock().unwrap().mode != Mode::Normal
+        || !position.x.is_finite()
+        || !position.y.is_finite()
+    {
+        return Ok(());
+    }
+    if host.menu_open.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    host.track_follow_cursor(None);
+    let result = window
+        .popup_menu_at(
+            &controls.menu,
+            tauri::LogicalPosition::new(position.x, position.y),
+        )
+        .map_err(|error| error.to_string());
+    host.menu_open.store(false, Ordering::Release);
+    result
+}
+
+fn start_worker(app: tauri::AppHandle, host: Arc<Host>, overlay_id: usize) {
     std::thread::Builder::new()
         .name("buddy-runtime-host".into())
         .spawn(move || {
@@ -737,12 +908,13 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                     input_revision = c.revision;
                 }
                 if active && (c.keyboard || c.mouse) && input.is_none() {
-                    match InputSession::start_with_signal(
+                    match InputSession::start_for_overlay(
                         InputOptions {
                             keyboard: c.keyboard,
                             mouse: c.mouse,
                         },
                         host.wake.clone(),
+                        overlay_id,
                     ) {
                         Ok(session) => input = Some(session),
                         Err(error) => {
@@ -789,7 +961,20 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                 }
                 let mut runtime = host.runtime.lock().unwrap();
                 let display = host.display.lock().unwrap().clone();
-                let size = display.character_size(&host.loaded.data.character, c.scale);
+                let size = display.fit_size(host.loaded.canvas_size(c.scale));
+                let center =
+                    host.loaded
+                        .footprints
+                        .idle
+                        .map_or(Point { x: 0.5, y: 0.5 }, |(min, max)| Point {
+                            x: (min.x + max.x) / 2.0,
+                            y: (min.y + max.y) / 2.0,
+                        });
+                runtime.set_native_cursor_follow(
+                    c.cursor_follow,
+                    *host.follow_target.lock().unwrap(),
+                    center,
+                );
                 runtime.set_timing(now, c.timing);
                 runtime.set_controls(
                     now,
@@ -803,7 +988,7 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                 );
                 if size != last_size {
                     let position = runtime.state().position;
-                    runtime.place(now, position, size, display.bounds);
+                    runtime.place(now, position, size, host.placement_bounds(&display, size));
                 }
                 if let Some(input) = &mut input {
                     for _ in 0..1024 {
@@ -831,6 +1016,11 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                         InputEvent::DragEnd
                     },
                 );
+                for (revision, received_at) in host.buddy_clicks.lock().unwrap().drain(..) {
+                    if active && revision == c.revision {
+                        runtime.handle_received(host.now(), received_at, InputEvent::BuddyClick);
+                    }
+                }
                 runtime.advance(host.now());
                 let state = runtime.state();
                 let deadline = runtime.next_deadline_ms();
@@ -838,7 +1028,6 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                 drop(controller_guard);
                 if let Some(window) = app.get_webview_window("overlay") {
                     if last_mode != c.mode {
-                        let _ = window.set_ignore_cursor_events(false);
                         if c.mode == Mode::Hidden {
                             let _ = window.hide();
                         } else {
@@ -852,13 +1041,18 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                         let _ = window.set_always_on_top(c.always_on_top);
                         last_top = Some(c.always_on_top);
                     }
+                    // Keep the native window inside the work area. The canvas
+                    // can extend beyond its edges, even on macOS where AppKit
+                    // constrains the frame below the menu bar.
+                    let position = host.render_position(&display, size, &state);
+                    let origin = display.bounds.clamp(position.x, position.y, size);
                     if last_window_placement.as_ref().is_none_or(
                         |(placed_display, placed_position)| {
-                            placed_display != &display || *placed_position != state.position
+                            placed_display != &display || *placed_position != origin
                         },
-                    ) && display.position_window(&window, state.position).is_ok()
+                    ) && display.position_window(&window, origin).is_ok()
                     {
-                        last_window_placement = Some((display, state.position));
+                        last_window_placement = Some((display, origin));
                     }
                 }
                 let changed = last_state.as_ref().is_none_or(|old| {
@@ -902,8 +1096,8 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                     capture(c.mouse, &source_status.mouse)
                 );
                 let menu_key = format!(
-                    "{text}:{:?}:{}:{}:{}:{}",
-                    c.mode as u8, c.paused, c.keyboard, c.mouse, c.movement
+                    "{text}:{:?}:{}:{}:{}:{}:{}",
+                    c.mode as u8, c.paused, c.keyboard, c.mouse, c.movement, c.cursor_follow
                 );
                 if menu_key != last_menu {
                     if let Some(menu) = app.try_state::<TrayControls>() {
@@ -913,6 +1107,7 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>) {
                         let _ = menu.keyboard.set_checked(c.keyboard);
                         let _ = menu.mouse.set_checked(c.mouse);
                         let _ = menu.movement.set_checked(c.movement);
+                        let _ = menu.cursor_follow.set_checked(c.cursor_follow);
                     }
                     last_menu = menu_key;
                 }
@@ -955,13 +1150,72 @@ fn project_path(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::E
     }
 }
 
+fn handle_buddy_menu(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
+    let Some(host) = app.try_state::<Arc<Host>>() else {
+        return;
+    };
+    let result = match event.id.as_ref() {
+        "settings" => host.open_settings(app),
+        "visibility" => {
+            if host.controller.lock().unwrap().mode == Mode::Editing {
+                let _ = host.finish_edit(false, None);
+            }
+            let mut c = host.controller.lock().unwrap();
+            c.mode = if c.mode == Mode::Hidden {
+                Mode::Normal
+            } else {
+                Mode::Hidden
+            };
+            c.revision += 1;
+            drop(c);
+            host.wake.wake();
+            Ok(())
+        }
+        "keyboard" | "mouse" | "movement" | "cursor-follow" => {
+            host.toggle_source(event.id.as_ref())
+        }
+        "reset-position" | "reset-all" => {
+            if host.controller.lock().unwrap().mode == Mode::Editing {
+                host.finish_edit(false, None)
+                    .and_then(|_| host.reset_preferences(event.id.as_ref() == "reset-all"))
+            } else {
+                host.reset_preferences(event.id.as_ref() == "reset-all")
+            }
+        }
+        "pause" => {
+            if host.controller.lock().unwrap().mode == Mode::Editing {
+                let _ = host.finish_edit(false, None);
+            }
+            let mut c = host.controller.lock().unwrap();
+            c.paused = !c.paused;
+            c.revision += 1;
+            drop(c);
+            host.wake.wake();
+            Ok(())
+        }
+        "quit" => {
+            host.exiting.store(true, Ordering::Release);
+            host.wake.wake();
+            app.exit(0);
+            Ok(())
+        }
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        host.store.lock().unwrap().notice = Some(error);
+    }
+}
+
 fn main() {
     let process_started = Instant::now();
     let app = tauri::Builder::default()
+        .on_menu_event(handle_buddy_menu)
         .invoke_handler(tauri::generate_handler![
             get_bootstrap,
+            read_reaction_audio,
             subscribe_character_state,
             ack_character_frame,
+            set_character_hit_mask,
             get_runtime_status,
             reset_performance_session,
             export_runtime_diagnostics,
@@ -971,13 +1225,16 @@ fn main() {
             begin_character_drag,
             update_character_edit,
             finish_character_edit,
-            cancel_character_edit
+            cancel_character_edit,
+            character_click,
+            show_buddy_menu
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let project = project_path(app.handle())?;
-            let loaded = buddy_project::load_project(project)?;
+            let prepared = app.path().resource_dir()?.join("prepared-render");
+            let loaded = buddy_project::load_project_with_prepared(project, &prepared)?;
             let preview = cfg!(feature = "preview") || cfg!(debug_assertions);
             let identity = buddy_runtime::preference_identity(
                 &loaded.data.project.product.identifier,
@@ -1017,7 +1274,15 @@ fn main() {
                 keyboard: prefs.keyboard.unwrap_or(defaults.input.keyboard),
                 mouse: prefs.mouse.unwrap_or(defaults.input.mouse),
                 movement: prefs.movement_enabled.unwrap_or(defaults.movement_enabled),
-                scale: prefs.scale.unwrap_or(defaults.scale),
+                cursor_follow: prefs.cursor_follow.unwrap_or_else(|| {
+                    loaded
+                        .data
+                        .project
+                        .cursor_follow
+                        .as_ref()
+                        .is_some_and(|config| config.enabled)
+                }),
+                scale: prefs.scale.unwrap_or_else(|| loaded.default_scale()),
                 always_on_top: prefs.always_on_top.unwrap_or(defaults.always_on_top),
                 revision: 0,
                 edit: None,
@@ -1028,26 +1293,29 @@ fn main() {
                 Point::default(),
                 Point { x: 256.0, y: 256.0 },
             );
-            let media_directory = directory.join("render-cache").join(&loaded.content_hash);
-            fs::create_dir_all(&media_directory)?;
             let mut render_paths = std::collections::BTreeMap::new();
-            for (name, bytes) in &loaded.render_assets {
-                let path = media_directory.join(name);
-                fs::write(&path, bytes)?;
-                app.asset_protocol_scope().allow_file(&path)?;
-                render_paths.insert(name.clone(), path.to_string_lossy().into_owned());
+            if loaded.prepared_render_paths.is_empty() {
+                let media_directory = directory.join("render-cache").join(&loaded.content_hash);
+                fs::create_dir_all(&media_directory)?;
+                for (name, bytes) in &loaded.render_assets {
+                    let path = media_directory.join(name);
+                    fs::write(&path, bytes)?;
+                    app.asset_protocol_scope().allow_file(&path)?;
+                    render_paths.insert(name.clone(), path.to_string_lossy().into_owned());
+                }
+            } else {
+                for (name, path) in &loaded.prepared_render_paths {
+                    app.asset_protocol_scope().allow_file(path)?;
+                    render_paths.insert(name.clone(), path.to_string_lossy().into_owned());
+                }
             }
             let mut sound_paths = std::collections::BTreeMap::new();
             for (id, name) in &loaded.sound_files {
                 let asset = &loaded.files[name];
-                let extension = Path::new(name)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .unwrap();
-                let path = media_directory.join(format!("{}.{}", asset.hash, extension));
-                fs::write(&path, &asset.bytes)?;
-                app.asset_protocol_scope().allow_file(&path)?;
-                sound_paths.insert(id.clone(), path.to_string_lossy().into_owned());
+                // Web Audio reads the validated bytes via IPC; HTML audio can
+                // fall back to the original verified file without a cache copy.
+                app.asset_protocol_scope().allow_file(&asset.path)?;
+                sound_paths.insert(id.clone(), asset.path.to_string_lossy().into_owned());
             }
             let host = Arc::new(Host {
                 loaded,
@@ -1072,6 +1340,10 @@ fn main() {
                 monitors: Mutex::new(monitors),
                 _instance_lock: lock,
                 edit_operation: Mutex::new(()),
+                buddy_clicks: Mutex::new(Vec::new()),
+                hit_mask: Mutex::default(),
+                follow_target: Mutex::default(),
+                menu_open: AtomicBool::new(false),
             });
             let scale = host.controller.lock().unwrap().scale;
             let size = host.size(scale);
@@ -1084,10 +1356,12 @@ fn main() {
                 .filter(|p| p.monitor_hint == host.display.lock().unwrap().id)
                 .map(|p| p.position)
                 .unwrap_or_else(|| host.base_position(bounds, size));
-            host.runtime
-                .lock()
-                .unwrap()
-                .place(0, position, size, bounds);
+            host.runtime.lock().unwrap().place(
+                0,
+                position,
+                size,
+                host.placement_bounds(&host.display.lock().unwrap(), size),
+            );
             let window = tauri::WebviewWindowBuilder::new(
                 app,
                 "overlay",
@@ -1108,7 +1382,13 @@ fn main() {
             .focusable(false)
             .shadow(false)
             .build()?;
-            window.set_ignore_cursor_events(false)?;
+            window.set_ignore_cursor_events(true)?;
+            #[cfg(target_os = "macos")]
+            let overlay_id = std::process::id() as usize;
+            #[cfg(target_os = "windows")]
+            let overlay_id = window.hwnd()?.0 as usize;
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            let overlay_id = 0;
             let menu = Menu::new(app)?;
             let status =
                 MenuItem::with_id(app, "status", "입력 감지 준비 중", false, None::<&str>)?;
@@ -1148,7 +1428,22 @@ fn main() {
                 host.controller.lock().unwrap().movement,
                 None::<&str>,
             )?;
-            for item in [&visible, &pause, &keyboard, &mouse, &movement] {
+            let cursor_follow = CheckMenuItem::with_id(
+                app,
+                "cursor-follow",
+                "마우스 따라오기",
+                true,
+                host.controller.lock().unwrap().cursor_follow,
+                None::<&str>,
+            )?;
+            for item in [
+                &visible,
+                &pause,
+                &keyboard,
+                &mouse,
+                &movement,
+                &cursor_follow,
+            ] {
                 menu.append(item)?;
             }
             for (id, label) in [
@@ -1159,72 +1454,23 @@ fn main() {
                 menu.append(&MenuItem::with_id(app, id, label, true, None::<&str>)?)?;
             }
             app.manage(TrayControls {
+                menu: menu.clone(),
                 status,
                 visible,
                 pause,
                 keyboard,
                 mouse,
                 movement,
+                cursor_follow,
             });
             TrayIconBuilder::new()
                 .icon(Image::from_bytes(include_bytes!("../icons/icon.png"))?)
                 .tooltip(&host.loaded.data.project.product.name)
                 .menu(&menu)
-                .on_menu_event(|app, event| {
-                    let host = app.state::<Arc<Host>>();
-                    let result = match event.id.as_ref() {
-                        "settings" => host.open_settings(app),
-                        "visibility" => {
-                            if host.controller.lock().unwrap().mode == Mode::Editing {
-                                let _ = host.finish_edit(false, None);
-                            }
-                            let mut c = host.controller.lock().unwrap();
-                            c.mode = if c.mode == Mode::Hidden {
-                                Mode::Normal
-                            } else {
-                                Mode::Hidden
-                            };
-                            c.revision += 1;
-                            drop(c);
-                            host.wake.wake();
-                            Ok(())
-                        }
-                        "keyboard" | "mouse" | "movement" => host.toggle_source(event.id.as_ref()),
-                        "reset-position" | "reset-all" => {
-                            if host.controller.lock().unwrap().mode == Mode::Editing {
-                                host.finish_edit(false, None).and_then(|_| {
-                                    host.reset_preferences(event.id.as_ref() == "reset-all")
-                                })
-                            } else {
-                                host.reset_preferences(event.id.as_ref() == "reset-all")
-                            }
-                        }
-                        "pause" => {
-                            if host.controller.lock().unwrap().mode == Mode::Editing {
-                                let _ = host.finish_edit(false, None);
-                            }
-                            let mut c = host.controller.lock().unwrap();
-                            c.paused = !c.paused;
-                            c.revision += 1;
-                            drop(c);
-                            host.wake.wake();
-                            Ok(())
-                        }
-                        "quit" => {
-                            host.exiting.store(true, Ordering::Release);
-                            host.wake.wake();
-                            app.exit(0);
-                            Ok(())
-                        }
-                        _ => Ok(()),
-                    };
-                    if let Err(error) = result {
-                        host.store.lock().unwrap().notice = Some(error);
-                    }
-                })
                 .build(app)?;
             app.manage(host.clone());
-            start_worker(app.handle().clone(), host);
+            hit_test::start(window, host.clone());
+            start_worker(app.handle().clone(), host, overlay_id);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1263,7 +1509,7 @@ mod drag_tests {
     };
     const DROP_ON_EXTERNAL: Point = Point { x: 308.0, y: 320.0 };
 
-    fn drag_host(directory: &Path, read_only: bool) -> Host {
+    fn drag_host(directory: &std::path::Path, read_only: bool) -> Host {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../examples/typing-cat");
         let loaded = buddy_project::load_project(source).unwrap();
         let defaults = &loaded.data.project.defaults;
@@ -1275,6 +1521,7 @@ mod drag_tests {
             keyboard: true,
             mouse: false,
             movement: false,
+            cursor_follow: false,
             scale: 1.0,
             always_on_top: true,
             revision: 0,
@@ -1312,7 +1559,7 @@ mod drag_tests {
                 height: 900.0,
             },
         };
-        let size = display.character_size(&loaded.data.character, 1.0);
+        let size = display.fit_size(loaded.canvas_size(1.0));
         let runtime = Runtime::new(loaded.data.clone(), bounds, START, size);
         let (mut store, prefs) = PreferencesStore::open(directory).unwrap();
         store.read_only = read_only;
@@ -1339,6 +1586,10 @@ mod drag_tests {
             monitors: Mutex::new(vec![display, external]),
             _instance_lock: File::create(directory.join("instance.lock")).unwrap(),
             edit_operation: Mutex::new(()),
+            buddy_clicks: Mutex::new(Vec::new()),
+            hit_mask: Mutex::default(),
+            follow_target: Mutex::default(),
+            menu_open: AtomicBool::new(false),
         }
     }
 

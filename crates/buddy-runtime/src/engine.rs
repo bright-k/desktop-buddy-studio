@@ -3,8 +3,8 @@ use crate::{
     PerformanceSnapshot, ReactionEnd, Rect, PROTOCOL_VERSION,
 };
 use buddy_project::{
-    is_modifier, is_supported_key, CursorDirection, Effect, Interruption, MouseButton, Point,
-    Retrigger, SoundCue, Trigger, ValidatedProject,
+    is_modifier, is_supported_key, CursorDirection, Effect, Interruption, KeyModifier, MouseButton,
+    Point, Retrigger, SoundCue, SourceFacing, Trigger, ValidatedProject,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,7 @@ pub enum AnimationSource {
     OneShot,
     HeldKey,
     Drag,
+    CursorFollow,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -50,6 +51,7 @@ pub struct RuntimeDiagnostics {
 struct OneShot {
     binding: usize,
     ends_at: u64,
+    exact_keys: bool,
 }
 struct PendingBand {
     band: Option<usize>,
@@ -64,7 +66,7 @@ pub struct Runtime {
     mouse_held: Vec<MouseButton>,
     mouse_blocked: Vec<MouseButton>,
     move_blocked: BTreeSet<String>,
-    matchers: Vec<Option<SequenceMatcher>>,
+    matchers: Vec<(usize, SequenceMatcher)>,
     last_start: Vec<Option<u64>>,
     rate_times: VecDeque<u64>,
     diagnostics: RuntimeDiagnostics,
@@ -83,7 +85,10 @@ pub struct Runtime {
     shot_release: Option<InputEvent>,
     cursor: Option<Point>,
     drag_cursor: Option<Point>,
-    movement_facing_left: bool,
+    // Host input is separate from optional global mouse event capture.
+    native_follow: Option<(bool, Option<Point>, Point)>,
+    follow_config: buddy_project::CursorFollow,
+    movement_facing_left: Option<bool>,
     facing_left: bool,
     continuous_binding: Option<usize>,
     display: String,
@@ -96,17 +101,19 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(data: ValidatedProject, bounds: Rect, position: Point, size: Point) -> Self {
         let matchers = data
-            .sequences
+            .project
+            .bindings
             .iter()
-            .zip(&data.project.bindings)
-            .map(|(steps, binding)| {
-                if let (Some(steps), Trigger::KeySequence { timeout_ms, .. }) =
-                    (steps, &binding.trigger)
-                {
-                    Some(SequenceMatcher::new(steps.clone(), *timeout_ms))
-                } else {
-                    None
-                }
+            .enumerate()
+            .filter_map(|(index, binding)| match &binding.trigger {
+                Trigger::KeySequence { timeout_ms, .. } => Some((index, *timeout_ms)),
+                _ => None,
+            })
+            .flat_map(|(index, timeout_ms)| {
+                data.sequences[index]
+                    .iter()
+                    .chain(&data.sequence_alternatives[index])
+                    .map(move |steps| (index, SequenceMatcher::new(steps.clone(), timeout_ms)))
             })
             .collect();
         let defaults = &data.project.defaults;
@@ -118,6 +125,7 @@ impl Runtime {
         };
         let count = data.project.bindings.len();
         let display = data.character.default_animation.clone();
+        let follow_config = data.project.cursor_follow.clone().unwrap_or_default();
         Self {
             data,
             controls,
@@ -145,7 +153,9 @@ impl Runtime {
             shot_release: None,
             cursor: None,
             drag_cursor: None,
-            movement_facing_left: false,
+            native_follow: None,
+            follow_config,
+            movement_facing_left: None,
             facing_left: false,
             continuous_binding: None,
             display,
@@ -187,7 +197,7 @@ impl Runtime {
             }
         }
         self.move_blocked.clear();
-        for matcher in self.matchers.iter_mut().flatten() {
+        for (_, matcher) in &mut self.matchers {
             matcher.reset();
         }
         self.rate_times.clear();
@@ -230,6 +240,14 @@ impl Runtime {
     pub fn set_drag_cursor(&mut self, cursor: Point) {
         self.drag_cursor = Some(cursor);
         self.sync_display(false);
+    }
+    pub fn set_native_cursor_follow(
+        &mut self,
+        enabled: bool,
+        target: Option<Point>,
+        center: Point,
+    ) {
+        self.native_follow = Some((enabled, target, center));
     }
     pub fn handle(&mut self, now: u64, event: InputEvent) {
         self.handle_received(now, now, event);
@@ -276,6 +294,10 @@ impl Runtime {
             self.move_blocked.remove(code);
             if self.blocked.remove(code) {
                 self.held.remove(code);
+                if self.movement_vector() == Point::default() {
+                    self.moving = false;
+                }
+                self.sync_display(false);
                 return;
             }
         }
@@ -297,7 +319,11 @@ impl Runtime {
             &event,
             InputEvent::KeyDown { .. } | InputEvent::KeyUp { .. }
         );
-        if (keyboard && !self.controls.keyboard) || (!keyboard && !self.controls.mouse) {
+        let buddy_click = matches!(&event, InputEvent::BuddyClick);
+        if (keyboard && !self.controls.keyboard)
+            || (!keyboard && !buddy_click && !self.controls.mouse)
+            || (buddy_click && self.dragging)
+        {
             return;
         }
         let mut completed = BTreeSet::new();
@@ -335,12 +361,9 @@ impl Runtime {
                     let shift = ["ShiftLeft", "ShiftRight"]
                         .iter()
                         .any(|key| self.held.contains(*key) || self.blocked.contains(*key));
-                    for (index, matcher) in self.matchers.iter_mut().enumerate() {
-                        if matcher
-                            .as_mut()
-                            .is_some_and(|matcher| matcher.push(code, shift, self.now))
-                        {
-                            completed.insert(index);
+                    for (index, matcher) in &mut self.matchers {
+                        if matcher.push(code, shift, self.now) {
+                            completed.insert(*index);
                         }
                     }
                 }
@@ -354,6 +377,7 @@ impl Runtime {
                 }
                 self.reset_matchers();
             }
+            InputEvent::BuddyClick => self.reset_matchers(),
             InputEvent::CursorMove { x, y } if x.is_finite() && y.is_finite() => {
                 self.cursor = Some(Point { x: *x, y: *y })
             }
@@ -362,7 +386,8 @@ impl Runtime {
         let mut matched_count = 0;
         let mut cooldown_count = 0;
         let mut retrigger_count = 0;
-        let mut candidates: Vec<usize> = self
+        let active_modifiers = self.active_modifiers();
+        let mut candidates: Vec<(usize, bool)> = self
             .data
             .project
             .bindings
@@ -372,33 +397,32 @@ impl Runtime {
                 if !matches!(binding.effect, Effect::PlayAnimation { .. }) {
                     return None;
                 }
-                let matched = match (&binding.trigger, &event) {
+                let exact_keys = match (&binding.trigger, &event) {
                     (
                         Trigger::KeyDown {
-                            code,
-                            repeat: allowed,
+                            repeat: allowed, ..
                         },
                         InputEvent::KeyDown {
                             code: input,
                             repeat,
                         },
-                    ) => key_matches(code, input) && (!repeat || *allowed),
-                    (Trigger::KeyUp { code }, InputEvent::KeyUp { code: input }) => {
-                        key_matches(code, input)
+                    ) if !repeat || *allowed => {
+                        key_match_rank(&binding.trigger, input, active_modifiers)
+                    }
+                    (Trigger::KeyUp { .. }, InputEvent::KeyUp { code: input }) => {
+                        key_match_rank(&binding.trigger, input, active_modifiers)
                     }
                     (Trigger::MouseDown { button }, InputEvent::MouseDown { button: input })
                     | (Trigger::MouseUp { button }, InputEvent::MouseUp { button: input }) => {
-                        button == input
+                        (button == input).then_some(false)
                     }
+                    (Trigger::BuddyClick, InputEvent::BuddyClick) => Some(false),
                     (Trigger::Wheel { direction }, InputEvent::Wheel { direction: input }) => {
-                        direction == input
+                        (direction == input).then_some(false)
                     }
-                    (Trigger::KeySequence { .. }, _) => completed.contains(&index),
-                    _ => false,
-                };
-                if !matched {
-                    return None;
-                }
+                    (Trigger::KeySequence { .. }, _) => completed.contains(&index).then_some(false),
+                    _ => None,
+                }?;
                 matched_count += 1;
                 if let Effect::PlayAnimation {
                     cooldown_ms,
@@ -422,7 +446,7 @@ impl Runtime {
                         return None;
                     }
                 }
-                Some(index)
+                Some((index, exact_keys))
             })
             .collect();
         self.performance.candidates(
@@ -431,15 +455,15 @@ impl Runtime {
             retrigger_count,
             candidates.len().saturating_sub(1) as u32,
         );
-        candidates.sort_by_key(|&index| Reverse(self.priority(index)));
-        if let Some(index) = candidates.first() {
-            self.try_start(*index, received_at.min(self.now));
-            if self.one_shot.as_ref().is_some_and(|s| s.binding == *index) {
+        candidates.sort_by_key(|&(index, exact_keys)| Reverse(self.priority(index, exact_keys)));
+        if let Some(&(index, exact_keys)) = candidates.first() {
+            self.try_start(index, exact_keys, received_at.min(self.now));
+            if self.one_shot.as_ref().is_some_and(|s| s.binding == index) {
                 if let Effect::PlayAnimation {
                     stop_on_release: true,
                     interruption,
                     ..
-                } = self.data.project.bindings[*index].effect
+                } = self.data.project.bindings[index].effect
                 {
                     if interruption != Some(Interruption::Finish) {
                         self.shot_release = match &event {
@@ -467,14 +491,28 @@ impl Runtime {
         self.now = now;
         self.performance.advance(now);
         let velocity = self.movement_vector();
+        let step = if velocity != Point::default() {
+            Point {
+                x: velocity.x * delta,
+                y: velocity.y * delta,
+            }
+        } else if let Some(follow) = self.follow_motion() {
+            let distance = (follow.speed * delta).min(follow.remaining);
+            Point {
+                x: follow.direction.x * distance,
+                y: follow.direction.y * distance,
+            }
+        } else {
+            Point::default()
+        };
         let next = self.bounds.clamp(
-            self.position.x + velocity.x * delta,
-            self.position.y + velocity.y * delta,
+            self.position.x + step.x,
+            self.position.y + step.y,
             self.size,
         );
         let dx = next.x - self.position.x;
         if delta > 0.0 {
-            self.moving = next != self.position && self.controls.active;
+            self.moving = velocity != Point::default() && next != self.position;
         } else if velocity == Point::default() {
             self.moving = false;
         }
@@ -495,18 +533,58 @@ impl Runtime {
         }
         self.evaluate_rate();
         if dx.abs() > f64::EPSILON {
-            self.movement_facing_left = dx < 0.0;
+            self.movement_facing_left = Some(dx < 0.0);
         }
         self.sync_display(false);
+    }
+    fn follow_motion(&self) -> Option<FollowMotion> {
+        let config = &self.follow_config;
+        let (enabled, cursor, center) = self.native_follow.unwrap_or((
+            config.enabled,
+            self.cursor.filter(|_| self.controls.mouse),
+            Point { x: 0.5, y: 0.5 },
+        ));
+        if !enabled || !self.controls.active || self.dragging {
+            return None;
+        }
+        let cursor = cursor?;
+        let destination = Point {
+            x: cursor.x - center.x * self.size.x,
+            y: cursor.y - center.y * self.size.y,
+        };
+        if self.bounds.clamp(destination.x, destination.y, self.size) == self.position {
+            return None;
+        }
+        let dx = destination.x - self.position.x;
+        let dy = destination.y - self.position.y;
+        let distance = dx.hypot(dy);
+        let remaining = distance - config.stop_distance_dip;
+        if remaining <= 1e-6 {
+            return None;
+        }
+        let band = config
+            .bands
+            .iter()
+            .rposition(|band| distance >= band.min_distance_dip)?;
+        Some(FollowMotion {
+            direction: Point {
+                x: dx / distance,
+                y: dy / distance,
+            },
+            remaining,
+            band,
+            speed: config.bands[band].speed_dip_per_second,
+        })
     }
     fn movement_vector(&self) -> Point {
         if !self.controls.active || !self.controls.keyboard || !self.controls.movement_enabled {
             return Point::default();
         }
         let (mut x, mut y, mut speed): (f64, f64, f64) = (0.0, 0.0, 0.0);
+        let active_modifiers = self.active_modifiers();
         for binding in &self.data.project.bindings {
             if let (
-                Trigger::WhileKeyDown { code },
+                Trigger::WhileKeyDown { .. },
                 Effect::Move {
                     x: dx,
                     y: dy,
@@ -515,7 +593,10 @@ impl Runtime {
                 },
             ) = (&binding.trigger, &binding.effect)
             {
-                if self.held.contains(code) && !self.move_blocked.contains(code) {
+                if self
+                    .held_key_rank(&binding.trigger, active_modifiers, true)
+                    .is_some()
+                {
                     x += dx;
                     y += dy;
                     speed = speed.max(*speed_dip_per_second);
@@ -530,7 +611,25 @@ impl Runtime {
             y: y / length * speed,
         }
     }
-    fn priority(&self, index: usize) -> (i16, Reverse<usize>) {
+    fn active_modifiers(&self) -> u8 {
+        self.held
+            .iter()
+            .chain(&self.blocked)
+            .filter_map(|code| KeyModifier::from_code(code))
+            .fold(0, |mask, modifier| mask | modifier.bit())
+    }
+    fn held_key_rank(&self, trigger: &Trigger, active: u8, movement: bool) -> Option<bool> {
+        trigger
+            .key_conditions()
+            .filter_map(|(code, modifiers)| {
+                (self.held.contains(code)
+                    && (!movement || !self.move_blocked.contains(code))
+                    && modifiers_match(modifiers, code, active))
+                .then_some(modifiers.is_some())
+            })
+            .max()
+    }
+    fn priority(&self, index: usize, exact_keys: bool) -> (i16, bool, Reverse<usize>) {
         let binding = &self.data.project.bindings[index];
         // Unconfigured continuous reactions retain their previous precedence.
         let priority = match binding.effect {
@@ -552,27 +651,38 @@ impl Runtime {
             } => priority.map_or(if animation.is_some() { -3 } else { -4 }, i16::from),
             Effect::FaceCursor { .. } => -5,
         };
-        (priority, Reverse(index))
+        (priority, exact_keys, Reverse(index))
     }
-    fn can_interrupt(&self, incoming: usize, current: usize) -> bool {
-        let Effect::PlayAnimation { interruption, .. } = self.data.project.bindings[current].effect
+    fn can_interrupt(&self, incoming: usize, exact_keys: bool, current: &OneShot) -> bool {
+        let Effect::PlayAnimation { interruption, .. } =
+            self.data.project.bindings[current.binding].effect
         else {
             return true;
         };
         match interruption.unwrap_or_default() {
             Interruption::Finish => false,
             Interruption::Replace => true,
-            Interruption::ByPriority => self.priority(incoming) >= self.priority(current),
+            Interruption::ByPriority => {
+                incoming == current.binding
+                    || self.priority(incoming, exact_keys)
+                        >= self.priority(current.binding, current.exact_keys)
+            }
         }
     }
-    fn try_start(&mut self, index: usize, received_at: u64) {
+    fn try_start(&mut self, index: usize, exact_keys: bool, received_at: u64) {
+        let incoming = self.priority(index, exact_keys);
         let allowed = if let Some(current) = &self.one_shot {
-            self.can_interrupt(index, current.binding)
+            self.can_interrupt(index, exact_keys, current)
         } else {
             self.continuous_display()
-                .is_none_or(|(active, _)| self.priority(index) >= self.priority(active))
+                .is_none_or(|(active, _, exact)| incoming >= self.priority(active, exact))
         };
-        if !allowed {
+        let follow_wins = self
+            .follow_config
+            .priority
+            .is_some_and(|priority| i16::from(priority) > incoming.0)
+            && self.display_follow_motion().is_some();
+        if !allowed || follow_wins {
             self.performance.priority_rejected();
             return;
         }
@@ -611,6 +721,7 @@ impl Runtime {
             self.one_shot = Some(OneShot {
                 binding: index,
                 ends_at: self.now.saturating_add(duration),
+                exact_keys,
             });
             self.last_start[index] = Some(self.now);
             self.sync_display(true);
@@ -687,42 +798,41 @@ impl Runtime {
         };
     }
     fn reset_matchers(&mut self) {
-        for matcher in self.matchers.iter_mut().flatten() {
+        for (_, matcher) in &mut self.matchers {
             matcher.reset();
         }
     }
-    fn continuous_display(&self) -> Option<(usize, AnimationSource)> {
+    fn continuous_display(&self) -> Option<(usize, AnimationSource, bool)> {
+        let active_modifiers = self.active_modifiers();
         self.data
             .project
             .bindings
             .iter()
             .enumerate()
             .filter_map(|(index, binding)| {
-                let source = match (&binding.trigger, &binding.effect) {
-                    (Trigger::WhileKeyDown { code }, Effect::SustainAnimation { .. })
-                        if self.controls.active
-                            && self.controls.keyboard
-                            && self.held.contains(code) =>
+                let (source, exact_keys) = match (&binding.trigger, &binding.effect) {
+                    (Trigger::WhileKeyDown { .. }, Effect::SustainAnimation { .. })
+                        if self.controls.active && self.controls.keyboard =>
                     {
-                        AnimationSource::HeldKey
+                        (
+                            AnimationSource::HeldKey,
+                            self.held_key_rank(&binding.trigger, active_modifiers, false)?,
+                        )
                     }
                     (Trigger::TypingRate { .. }, Effect::SustainAnimation { .. })
                         if self.rate_band == Some(index) =>
                     {
-                        AnimationSource::TypingRate
+                        (AnimationSource::TypingRate, false)
                     }
-                    (Trigger::WhileKeyDown { code }, Effect::Move { .. })
-                        if self.moving
-                            && self.held.contains(code)
-                            && !self.move_blocked.contains(code) =>
-                    {
-                        AnimationSource::Movement
-                    }
+                    (Trigger::WhileKeyDown { .. }, Effect::Move { .. }) if self.moving => (
+                        AnimationSource::Movement,
+                        self.held_key_rank(&binding.trigger, active_modifiers, true)?,
+                    ),
                     _ => return None,
                 };
-                Some((index, source))
+                Some((index, source, exact_keys))
             })
-            .max_by_key(|(index, _)| self.priority(*index))
+            .max_by_key(|&(index, _, exact_keys)| self.priority(index, exact_keys))
     }
 
     fn cursor_direction(&self, cursor: Point) -> CursorDirection {
@@ -745,17 +855,30 @@ impl Runtime {
         ][row][column]
     }
 
+    fn display_follow_motion(&self) -> Option<FollowMotion> {
+        (self.movement_vector() == Point::default())
+            .then(|| self.follow_motion())
+            .flatten()
+    }
+
     fn sync_display(&mut self, force: bool) {
-        let continuous = self.continuous_display();
-        let continuous_binding = continuous.map(|(index, _)| index);
+        let follow = self.display_follow_motion();
+        let follow_priority = follow.as_ref().and(self.follow_config.priority);
+        let continuous = self.continuous_display().filter(|&(index, _, exact)| {
+            follow_priority
+                .is_none_or(|priority| self.priority(index, exact).0 >= i16::from(priority))
+        });
+        let continuous_binding = continuous.map(|(index, _, _)| index);
         let newly_active =
-            continuous_binding.filter(|index| Some(*index) != self.continuous_binding);
+            continuous.filter(|(index, _, _)| Some(*index) != self.continuous_binding);
         self.continuous_binding = continuous_binding;
         // A held key or rate band can interrupt on activation, not on every tick.
         // A continuous condition that arrived with a one-shot is resolved at its start.
         if !force
             && self.one_shot.as_ref().is_some_and(|shot| {
-                newly_active.is_some_and(|incoming| self.can_interrupt(incoming, shot.binding))
+                newly_active.is_some_and(|(incoming, _, exact_keys)| {
+                    self.can_interrupt(incoming, exact_keys, shot)
+                })
             })
         {
             self.performance.end(
@@ -777,8 +900,12 @@ impl Runtime {
             (drag, AnimationSource::Drag)
         } else if let Some(shot) = &self.one_shot {
             (Some(shot.binding), AnimationSource::OneShot)
-        } else if let Some((index, source)) = continuous {
+        } else if let Some((index, source, _)) =
+            continuous.filter(|_| follow.is_none() || follow_priority.is_some())
+        {
             (Some(index), source)
+        } else if follow.is_some() {
+            (None, AnimationSource::CursorFollow)
         } else {
             (None, AnimationSource::Idle)
         };
@@ -789,8 +916,24 @@ impl Runtime {
                 Effect::Move { animation, .. } => animation.as_deref(),
                 Effect::FaceCursor { .. } => None,
             })
+            .or_else(|| {
+                if source == AnimationSource::CursorFollow {
+                    follow.as_ref().and_then(|follow| {
+                        self.follow_config.bands[follow.band].animation.as_deref()
+                    })
+                } else {
+                    None
+                }
+            })
             .unwrap_or(&self.data.character.default_animation);
-        let mut mirror = self.movement_facing_left;
+        let mut target_left = self.movement_facing_left;
+        let mut mirror_override = None;
+        if source == AnimationSource::CursorFollow {
+            let x = follow.unwrap().direction.x;
+            if x != 0.0 {
+                target_left = Some(x < 0.0);
+            }
+        }
         let cursor = if self.dragging {
             self.drag_cursor
         } else {
@@ -800,7 +943,7 @@ impl Runtime {
         if let Some(cursor) = cursor {
             if let Some(index) = binding {
                 if self.data.project.bindings[index].follow_cursor == Some(true) {
-                    mirror = cursor.x < self.position.x + self.size.x / 2.0;
+                    target_left = Some(cursor.x < self.position.x + self.size.x / 2.0);
                 }
             } else if source == AnimationSource::Idle {
                 let directions = match &self.data.project.idle {
@@ -818,18 +961,18 @@ impl Runtime {
                     animation = pose
                         .and_then(|pose| pose.animation.as_deref())
                         .unwrap_or(animation);
-                    mirror = pose.and_then(|pose| pose.mirror).unwrap_or({
-                        matches!(
-                            direction,
-                            CursorDirection::UpLeft
-                                | CursorDirection::Left
-                                | CursorDirection::DownLeft
-                        )
-                    });
+                    mirror_override = pose.and_then(|pose| pose.mirror);
+                    target_left = Some(matches!(
+                        direction,
+                        CursorDirection::UpLeft | CursorDirection::Left | CursorDirection::DownLeft
+                    ));
                 }
             }
         }
-        self.facing_left = mirror;
+        let source_left =
+            self.data.character.animations[animation].source_facing == Some(SourceFacing::Left);
+        self.facing_left =
+            mirror_override.unwrap_or(target_left.is_some_and(|left| left != source_left));
         if force
             || self.display != animation
             || self.display_source != source
@@ -886,7 +1029,9 @@ impl Runtime {
         }
     }
     pub fn next_deadline_ms(&self) -> Option<u64> {
-        let movement = (self.movement_vector() != Point::default()).then_some(self.now + 16);
+        let movement = (self.movement_vector() != Point::default()
+            || self.follow_motion().is_some())
+        .then_some(self.now + 16);
         [
             movement,
             self.rate_next,
@@ -899,8 +1044,35 @@ impl Runtime {
     }
 }
 
+struct FollowMotion {
+    direction: Point,
+    remaining: f64,
+    band: usize,
+    speed: f64,
+}
+
 fn key_matches(pattern: &str, input: &str) -> bool {
     pattern == input || (pattern == "*" && is_supported_key(input) && !is_modifier(input))
+}
+
+fn key_match_rank(trigger: &Trigger, input: &str, active: u8) -> Option<bool> {
+    trigger
+        .key_conditions()
+        .filter_map(|(code, modifiers)| {
+            (key_matches(code, input) && modifiers_match(modifiers, input, active))
+                .then_some(modifiers.is_some())
+        })
+        .max()
+}
+
+fn modifiers_match(required: Option<&[KeyModifier]>, code: &str, active: u8) -> bool {
+    required.is_none_or(|modifiers| {
+        let expected = modifiers
+            .iter()
+            .fold(0, |mask, modifier| mask | modifier.bit());
+        let own_modifier = KeyModifier::from_code(code).map_or(0, KeyModifier::bit);
+        expected == active & !own_modifier
+    })
 }
 
 pub fn typescript_declarations() -> String {

@@ -43,6 +43,7 @@ pub fn input_probe(seconds: u64, request_permission: bool) -> Result<(), String>
                 InputEvent::CursorMove { .. } => "cursorMove",
                 InputEvent::Reset => "reset",
                 InputEvent::DragStart | InputEvent::DragEnd => "drag",
+                InputEvent::BuddyClick => "buddyClick",
                 InputEvent::Rearm { .. } => "rearm",
             };
             *counts.entry(kind).or_default() += 1;

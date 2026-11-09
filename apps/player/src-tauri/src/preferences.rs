@@ -122,6 +122,7 @@ fn disabled() -> PreferenceOverrides {
     PreferenceOverrides {
         keyboard: Some(false),
         mouse: Some(false),
+        cursor_follow: Some(false),
         ..Default::default()
     }
 }
