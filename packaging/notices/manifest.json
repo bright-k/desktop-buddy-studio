@@ -6,14 +6,14 @@
     "x86_64-pc-windows-msvc"
   ],
   "inputHashes": {
-    "Cargo.lock": "515fd05d77d855403e32332c5e470f7f55e75ff71a7927394aad432e4ae51092",
+    "Cargo.lock": "f345eefa3bd8bfab470f870fd44b5df33971bcd348dde2dad3e739fb463aade0",
     "package-lock.json": "3aa48e5d08d3cae5c73c963d86fd69888604c4cdc9b437c8d6a29157ec2c83bd",
     "LICENSE": "f2f22882db3877a6550bff01df6d2825adcb40f783bbed30ffe40674b8dab7f1",
     "packaging/licenses/about.toml": "42780ae77c59b231b9326ac2d35a795a53c90073bb905fa716bfaae54fa7c802",
-    "packaging/licenses/clarifications.json": "5913259eb022b544fdf6f5b61f4f3d89d5421c1cb4cbaafc3f7a4b1eca3657b6",
+    "packaging/licenses/clarifications.json": "27bc9c279b05d7807fd0e3975ee6352dc4ca63f330492fa86da5555295fabd78",
     "scripts/prepare-notices.mjs": "40a70060c2953287656c9d73390458456974e8313f6b3893ec70ffe2fa900f26"
   },
-  "crateCount": 290,
+  "crateCount": 297,
   "npmCount": 4,
   "sourceArchiveCount": 17,
   "files": [
@@ -24,13 +24,13 @@
     },
     {
       "path": "THIRD_PARTY_NOTICES.txt",
-      "bytes": 502512,
-      "sha256": "ca02f0945abf18a5993d2d0e2e24b62f72b4bd3ab7c308c12c1d9d806b4b90ef"
+      "bytes": 518938,
+      "sha256": "29f52e6e00b330d73f4b9960c429bf57ba0b92d0db402770adc255801428358c"
     },
     {
       "path": "inventory.json",
-      "bytes": 195158,
-      "sha256": "80071ed7ad813cc1012d17f4c6a749bb263bcb733d593b447a67280194b36bd4"
+      "bytes": 200271,
+      "sha256": "faf0830ab334751800c48499e713ab99a31912a4853dcda0b3b40c8149b022ba"
     },
     {
       "path": "sources/block2-0.6.2.crate",
@@ -173,6 +173,11 @@
       "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
     },
     {
+      "path": "terms/17dccbfbcee467ad2536cd4c4ef7090705b9bcdb56779298ea4a20c5638d50f4.txt",
+      "bytes": 1082,
+      "sha256": "b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0"
+    },
+    {
       "path": "terms/1afdfeea72dfedce992b718e2211ffe9c5213f6aeb9e1d5d9f15630fcf787095.txt",
       "bytes": 1091,
       "sha256": "f28420c1906af38be726cd7842798f0194b27c41d6051c0d1e9ee348b8a4a0ea"
@@ -236,6 +241,11 @@
       "path": "terms/31be250eb62f3a2a319ed011b723e72884c0b39cc233179a4e1cff2261fecfd7.txt",
       "bytes": 1129,
       "sha256": "d9fa6b0e6fed50d4961b9c931587af6bd127df13e9473418d3e324f427db4f06"
+    },
+    {
+      "path": "terms/31d4896f171c3ba3a288e1a5863c253781ac2d2744351cfb70f879efa4d679d7.txt",
+      "bytes": 9723,
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
     },
     {
       "path": "terms/36d88f77c98e49bb917691a2956c9326dc3a2896e1b08d33188fe7435928ca66.txt",
@@ -393,6 +403,11 @@
       "sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1"
     },
     {
+      "path": "terms/79ee9051a40407caabca0c440b6c1f1928d80755b49a92dda7e6b045c56e2a11.txt",
+      "bytes": 1082,
+      "sha256": "8c7516d4b27b1e495be5e38b612298b63de48d05f49cdac94f70f3cd70f8864b"
+    },
+    {
       "path": "terms/7b1f3da2cee728d33b6edf5bbae660443437d1cb55c41a2177c8bbe0572223f6.txt",
       "bytes": 1084,
       "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94"
@@ -411,6 +426,11 @@
       "path": "terms/7fe3db73e22de7dd2062240d392b0b328c977ac25e90f7c343273696d327ab6e.txt",
       "bytes": 1166,
       "sha256": "1e697ce8d21401fbf1bddd9b5c3fd4c4c79ae1e3bdf51f81761c85e11d5a89cd"
+    },
+    {
+      "path": "terms/804c019b2c9f12813945bbcb8c98c6bf0426fe4d5c65c493b7bb13366489f0a6.txt",
+      "bytes": 1085,
+      "sha256": "58545fed1565e42d687aecec6897d35c6d37ccb71479a137c0deb2203e125c79"
     },
     {
       "path": "terms/844887f83c84978c203a87e414c85e1fad2df5a8d3a9c679d83f959721216046.txt",
@@ -791,6 +811,11 @@
       "path": "terms/fabb0afb4fff2e6939a945d0fce4201ed833e4c9a91257e49a296a6a03f18745.txt",
       "bytes": 1049,
       "sha256": "ecc269ef87fd38a1d98e30bfac9ba964a9dbd9315c3770fed98d4d7cb5882055"
+    },
+    {
+      "path": "terms/fcadce9050f4715e102ea2d0bc30a21267180bed5d0d0efa9333e660111ef1fd.txt",
+      "bytes": 856,
+      "sha256": "e72111c52b7d96ebe25348dee19f0744f444d3c95ae6b1ecb6ccaecc5bce05ba"
     },
     {
       "path": "terms/fee943067e3b7a76f621b12f671cf31d09d09da02d75e1966c4b1f3da9c3636f.txt",

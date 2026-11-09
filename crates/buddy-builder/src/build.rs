@@ -9,11 +9,12 @@ use serde_json::json;
 use std::{
     cell::RefCell,
     fs,
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     time::Instant,
 };
+use zip::{result::ZipResult, write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 pub struct BuildOptions {
     pub project: PathBuf,
@@ -393,11 +394,14 @@ pub fn build(
                 .as_deref()
                 .and_then(Path::file_name)
                 .ok_or("Missing Windows installation guide")?;
-            process::run(
-                &mut windows_package_command(&staged, &package, &installer, guide),
+            write_windows_package(
+                &staged,
+                &package,
+                Path::new(&installer),
+                Path::new(guide),
                 &cancellation,
-                &mut progress,
-            )?;
+            )
+            .map_err(|error| format!("Could not write Windows installation ZIP: {error}"))?;
         }
         if let Some(error) = log_error.borrow().as_ref() {
             return Err(format!("BUILD_LOG_FAILED: {error}"));
@@ -682,27 +686,60 @@ fn copy_matching(
     Ok(copied)
 }
 
-fn windows_package_command(
+fn write_windows_package(
     directory: &Path,
     package: &str,
-    installer: &str,
-    guide: &std::ffi::OsStr,
-) -> Command {
-    // Use Windows' bsdtar even when Git Bash puts GNU tar on PATH.
-    let tar = if cfg!(windows) {
-        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
-            .join("System32")
-            .join("tar.exe")
+    installer: &Path,
+    guide: &Path,
+    cancellation: &CancellationToken,
+) -> ZipResult<()> {
+    let output = fs::File::create(directory.join(package))?;
+    let mut archive = ZipWriter::new(BufWriter::new(output));
+    for entry in [installer, guide, Path::new("LICENSES")] {
+        add_windows_zip_entry(&mut archive, directory, entry, cancellation)?;
+    }
+    archive.finish()?.flush()?;
+    Ok(())
+}
+
+fn add_windows_zip_entry(
+    archive: &mut ZipWriter<BufWriter<fs::File>>,
+    directory: &Path,
+    entry: &Path,
+    cancellation: &CancellationToken,
+) -> ZipResult<()> {
+    if cancellation.is_cancelled() {
+        return Err(io::Error::other("BUILD_CANCELLED").into());
+    }
+    let path = directory.join(entry);
+    let kind = fs::symlink_metadata(&path)?.file_type();
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    if kind.is_dir() {
+        archive.add_directory_from_path(entry, options)?;
+        for child in fs::read_dir(path)? {
+            let child = entry.join(child?.file_name());
+            add_windows_zip_entry(archive, directory, &child, cancellation)?;
+        }
+    } else if kind.is_file() {
+        // The ZIP writer flags Unicode names as UTF-8 without passing them
+        // through the Windows archiver's command-line code page.
+        archive.start_file_from_path(entry, options)?;
+        let mut file = fs::File::open(path)?;
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(io::Error::other("BUILD_CANCELLED").into());
+            }
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            archive.write_all(&buffer[..count])?;
+        }
     } else {
-        PathBuf::from("tar")
-    };
-    let mut command = Command::new(tar);
-    command
-        .current_dir(directory)
-        .args(["-a", "-cf", package, "--", installer])
-        .arg(guide)
-        .arg("LICENSES");
-    command
+        return Err(io::Error::other("Unexpected file type in Windows installation ZIP").into());
+    }
+    Ok(())
 }
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|e| e.to_string())?;
@@ -818,16 +855,22 @@ mod tests {
         fs::write(source.path().join(guide), b"guide").unwrap();
         fs::create_dir(source.path().join("LICENSES")).unwrap();
         fs::write(source.path().join("LICENSES/character.txt"), b"license").unwrap();
-        let mut command =
-            windows_package_command(source.path(), package, installer, guide.as_ref());
-        assert!(command.status().unwrap().success());
-        assert!(Command::new(command.get_program())
-            .current_dir(source.path())
-            .args(["-xf", package, "-C"])
-            .arg(extracted.path())
-            .status()
+        write_windows_package(
+            source.path(),
+            package,
+            Path::new(installer),
+            Path::new(guide),
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        let bytes = fs::read(source.path().join(package)).unwrap();
+        // The first entry is the installer. Its local header must mark the name
+        // as UTF-8 so Windows and other extractors decode it the same way.
+        assert_ne!(u16::from_le_bytes([bytes[6], bytes[7]]) & (1 << 11), 0);
+        zip::ZipArchive::new(io::Cursor::new(bytes))
             .unwrap()
-            .success());
+            .extract(extracted.path())
+            .unwrap();
         assert_eq!(
             fs::read(extracted.path().join(installer)).unwrap(),
             b"installer"
