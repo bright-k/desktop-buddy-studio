@@ -1,0 +1,415 @@
+{
+  "bindings": [
+    {
+      "effect": {
+        "animation": "typing",
+        "type": "sustainAnimation"
+      },
+      "followCursor": false,
+      "id": "typing-slow",
+      "trigger": {
+        "maxKps": 3,
+        "minKps": 0.5,
+        "type": "typingRate"
+      }
+    },
+    {
+      "effect": {
+        "animation": "typingFast",
+        "type": "sustainAnimation"
+      },
+      "id": "typing-fast",
+      "trigger": {
+        "minKps": 3,
+        "type": "typingRate"
+      }
+    },
+    {
+      "effect": {
+        "animation": "drag",
+        "type": "sustainAnimation"
+      },
+      "followCursor": true,
+      "id": "drag",
+      "trigger": {
+        "type": "drag"
+      }
+    },
+    {
+      "effect": {
+        "animation": "backspace",
+        "cooldownMs": 0,
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "backspace",
+      "trigger": {
+        "code": "Backspace",
+        "repeat": false,
+        "type": "keyDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "enter",
+        "cooldownMs": 0,
+        "interruption": "byPriority",
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "enter",
+      "trigger": {
+        "code": "Enter",
+        "repeat": false,
+        "type": "keyDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "esc",
+        "cooldownMs": 0,
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "esc",
+      "trigger": {
+        "code": "Escape",
+        "repeat": false,
+        "type": "keyDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "left-mouse-click",
+        "cooldownMs": 0,
+        "priority": 0,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "left-mouse-click",
+      "trigger": {
+        "button": "primary",
+        "type": "mouseDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "right-mouse-click",
+        "cooldownMs": 0,
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "right-mouse-click",
+      "trigger": {
+        "button": "secondary",
+        "type": "mouseDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "mouse-wheel",
+        "cooldownMs": 0,
+        "priority": 0,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "mouse-wheel-up",
+      "trigger": {
+        "direction": "up",
+        "type": "wheel"
+      }
+    },
+    {
+      "effect": {
+        "animation": "mouse-wheel",
+        "cooldownMs": 0,
+        "priority": 0,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "mouse-wheel-down",
+      "trigger": {
+        "direction": "down",
+        "type": "wheel"
+      }
+    },
+    {
+      "effect": {
+        "animation": "mouse-wheel",
+        "cooldownMs": 0,
+        "priority": 0,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "id": "mouse-wheel-left",
+      "trigger": {
+        "direction": "left",
+        "type": "wheel"
+      }
+    },
+    {
+      "effect": {
+        "animation": "mouse-wheel",
+        "cooldownMs": 0,
+        "priority": 0,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "id": "mouse-wheel-right",
+      "trigger": {
+        "direction": "right",
+        "type": "wheel"
+      }
+    },
+    {
+      "effect": {
+        "animation": "hidden-tlfj",
+        "cooldownMs": 0,
+        "interruption": "finish",
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "id": "hidden-tlfj",
+      "trigger": {
+        "keyword": "시러",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 2000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "hidden-cna",
+        "cooldownMs": 0,
+        "interruption": "finish",
+        "priority": 80,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "id": "hidden-cna",
+      "sound": {
+        "resource": "sound-1",
+        "volume": 0.5
+      },
+      "trigger": {
+        "alternatives": [
+          {
+            "keyword": "dance",
+            "layout": "en-US-qwerty"
+          }
+        ],
+        "keyword": "춤",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 2000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "hidden-zz",
+        "cooldownMs": 0,
+        "interruption": "finish",
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "hidden-zz",
+      "trigger": {
+        "keyword": "zz",
+        "layout": "en-US-qwerty",
+        "timeoutMs": 2000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "hidden-bb",
+        "cooldownMs": 0,
+        "interruption": "finish",
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "hidden-bb",
+      "trigger": {
+        "alternatives": [
+          {
+            "keyword": "nn",
+            "layout": "en-US-qwerty"
+          },
+          {
+            "keyword": "bn",
+            "layout": "en-US-qwerty"
+          },
+          {
+            "keyword": "nb",
+            "layout": "en-US-qwerty"
+          }
+        ],
+        "keyword": "bb",
+        "layout": "en-US-qwerty",
+        "timeoutMs": 2000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "hidden-antjdnj",
+        "cooldownMs": 0,
+        "interruption": "finish",
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "hidden-antjdnj",
+      "trigger": {
+        "keyword": "무서워",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 3000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "hidden-mm",
+        "cooldownMs": 0,
+        "interruption": "finish",
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "id": "hidden-mm",
+      "trigger": {
+        "keyword": "mm",
+        "layout": "en-US-qwerty",
+        "timeoutMs": 2000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "hidden-hi",
+        "cooldownMs": 0,
+        "interruption": "finish",
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "hidden-hi",
+      "trigger": {
+        "alternatives": [
+          {
+            "keyword": "hi",
+            "layout": "en-US-qwerty"
+          },
+          {
+            "keyword": "hello",
+            "layout": "en-US-qwerty"
+          },
+          {
+            "keyword": "gd",
+            "layout": "en-US-qwerty"
+          }
+        ],
+        "keyword": "안녕",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 2000,
+        "type": "keySequence"
+      }
+    }
+  ],
+  "build": {
+    "signing": {
+      "macos": "ad-hoc",
+      "windows": "none"
+    },
+    "targets": [
+      "windows-x64",
+      "macos-arm64"
+    ]
+  },
+  "character": "character/manifest.json",
+  "cursorFollow": {
+    "bands": [
+      {
+        "animation": "following-slow",
+        "minDistanceDip": 0,
+        "speedDipPerSecond": 120
+      },
+      {
+        "animation": "following-fast",
+        "minDistanceDip": 200,
+        "speedDipPerSecond": 240
+      }
+    ],
+    "enabled": false,
+    "priority": 75,
+    "stopDistanceDip": 60
+  },
+  "defaults": {
+    "alwaysOnTop": true,
+    "displayHeightDip": 128,
+    "input": {
+      "keyboard": true,
+      "mouse": true
+    },
+    "movementEnabled": false,
+    "position": {
+      "anchor": "bottomRight",
+      "marginDip": 24,
+      "monitor": "primary"
+    },
+    "scale": 1,
+    "timing": {
+      "idleTimeoutMs": 1200,
+      "rateEvaluationMs": 50,
+      "rateStabilityMs": 200,
+      "rateWindowMs": 2000
+    }
+  },
+  "idle": {
+    "cursorEnabled": true,
+    "directions": {}
+  },
+  "product": {
+    "icon": "assets/app-icon.png",
+    "identifier": "com.bright.k.desktop.buddy.chiikawa.v1",
+    "name": "먼작버 치이카와",
+    "slug": "chiikawa-buddy-v1",
+    "version": "1.0.0"
+  },
+  "projectId": "ed65c638-b059-494b-a8d6-20ec3ae6829c",
+  "schemaVersion": 1
+}
