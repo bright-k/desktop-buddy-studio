@@ -1,4 +1,11 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Tauri's packaged builds can use debug assertions without needing a console.
+#![cfg_attr(
+    all(
+        windows,
+        any(not(debug_assertions), all(not(dev), not(feature = "preview")))
+    ),
+    windows_subsystem = "windows"
+)]
 
 mod display;
 mod edit;
