@@ -4,7 +4,8 @@ use crate::{
 };
 use buddy_project::{
     is_modifier, is_supported_key, CursorDirection, Effect, Interruption, KeyModifier, MouseButton,
-    Point, Retrigger, SoundCue, SourceFacing, Trigger, ValidatedProject,
+    Point, PointerInput, Retrigger, SoundCue, SourceFacing, Trigger, ValidatedProject,
+    WheelDirection,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -253,6 +254,44 @@ impl Runtime {
         self.handle_received(now, now, event);
     }
     pub fn handle_received(&mut self, now: u64, received_at: u64, event: InputEvent) {
+        if let InputEvent::DiagonalWheel { left, up } = event {
+            // Keep horizontal-before-vertical arbitration for distinct bindings.
+            let started = self.handle_single_input(
+                now,
+                received_at,
+                InputEvent::Wheel {
+                    direction: if left {
+                        WheelDirection::Left
+                    } else {
+                        WheelDirection::Right
+                    },
+                },
+                None,
+            );
+            self.handle_single_input(
+                now,
+                received_at,
+                InputEvent::Wheel {
+                    direction: if up {
+                        WheelDirection::Up
+                    } else {
+                        WheelDirection::Down
+                    },
+                },
+                started,
+            );
+        } else {
+            self.handle_single_input(now, received_at, event, None);
+        }
+    }
+
+    fn handle_single_input(
+        &mut self,
+        now: u64,
+        received_at: u64,
+        event: InputEvent,
+        started_in_sample: Option<usize>,
+    ) -> Option<usize> {
         self.advance(now);
         if matches!(event, InputEvent::DragStart | InputEvent::DragEnd) {
             self.dragging = matches!(event, InputEvent::DragStart);
@@ -260,7 +299,7 @@ impl Runtime {
                 self.drag_cursor = None;
             }
             self.sync_display(false);
-            return;
+            return None;
         }
         let released = matches!((&self.shot_release, &event),
             (Some(InputEvent::KeyUp { code: a }), InputEvent::KeyUp { code: b }) if a == b)
@@ -284,11 +323,11 @@ impl Runtime {
                 .take(128)
                 .collect();
             self.mouse_blocked = buttons.into_iter().take(3).collect();
-            return;
+            return None;
         }
         if matches!(event, InputEvent::Reset) {
             self.reset(now);
-            return;
+            return None;
         }
         if let InputEvent::KeyUp { code } = &event {
             self.move_blocked.remove(code);
@@ -298,22 +337,22 @@ impl Runtime {
                     self.moving = false;
                 }
                 self.sync_display(false);
-                return;
+                return None;
             }
         }
         if let InputEvent::MouseUp { button } = &event {
             self.mouse_held.retain(|held| held != button);
             if self.mouse_blocked.contains(button) {
                 self.mouse_blocked.retain(|blocked| blocked != button);
-                return;
+                return None;
             }
         }
         if matches!(&event, InputEvent::MouseDown { button } if self.mouse_blocked.contains(button))
         {
-            return;
+            return None;
         }
         if !self.controls.active {
-            return;
+            return None;
         }
         let keyboard = matches!(
             &event,
@@ -324,17 +363,17 @@ impl Runtime {
             || (!keyboard && !buddy_click && !self.controls.mouse)
             || (buddy_click && self.dragging)
         {
-            return;
+            return None;
         }
         let mut completed = BTreeSet::new();
         match &event {
             InputEvent::KeyDown { code, repeat } => {
                 if !is_supported_key(code) {
                     self.reset_matchers();
-                    return;
+                    return None;
                 }
                 if self.blocked.contains(code) || (*repeat && !self.held.contains(code)) {
-                    return;
+                    return None;
                 }
                 if !repeat {
                     self.held.insert(code.clone());
@@ -387,6 +426,15 @@ impl Runtime {
         let mut cooldown_count = 0;
         let mut retrigger_count = 0;
         let active_modifiers = self.active_modifiers();
+        let pointer_input = match &event {
+            InputEvent::MouseDown { button } => Some(PointerInput::MouseDown { button: *button }),
+            InputEvent::MouseUp { button } => Some(PointerInput::MouseUp { button: *button }),
+            InputEvent::Wheel { direction } => Some(PointerInput::Wheel {
+                direction: *direction,
+            }),
+            InputEvent::BuddyClick => Some(PointerInput::BuddyClick),
+            _ => None,
+        };
         let mut candidates: Vec<(usize, bool)> = self
             .data
             .project
@@ -420,10 +468,18 @@ impl Runtime {
                     (Trigger::Wheel { direction }, InputEvent::Wheel { direction: input }) => {
                         (direction == input).then_some(false)
                     }
+                    (Trigger::MouseInput { inputs }, _) => pointer_input
+                        .is_some_and(|input| inputs.contains(&input))
+                        .then_some(false),
                     (Trigger::KeySequence { .. }, _) => completed.contains(&index).then_some(false),
                     _ => None,
                 }?;
                 matched_count += 1;
+                // An already started binding still competes on the other axis.
+                // The winning binding is only started once per scroll sample.
+                if started_in_sample == Some(index) {
+                    return Some((index, exact_keys));
+                }
                 if let Effect::PlayAnimation {
                     cooldown_ms,
                     retrigger,
@@ -456,9 +512,15 @@ impl Runtime {
             candidates.len().saturating_sub(1) as u32,
         );
         candidates.sort_by_key(|&(index, exact_keys)| Reverse(self.priority(index, exact_keys)));
-        if let Some(&(index, exact_keys)) = candidates.first() {
-            self.try_start(index, exact_keys, received_at.min(self.now));
-            if self.one_shot.as_ref().is_some_and(|s| s.binding == index) {
+        let mut started = None;
+        if let Some(&(index, exact_keys)) = candidates
+            .first()
+            .filter(|(index, _)| Some(*index) != started_in_sample)
+        {
+            started = self
+                .try_start(index, exact_keys, received_at.min(self.now))
+                .then_some(index);
+            if started.is_some() {
                 if let Effect::PlayAnimation {
                     stop_on_release: true,
                     interruption,
@@ -484,6 +546,7 @@ impl Runtime {
         }
         self.evaluate_rate();
         self.sync_display(false);
+        started
     }
     pub fn advance(&mut self, now: u64) {
         let now = now.max(self.now);
@@ -669,7 +732,7 @@ impl Runtime {
             }
         }
     }
-    fn try_start(&mut self, index: usize, exact_keys: bool, received_at: u64) {
+    fn try_start(&mut self, index: usize, exact_keys: bool, received_at: u64) -> bool {
         let incoming = self.priority(index, exact_keys);
         let allowed = if let Some(current) = &self.one_shot {
             self.can_interrupt(index, exact_keys, current)
@@ -684,7 +747,7 @@ impl Runtime {
             && self.display_follow_motion().is_some();
         if !allowed || follow_wins {
             self.performance.priority_rejected();
-            return;
+            return false;
         }
         if let Effect::PlayAnimation {
             animation,
@@ -727,7 +790,9 @@ impl Runtime {
             self.sync_display(true);
             self.performance
                 .start(received_at, self.epoch, self.action_instance, fps);
+            return true;
         }
+        false
     }
     fn evaluate_rate(&mut self) {
         let timing = self.data.project.defaults.timing;

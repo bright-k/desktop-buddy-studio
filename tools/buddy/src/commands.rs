@@ -39,7 +39,7 @@ pub fn input_probe(seconds: u64, request_permission: bool) -> Result<(), String>
                 InputEvent::KeyUp { .. } => "keyUp",
                 InputEvent::MouseDown { .. } => "mouseDown",
                 InputEvent::MouseUp { .. } => "mouseUp",
-                InputEvent::Wheel { .. } => "wheel",
+                InputEvent::Wheel { .. } | InputEvent::DiagonalWheel { .. } => "wheel",
                 InputEvent::CursorMove { .. } => "cursorMove",
                 InputEvent::Reset => "reset",
                 InputEvent::DragStart | InputEvent::DragEnd => "drag",

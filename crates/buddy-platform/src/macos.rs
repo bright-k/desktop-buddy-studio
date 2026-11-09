@@ -224,29 +224,29 @@ unsafe extern "C" fn callback(
         22 => {
             let x = CGEventGetIntegerValueField(event, 12);
             let y = CGEventGetIntegerValueField(event, 11);
-            if x != 0 {
-                context.sender.send_at(
-                    InputEvent::Wheel {
-                        direction: if x > 0 {
-                            WheelDirection::Left
-                        } else {
-                            WheelDirection::Right
-                        },
+            let scroll = match (x, y) {
+                (0, 0) => None,
+                (x, 0) => Some(InputEvent::Wheel {
+                    direction: if x > 0 {
+                        WheelDirection::Left
+                    } else {
+                        WheelDirection::Right
                     },
-                    received_at,
-                );
-            }
-            if y != 0 {
-                context.sender.send_at(
-                    InputEvent::Wheel {
-                        direction: if y > 0 {
-                            WheelDirection::Up
-                        } else {
-                            WheelDirection::Down
-                        },
+                }),
+                (0, y) => Some(InputEvent::Wheel {
+                    direction: if y > 0 {
+                        WheelDirection::Up
+                    } else {
+                        WheelDirection::Down
                     },
-                    received_at,
-                );
+                }),
+                (x, y) => Some(InputEvent::DiagonalWheel {
+                    left: x > 0,
+                    up: y > 0,
+                }),
+            };
+            if let Some(scroll) = scroll {
+                context.sender.send_at(scroll, received_at);
             }
         }
         _ => {}

@@ -3,6 +3,8 @@ pub use launch_at_login::LaunchAtLogin;
 #[cfg(target_os = "macos")]
 mod macos;
 mod queue;
+#[cfg(any(target_os = "windows", test))]
+mod touchpad_scroll;
 mod wake;
 pub use wake::WakeSignal;
 #[cfg(target_os = "windows")]

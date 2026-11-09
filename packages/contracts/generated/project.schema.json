@@ -631,6 +631,74 @@
       ],
       "type": "string"
     },
+    "PointerInput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/MouseButton"
+            },
+            "type": {
+              "const": "mouseDown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "button"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/MouseButton"
+            },
+            "type": {
+              "const": "mouseUp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "button"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/WheelDirection"
+            },
+            "type": {
+              "const": "wheel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "direction"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "buddyClick",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Product": {
       "additionalProperties": false,
       "properties": {
@@ -884,6 +952,28 @@
           "required": [
             "type",
             "direction"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "inputs": {
+              "items": {
+                "$ref": "#/$defs/PointerInput"
+              },
+              "maxItems": 11,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "mouseInput",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "inputs"
           ],
           "type": "object"
         },

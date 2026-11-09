@@ -145,11 +145,14 @@ manifest의 이미지·라이선스 경로는 manifest가 있는 디렉토리 �
 | `mouseDown`, `mouseUp` | `playAnimation` | 전역 `primary`, `secondary`, `middle` 버튼. 버디 위에서 시작한 기본 버튼 입력은 버디가 처리한다. |
 | `buddyClick` | `playAnimation` | 버디 위에서 기본 버튼을 눌렀다가 드래그 없이 놓았을 때 한 번 실행. |
 | `wheel` | `playAnimation` | `up`, `down`, `left`, `right` 방향. OS 델타는 정규화한다. |
+| `mouseInput` | `playAnimation` | `inputs`의 버튼 누름·뗌, 스크롤 방향, 버디 클릭 중 하나가 들어오면 실행. |
 | `typingRate` | `sustainAnimation` | 설정한 측정 창(기본 2초)의 실제 키 입력 속도 구간에 머무르는 동안 반복 애니메이션 |
 | `keySequence` | `playAnimation` | keyword+layout으로 변환한 물리 키 순서 또는 명시적 steps의 매칭 |
 | `drag` | `sustainAnimation` | 버디를 직접 드래그하는 동안 반복 동작. 놓으면 즉시 해제 |
 
 typingRate.minKps는 0.5~1000, maxKps는 minKps보다 큰 1000 이하 값이며 생략하면 상한 없음이다. 구간은 `[minKps, maxKps)`이고 프로젝트당 최대 8개, 서로 겹치면 검증 오류다. sustainAnimation은 loop=true인 animation을 참조한다. 키 유지·속도 동작과 이동은 priority를 정수 0~100으로 지정할 수 있다. 생략하면 일회성 → 키 유지 → 속도 → 이동 순서가 적용된다. 드래그 중에는 편집용 동작을 표시한다.
+
+`mouseInput.inputs`에는 서로 다른 `mouseDown`, `mouseUp`, `wheel`, `buddyClick` 조건을 1~11개 지정할 수 있다. 조건은 이벤트의 재반응 대기 시간, 재실행 정책과 우선순위를 공유한다. 모든 조건이 `mouseDown`이면 반응을 시작한 버튼을 뗄 때 재생을 중단하도록 설정할 수 있다. 기존 단일 조건 형식도 읽는다.
 
 키 이벤트의 `modifiers`에는 `control`, `alt`, `shift`, `meta`를 중복 없이 지정할 수 있다. Ctrl+C는 `code: "KeyC", modifiers: ["control"]`, macOS의 Cmd+V는 `code: "KeyV", modifiers: ["meta"]`로 설정한다. 좌우 보조 키는 같은 조건으로 처리한다. 배열을 지정하면 누른 보조 키가 배열과 정확히 일치해야 하며, 빈 배열은 보조 키가 없는 입력에 해당한다. 생략하면 기존처럼 보조 키 상태와 상관없이 매칭한다. 키 뗌은 주 키를 뗄 때, 키 유지는 유지하는 동안 조건을 검사한다. 같은 우선순위에서는 보조 키 조건을 지정한 이벤트가 먼저다.
 
@@ -190,7 +193,7 @@ move의 x/y는 -1~1, 0 벡터는 금지하고 speedDipPerSecond는 1~1000이다.
 
 위 표에서 `/`는 각각의 code를 축약한 표기다. 예: ArrowLeft, ArrowRight, ArrowUp, ArrowDown. 물리 키를 기준으로 하며 자판에 인쇄된 문자·IME 결과와 다를 수 있다. `*`는 modifier 8개를 제외한 위 목록만 매칭한다. CapsLock·국제 전용 키·Insert·숫자패드·F13 이상·멀티미디어 키는 v1 매핑 목록에서 제외하고 이벤트는 Unknown으로 무시한다. 문자 추정·임의 코드 등록은 금지한다. 앱별 입력 제외는 P1 이후다.
 
-repeat는 keyDown에서만 허용하며 기본 false다. true이면 최초 down과 OS 반복 down을 모두 후보로 삼는다. repeat는 held 집합에 중복 추가하지 않으며 reset 이후 새 held 상태를 만들지 않는다. keyUp에는 repeat 필드를 받지 않는다. 마우스 primary/secondary는 OS 기본/보조 버튼 설정에 맞추고 middle을 별도로 처리한다. 버디에서 시작한 우클릭은 버디 메뉴에만 전달한다. wheel은 OS 논리 스크롤을 X 양수=오른쪽, Y 양수=아래로 정규화하고, 각 0이 아닌 축을 X→Y 순서로 평가한다. 어댑터가 노치·연속 델타를 구분하며 동일 물리 휠 거리나 이벤트 횟수를 OS 간 동일하다고 보장하지 않는다.
+repeat는 keyDown에서만 허용하며 기본 false다. true이면 최초 down과 OS 반복 down을 모두 후보로 삼는다. repeat는 held 집합에 중복 추가하지 않으며 reset 이후 새 held 상태를 만들지 않는다. keyUp에는 repeat 필드를 받지 않는다. 마우스 primary/secondary는 OS 기본/보조 버튼 설정에 맞추고 middle을 별도로 처리한다. 버디에서 시작한 우클릭은 버디 메뉴에만 전달한다. wheel은 OS 논리 스크롤을 X 양수=오른쪽, Y 양수=아래로 정규화하고, 각 0이 아닌 축을 X→Y 순서로 평가한다. 한 스크롤 입력의 두 축이 같은 이벤트에 해당해도 그 이벤트는 한 번만 시작한다. 어댑터가 노치·연속 델타를 구분하며 동일 물리 휠 거리나 이벤트 횟수를 OS 간 동일하다고 보장하지 않는다.
 
 ## 5. 검증과 자산 한도
 
@@ -243,4 +246,4 @@ preferences v1은 자체 schemaVersion=1과 scale·alwaysOnTop·basePlacement·i
 
 `defaults.timing`은 `{ "rateWindowMs": 2000, "rateEvaluationMs": 50, "rateStabilityMs": 100, "idleTimeoutMs": 250 }`가 기본이다. 순서대로 범위는 100~10000, 10~250, 0~2000, 50~5000ms이고 평가 간격은 유휴 시간 이하여야 한다. 앱 사용자 설정은 프로젝트 기본값을 덮어쓰며 프로젝트 원본을 변경하지 않는다.
 
-playAnimation의 `durationMs`는 선택적 1~60000ms 표시 시간이다. 생략하면 프레임 시간 합계, 지정하면 마지막 프레임을 유지한 채 그 시간까지 보여준다. `stopOnRelease`는 기본 false이고 keyDown/mouseDown에만 허용한다. 발생한 실제 키/버튼을 떼면 반응을 즉시 중단한다. `drag` → `sustainAnimation`, `whileKeyDown` → `sustainAnimation`도 허용하며 반복 동작을 참조한다. 드래그가 최우선이고 놓으면 현재 기본 상태로 돌아간다.
+playAnimation의 `durationMs`는 선택적 1~60000ms 표시 시간이다. 생략하면 프레임 시간 합계, 지정하면 마지막 프레임을 유지한 채 그 시간까지 보여준다. `stopOnRelease`는 기본 false이며 `keyDown`, `mouseDown`, 버튼 누름만 포함한 `mouseInput`에서 설정할 수 있다. 반응을 시작한 키나 버튼을 떼면 재생을 즉시 중단한다. `drag` → `sustainAnimation`, `whileKeyDown` → `sustainAnimation`도 허용하며 반복 동작을 참조한다. 드래그가 최우선이고 놓으면 현재 기본 상태로 돌아간다.

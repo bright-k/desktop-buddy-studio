@@ -12,6 +12,7 @@ import type {
   KeyModifier,
   KeyStep,
   MacosDmg,
+  PointerInput,
   RenderPlan,
   Resource,
   SoundResource,
@@ -675,18 +676,18 @@ const triggerNames: Record<string, string> = {
   whileKeyDown: "키 유지",
   typingRate: "입력 속도",
   keySequence: "키워드 입력",
-  mouseDown: "마우스 버튼 누름",
-  mouseUp: "마우스 버튼 뗌",
-  buddyClick: "버디 클릭",
-  wheel: "휠",
+  mouseInput: "마우스·트랙패드",
   drag: "버디 드래그",
 };
+function triggerCategory(trigger: Binding["trigger"]) {
+  return pointerInputs(trigger) ? "mouseInput" : trigger.type;
+}
 function events() {
   const bindings = doc!.project.bindings;
   if (selectedBinding >= bindings.length)
     selectedBinding = Math.max(0, bindings.length - 1);
   const b = bindings[selectedBinding];
-  return `${title("EVENT MAPPINGS", "이벤트 편집", "다른 앱에서 작업하는 동안의 입력과 버디를 직접 클릭하거나 드래그했을 때의 동작을 설정합니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 우선순위가 높을수록 먼저 표시됩니다. 같으면 보조 키 조건을 지정한 이벤트, 그다음 목록에서 위에 있는 이벤트가 우선합니다. 버디를 드래그하는 동안에는 드래그 동작이 가장 먼저 표시됩니다.</span><div class="row-actions"><button class="small" data-action="tab" data-id="idle">대기 상태 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[b.trigger.type]} ${esc(inputChoices(b.trigger).filter(Boolean).join(" / "))}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
+  return `${title("EVENT MAPPINGS", "이벤트 편집", "다른 앱에서 작업하는 동안의 입력과 버디를 직접 클릭하거나 드래그했을 때의 동작을 설정합니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 우선순위가 높을수록 먼저 표시됩니다. 같으면 보조 키 조건을 지정한 이벤트, 그다음 목록에서 위에 있는 이벤트가 우선합니다. 버디를 드래그하는 동안에는 드래그 동작이 가장 먼저 표시됩니다.</span><div class="row-actions"><button class="small" data-action="tab" data-id="idle">대기 상태 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[triggerCategory(b.trigger)]} ${esc(inputChoices(b.trigger).filter(Boolean).join(" / "))}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
 }
 function followSettings() {
   const heading = title("CURSOR FOLLOW", "마우스 따라오기", "마우스까지의 거리에 따라 이동 속도와 애니메이션을 바꿉니다.");
@@ -790,7 +791,7 @@ function reactionSettings(binding: Binding, path: string) {
     <label class="field"><span>새 이벤트가 들어오면</span><select id="interruption-policy">${option("byPriority", "우선순위에 따라 전환", policy)}${option("replace", "즉시 전환", policy)}${option("finish", "재생을 마칠 때까지 유지", policy)}</select></label>
     <label class="field"><span>표시 시간 (ms, 비우면 동작 길이)</span><input id="duration-ms" type="number" min="1" max="60000" value="${effect.durationMs ?? ""}"></label>
     ${finish ? "" : `<label class="field"><span>같은 이벤트가 반복되면</span><select data-path="${path}.effect.retrigger">${option("restart", "처음부터 재생", effect.retrigger)}${option("ignore", "현재 재생 유지", effect.retrigger)}</select></label>`}
-    </div>${finish ? '<p class="hint">표시 시간이 끝날 때까지 다른 입력이나 같은 이벤트가 재생을 바꾸지 않습니다.</p>' : ["keyDown", "mouseDown"].includes(binding.trigger.type) ? check("키나 버튼을 떼면 재생 중단", `${path}.effect.stopOnRelease`) : ""}`;
+    </div>${finish ? '<p class="hint">표시 시간이 끝날 때까지 다른 입력이나 같은 이벤트가 재생을 바꾸지 않습니다.</p>' : supportsStopOnRelease(binding.trigger) ? check("키나 버튼을 떼면 재생 중단", `${path}.effect.stopOnRelease`) : ""}`;
 }
 type KeyboardTrigger = Extract<Binding["trigger"], { code: string }>;
 type KeywordTrigger = Extract<Binding["trigger"], { type: "keySequence" }>;
@@ -809,13 +810,73 @@ function keyCombinationLabel({ code, modifiers }: KeyChord) {
   return [...labels, keyLabel].join(" + ");
 }
 
+const pointerOptions: { input: PointerInput; label: string }[] = [
+  { input: { type: "mouseDown", button: "primary" }, label: "왼쪽 버튼 누름" },
+  { input: { type: "mouseDown", button: "secondary" }, label: "오른쪽 버튼 누름" },
+  { input: { type: "mouseDown", button: "middle" }, label: "가운데 버튼 누름" },
+  { input: { type: "mouseUp", button: "primary" }, label: "왼쪽 버튼 뗌" },
+  { input: { type: "mouseUp", button: "secondary" }, label: "오른쪽 버튼 뗌" },
+  { input: { type: "mouseUp", button: "middle" }, label: "가운데 버튼 뗌" },
+  { input: { type: "wheel", direction: "up" }, label: "위로 스크롤" },
+  { input: { type: "wheel", direction: "down" }, label: "아래로 스크롤" },
+  { input: { type: "wheel", direction: "left" }, label: "왼쪽으로 스크롤" },
+  { input: { type: "wheel", direction: "right" }, label: "오른쪽으로 스크롤" },
+  { input: { type: "buddyClick" }, label: "버디 클릭" },
+];
+function pointerInputs(trigger: Binding["trigger"]): PointerInput[] | undefined {
+  switch (trigger.type) {
+    case "mouseDown":
+    case "mouseUp":
+    case "wheel":
+    case "buddyClick":
+      return [trigger];
+    case "mouseInput":
+      return trigger.inputs;
+  }
+}
+function pointerInputKey(input: PointerInput) {
+  return "button" in input ? `${input.type}:${input.button}`
+    : input.type === "wheel" ? `wheel:${input.direction}` : input.type;
+}
+function supportsStopOnRelease(trigger: Binding["trigger"]) {
+  const inputs = pointerInputs(trigger);
+  return trigger.type === "keyDown" ||
+    (!!inputs?.length && inputs.every((input) => input.type === "mouseDown"));
+}
+function setPointerInputs(binding: Binding, inputs: PointerInput[]) {
+  binding.trigger = inputs.length === 1 ? inputs[0] : { type: "mouseInput", inputs };
+  if (binding.effect.type === "playAnimation" && !supportsStopOnRelease(binding.trigger)) {
+    binding.effect.stopOnRelease = false;
+  }
+  markDirty();
+  layout();
+}
+function pointerTriggerEditor(inputs: PointerInput[]) {
+  const keys = inputs.map(pointerInputKey);
+  return `<div class="key-capture-list">
+    <div class="card-heading"><strong>마우스·트랙패드 입력</strong><button type="button" class="small" data-action="add-pointer-input" ${inputs.length >= pointerOptions.length ? "disabled" : ""}>＋ 입력 추가</button></div>
+    <p class="hint">등록한 입력 중 하나가 들어오면 실행합니다. 스크롤에는 마우스 휠과 트랙패드의 두 손가락 스크롤이 포함됩니다.</p>
+    ${inputs.map((input, index) => `<div class="key-capture"><div class="form-grid">
+      <label class="field"><span>입력 ${index + 1}</span><select data-pointer-input="${index}">${pointerOptions.map(({ input: choice, label }) => {
+        const key = pointerInputKey(choice);
+        return keys.includes(key) && key !== keys[index] ? "" : option(key, label, keys[index]);
+      }).join("")}</select></label>
+      ${inputs.length > 1 ? `<button type="button" class="text-button danger" data-action="remove-pointer-input" data-id="${index}" aria-label="입력 ${index + 1} 삭제">삭제</button>` : ""}
+    </div></div>`).join("")}
+    ${inputs.some((input) => input.type === "buddyClick") ? '<p class="hint">버디 클릭은 버디 위에서 기본 버튼을 누른 뒤 드래그 없이 놓을 때 실행합니다.</p>' : ""}
+    ${inputs.some((input) => input.type === "mouseDown") && inputs.some((input) => input.type !== "mouseDown") ? '<p class="hint">버튼을 뗄 때 재생을 중단하려면 버튼 누름만 등록하세요.</p>' : ""}
+  </div>`;
+}
+
 function inputChoices(trigger: Binding["trigger"]): string[] {
   if ("code" in trigger) return [trigger, ...(trigger.alternatives ?? [])].map(keyCombinationLabel);
   if (trigger.type === "keySequence") return [
     trigger.keyword || (trigger.steps?.length ? "직접 지정한 키 순서" : ""),
     ...(trigger.alternatives ?? []).map(({ keyword }) => keyword),
   ];
-  return [];
+  return pointerInputs(trigger)?.map((input) =>
+    pointerOptions.find((choice) => pointerInputKey(choice.input) === pointerInputKey(input))!.label,
+  ) ?? [];
 }
 
 function keyboardTriggerEditor(trigger: KeyboardTrigger, path: string) {
@@ -903,16 +964,17 @@ function bindingAnimationEditor(effect: Exclude<Effect, { type: "faceCursor" }>,
   return `<label class="field"><span>표시할 애니메이션</span><select data-path="${path}.effect.animation">${placeholder}${names.map(name => option(name, name, current)).join("")}</select></label>${hint}`;
 }
 function bindingEditor(b: Binding) {
+  const pointer = pointerInputs(b.trigger);
   const t: any = b.trigger,
     e: any = b.effect,
     p = `project.bindings.${selectedBinding}`;
   return `<div class="card"><div class="card-heading"><h3>이벤트 편집</h3><div class="row-actions"><button class="small" data-action="reorder-binding" data-id="-1" ${selectedBinding === 0 ? "disabled" : ""}>↑ 위로</button><button class="small" data-action="reorder-binding" data-id="1" ${selectedBinding === doc!.project.bindings.length - 1 ? "disabled" : ""}>↓ 아래로</button><button class="text-button danger" data-action="remove-binding">삭제</button></div></div><div class="form-grid">${field("이벤트 ID", `${p}.id`)}<label class="field"><span>발생 조건</span><select id="trigger-type">${Object.entries(
     triggerNames,
   )
-    .map(([k, v]) => option(k, v, t.type))
+    .map(([k, v]) => option(k, v, triggerCategory(b.trigger)))
     .join(
       "",
-    )}</select></label></div>${"code" in b.trigger ? keyboardTriggerEditor(b.trigger, `${p}.trigger`) : ""}${t.type === "typingRate" ? `<div class="form-grid">${field("최소 입력 속도 (키/초)", `${p}.trigger.minKps`, "number", 'min="0.5" max="1000" step="any"')}<label class="field"><span>최대 입력 속도 (비우면 제한 없음)</span><input id="max-kps" type="number" min="0.5" max="1000" step="any" value="${t.maxKps ?? ""}"></label></div><p class="hint">최소값 이상, 최대값 미만에 적용합니다. 속도 구간은 서로 겹칠 수 없습니다.</p>` : ""}${b.trigger.type === "keySequence" ? keywordTriggerEditor(b.trigger, `${p}.trigger`) : ""}${["mouseDown", "mouseUp"].includes(t.type) ? `<label class="field"><span>마우스 버튼</span><select data-path="${p}.trigger.button">${["primary", "secondary", "middle"].map((v, i) => option(v, ["왼쪽", "오른쪽", "가운데"][i], t.button)).join("")}</select></label>` : ""}${t.type === "buddyClick" ? '<p class="hint">버디 위에서 기본 버튼을 누른 뒤 드래그 없이 놓으면 실행합니다.</p>' : ""}${t.type === "wheel" ? `<label class="field"><span>방향</span><select data-path="${p}.trigger.direction">${["up", "down", "left", "right"].map((v, i) => option(v, ["위", "아래", "왼쪽", "오른쪽"][i], t.direction)).join("")}</select></label>` : ""}${t.type === "whileKeyDown" ? `<label class="field"><span>동작 종류</span><select id="held-effect">${option("sustainAnimation", "키를 누르는 동안 애니메이션", e.type)}${option("move", "키를 누르는 동안 이동", e.type)}</select></label>` : ""}${
+    )}</select></label></div>${"code" in b.trigger ? keyboardTriggerEditor(b.trigger, `${p}.trigger`) : ""}${t.type === "typingRate" ? `<div class="form-grid">${field("최소 입력 속도 (키/초)", `${p}.trigger.minKps`, "number", 'min="0.5" max="1000" step="any"')}<label class="field"><span>최대 입력 속도 (비우면 제한 없음)</span><input id="max-kps" type="number" min="0.5" max="1000" step="any" value="${t.maxKps ?? ""}"></label></div><p class="hint">최소값 이상, 최대값 미만에 적용합니다. 속도 구간은 서로 겹칠 수 없습니다.</p>` : ""}${b.trigger.type === "keySequence" ? keywordTriggerEditor(b.trigger, `${p}.trigger`) : ""}${pointer ? pointerTriggerEditor(pointer) : ""}${t.type === "whileKeyDown" ? `<label class="field"><span>동작 종류</span><select id="held-effect">${option("sustainAnimation", "키를 누르는 동안 애니메이션", e.type)}${option("move", "키를 누르는 동안 이동", e.type)}</select></label>` : ""}${
     b.effect.type !== "faceCursor"
       ? bindingAnimationEditor(b.effect, p)
       : ""
@@ -1061,7 +1123,7 @@ function previewPanel() {
     .map((n) => option(n, n, selectedClip))
     .join(
       "",
-    )}</select></label><button class="small full-width" data-action="replay">↻ 처음부터 재생</button><div class="preview-divider"></div><h3>이벤트 테스트</h3><p class="hint">저장된 구성으로 실제 동작 엔진을 실행합니다.</p><label class="field"><span>테스트할 이벤트</span><select id="test-binding">${doc!.project.bindings.map((b, i) => option(String(i), `${triggerNames[b.trigger.type]} · ${b.id}`, String(selectedBinding))).join("")}</select></label>${choices.length > 1 ? `<label class="field"><span>테스트할 입력</span><select id="test-variant">${choices.map((label, index) => option(String(index), label || `입력 ${index + 1}`, "0")).join("")}</select></label>` : ""}<button class="small full-width" data-action="test-event" ${doc!.project.bindings.length ? "" : "disabled"}>이벤트 실행 →</button><div class="speed-test"><span>타이핑 속도</span><div><button data-action="test-speed" data-id="2">2 키/초</button><button data-action="test-speed" data-id="8">8 키/초</button></div><small>프로젝트의 측정 구간과 반응 타이밍으로 테스트합니다.</small></div><p class="preview-note">웹 미리보기는 선택한 테스트 입력만 사용합니다. 완성된 앱은 다른 앱에서 작업할 때도 반응합니다.</p><div class="preview-divider"></div><div class="project-facts"><span>리소스<strong>${Object.keys(doc!.character.resources ?? {}).length + Object.keys(doc!.character.sounds).length + 1}</strong></span><span>동작<strong>${clips().length}</strong></span><span>이벤트<strong>${doc!.project.bindings.length}</strong></span></div></div></aside>`;
+    )}</select></label><button class="small full-width" data-action="replay">↻ 처음부터 재생</button><div class="preview-divider"></div><h3>이벤트 테스트</h3><p class="hint">저장된 구성으로 실제 동작 엔진을 실행합니다.</p><label class="field"><span>테스트할 이벤트</span><select id="test-binding">${doc!.project.bindings.map((b, i) => option(String(i), `${triggerNames[triggerCategory(b.trigger)]} · ${b.id}`, String(selectedBinding))).join("")}</select></label>${choices.length > 1 ? `<label class="field"><span>테스트할 입력</span><select id="test-variant">${choices.map((label, index) => option(String(index), label || `입력 ${index + 1}`, "0")).join("")}</select></label>` : ""}<button class="small full-width" data-action="test-event" ${doc!.project.bindings.length ? "" : "disabled"}>이벤트 실행 →</button><div class="speed-test"><span>타이핑 속도</span><div><button data-action="test-speed" data-id="2">2 키/초</button><button data-action="test-speed" data-id="8">8 키/초</button></div><small>프로젝트의 측정 구간과 반응 타이밍으로 테스트합니다.</small></div><p class="preview-note">웹 미리보기는 선택한 테스트 입력만 사용합니다. 완성된 앱은 다른 앱에서 작업할 때도 반응합니다.</p><div class="preview-divider"></div><div class="project-facts"><span>리소스<strong>${Object.keys(doc!.character.resources ?? {}).length + Object.keys(doc!.character.sounds).length + 1}</strong></span><span>동작<strong>${clips().length}</strong></span><span>이벤트<strong>${doc!.project.bindings.length}</strong></span></div></div></aside>`;
 }
 function setPreviewWork(message = "") {
   previewWork = message;
@@ -1410,9 +1472,7 @@ function changeTrigger(type: string) {
     t.layout = "ko-KR-2set";
     t.timeoutMs = 5000;
   }
-  if (["mouseDown", "mouseUp"].includes(type)) t.button = "primary";
-  if (type === "wheel") t.direction = "up";
-  b.trigger = t;
+  b.trigger = type === "mouseInput" ? { type: "mouseDown", button: "primary" } : t;
   b.effect =
     ["typingRate", "whileKeyDown", "drag"].includes(type)
         ? {
@@ -1559,11 +1619,20 @@ async function testBinding(index: number, variant: number, request: number) {
     !doc!.project.defaults.input.keyboard
   )
     throw new Error("프로젝트 탭에서 키보드 감지를 먼저 켜주세요.");
-  if (
-    ["mouseDown", "mouseUp", "wheel"].includes(b.trigger.type) &&
-    !doc!.project.defaults.input.mouse
-  )
-    throw new Error("프로젝트 탭에서 마우스 감지를 먼저 켜주세요.");
+  const pointer = pointerInputs(b.trigger);
+  if (pointer) {
+    const input = pointer[variant];
+    if (!input) throw new Error("테스트할 마우스·트랙패드 입력을 선택하세요.");
+    if (input.type !== "buddyClick" && !doc!.project.defaults.input.mouse)
+      throw new Error("프로젝트 탭에서 마우스 감지를 먼저 켜주세요.");
+    const events = input.type === "mouseDown"
+      ? [
+          { atMs: 100, event: input },
+          { atMs: 800, event: { type: "mouseUp", button: input.button } },
+        ]
+      : [{ atMs: 100, event: input }];
+    return simulate(events, 2000, request);
+  }
   const t: any = b.trigger,
     events: { atMs: number; event: any }[] = [];
   let end = 2000;
@@ -1605,19 +1674,6 @@ async function testBinding(index: number, variant: number, request: number) {
       }
       break;
     }
-    case "mouseDown":
-    case "mouseUp":
-      events.push(
-        { atMs: 100, event: { type: "mouseDown", button: t.button } },
-        { atMs: 800, event: { type: "mouseUp", button: t.button } },
-      );
-      break;
-    case "wheel":
-      events.push({ atMs: 100, event: t });
-      break;
-    case "buddyClick":
-      events.push({ atMs: 100, event: { type: "buddyClick" } });
-      break;
     case "drag":
       events.push(
         { atMs: 100, event: { type: "dragStart" } },
@@ -2138,6 +2194,25 @@ async function performAction(name: string, id?: string) {
       layout();
       break;
     }
+    case "add-pointer-input": {
+      const binding = doc!.project.bindings[selectedBinding];
+      const inputs = pointerInputs(binding.trigger);
+      if (!inputs) break;
+      const used = new Set(inputs.map(pointerInputKey));
+      const available = pointerOptions.filter(({ input }) => !used.has(pointerInputKey(input)));
+      const next = available.find(({ input }) => input.type === inputs.at(-1)?.type) ?? available[0];
+      if (!next) break;
+      setPointerInputs(binding, [...inputs, next.input]);
+      document.querySelector<HTMLElement>(`[data-pointer-input="${inputs.length}"]`)?.focus();
+      break;
+    }
+    case "remove-pointer-input": {
+      const binding = doc!.project.bindings[selectedBinding];
+      const inputs = pointerInputs(binding.trigger);
+      if (!inputs || inputs.length < 2) break;
+      setPointerInputs(binding, inputs.filter((_, index) => index !== Number(id)));
+      break;
+    }
     case "add-keyword-choice": {
       const trigger = doc!.project.bindings[selectedBinding].trigger;
       if (trigger.type !== "keySequence") break;
@@ -2499,6 +2574,17 @@ app.addEventListener("change", (event) => {
   if (input.dataset.followBand !== undefined) {
     doc!.project.cursorFollow!.bands[Number(input.dataset.followBand)].animation = input.value || undefined;
     markDirty();
+    return;
+  }
+  if (input.dataset.pointerInput !== undefined) {
+    const index = Number(input.dataset.pointerInput);
+    const binding = doc!.project.bindings[selectedBinding];
+    const inputs = pointerInputs(binding.trigger);
+    const choice = pointerOptions.find(({ input: option }) => pointerInputKey(option) === input.value);
+    if (inputs?.[index] && choice) {
+      setPointerInputs(binding, inputs.map((value, i) => i === index ? choice.input : value));
+      document.querySelector<HTMLElement>(`[data-pointer-input="${index}"]`)?.focus();
+    }
     return;
   }
   if (input.hasAttribute("data-key-modifier-mode") || input.dataset.keyModifier ||

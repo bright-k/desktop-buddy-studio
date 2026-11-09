@@ -50,6 +50,32 @@ fn two_examples_validate_and_have_different_identity_and_content() {
     assert_eq!(cat.data.sequences.iter().flatten().count(), 1);
 }
 #[test]
+fn mouse_input_groups_require_distinct_inputs_and_consistent_release_behavior() {
+    let (mut project, character) = parts();
+    let binding = |inputs: serde_json::Value, stop_on_release: bool| {
+        serde_json::from_value(serde_json::json!({
+            "id":"pointer", "trigger":{"type":"mouseInput","inputs":inputs},
+            "effect":{"type":"playAnimation","animation":"click","stopOnRelease":stop_on_release}
+        }))
+        .unwrap()
+    };
+    let left = serde_json::json!({"type":"mouseDown","button":"primary"});
+    let wheel = serde_json::json!({"type":"wheel","direction":"up"});
+    for (inputs, stop_on_release, valid) in [
+        (serde_json::json!([left]), true, true),
+        (serde_json::json!([left, wheel]), false, true),
+        (serde_json::json!([left, wheel]), true, false),
+        (serde_json::json!([left, left]), false, false),
+        (serde_json::json!([]), false, false),
+    ] {
+        project.bindings = vec![binding(inputs, stop_on_release)];
+        assert_eq!(
+            validate_parts(project.clone(), character.clone()).is_ok(),
+            valid
+        );
+    }
+}
+#[test]
 fn semantic_errors_name_the_explicit_entry_file() {
     let directory = copy_example();
     let entry = directory.path().join("친구 설정.json");

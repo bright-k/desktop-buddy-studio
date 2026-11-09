@@ -23,6 +23,11 @@ pub enum InputEvent {
     Wheel {
         direction: WheelDirection,
     },
+    /// Both axes were reported by the same native scroll sample.
+    DiagonalWheel {
+        left: bool,
+        up: bool,
+    },
     CursorMove {
         x: f64,
         y: f64,

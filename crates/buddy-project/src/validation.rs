@@ -529,6 +529,7 @@ pub fn validate_parts(
                     | Trigger::MouseUp { .. }
                     | Trigger::BuddyClick
                     | Trigger::Wheel { .. }
+                    | Trigger::MouseInput { .. }
                     | Trigger::KeySequence { .. },
                 Effect::PlayAnimation { .. }
             ) | (Trigger::WhileKeyDown { .. }, Effect::Move { .. })
@@ -596,6 +597,13 @@ pub fn validate_parts(
                     }
                 }
             }
+            Trigger::MouseInput { inputs } => check(
+                (1..=11).contains(&inputs.len())
+                    && inputs.iter().collect::<HashSet<_>>().len() == inputs.len(),
+                file,
+                &format!("{path}.trigger.inputs"),
+                "mouse input requires 1 to 11 distinct inputs",
+            ),
             Trigger::TypingRate { min_kps, max_kps } => {
                 let max = max_kps.unwrap_or(f64::INFINITY);
                 check(
@@ -681,10 +689,10 @@ pub fn validate_parts(
                 check(
                     *priority <= 100 && *cooldown_ms <= 10000
                         && duration_ms.is_none_or(|d| (1..=60000).contains(&d))
-                        && (!*stop_on_release || matches!(binding.trigger, Trigger::KeyDown { .. } | Trigger::MouseDown { .. })),
+                        && (!*stop_on_release || binding.trigger.supports_stop_on_release()),
                     file,
                     &format!("{path}.effect"),
-                    "priority 0..100, cooldown 0..10000, duration 1..60000 ms; stopOnRelease requires keyDown/mouseDown",
+                    "priority 0..100, cooldown 0..10000, duration 1..60000 ms; stopOnRelease requires only keyDown or mouseDown inputs",
                 );
             }
             Effect::SustainAnimation {

@@ -1,5 +1,6 @@
 use crate::{
-    queue::EventSender, CaptureState, InputOptions, InputStatus, OverlayMouseRoute, PermissionState,
+    queue::EventSender, touchpad_scroll::ScrollSources, CaptureState, InputOptions, InputStatus,
+    OverlayMouseRoute, PermissionState,
 };
 use buddy_project::{MouseButton, WheelDirection};
 use buddy_runtime::InputEvent;
@@ -26,6 +27,9 @@ use windows_sys::Win32::{
     },
 };
 
+mod touchpad;
+use touchpad::Touchpads;
+
 struct Context {
     sender: EventSender,
     devices: BTreeMap<usize, BTreeMap<String, u16>>,
@@ -38,9 +42,13 @@ struct Context {
     rearm_keys: BTreeMap<String, u16>,
     overlay_mouse: OverlayMouseRoute,
     queue_epoch: u64,
+    touchpads: Touchpads,
+    scroll_sources: ScrollSources,
 }
 impl Context {
     unsafe fn rearm(&mut self) {
+        self.touchpads.reset();
+        self.scroll_sources = ScrollSources::default();
         self.overlay_mouse.reset();
         self.devices.clear();
         self.rearm_keys.clear();
@@ -132,7 +140,30 @@ unsafe extern "system" fn window_proc(
                             Some(RawPacket::Keyboard { device, key }) => {
                                 keyboard(context, device, key, received_at)
                             }
-                            Some(RawPacket::Mouse(data)) => mouse(context, data, received_at),
+                            Some(RawPacket::Mouse { device, data }) => {
+                                mouse(context, data, device.is_null(), received_at)
+                            }
+                            Some(RawPacket::Hid {
+                                device,
+                                reports,
+                                report_size,
+                            }) => {
+                                for report in reports.chunks_exact(report_size) {
+                                    if let Some(direction) =
+                                        context.touchpads.report(device, report, received_at)
+                                    {
+                                        if context
+                                            .scroll_sources
+                                            .accept_touchpad(direction, received_at)
+                                        {
+                                            context.sender.send_at(
+                                                InputEvent::Wheel { direction },
+                                                received_at,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             None => context.sender.reset(),
                         }
                     } else {
@@ -142,6 +173,7 @@ unsafe extern "system" fn window_proc(
             }
             WM_INPUT_DEVICE_CHANGE if wparam == 2 => {
                 context.devices.remove(&(lparam as usize));
+                context.touchpads.remove(lparam as usize);
                 context.sender.reset();
                 context.rearm();
             }
@@ -240,7 +272,7 @@ unsafe fn keyboard(context: &mut Context, device: usize, key: RAWKEYBOARD, recei
         }
     }
 }
-unsafe fn mouse(context: &mut Context, mouse: RAWMOUSE, received_at: Instant) {
+unsafe fn mouse(context: &mut Context, mouse: RAWMOUSE, anonymous: bool, received_at: Instant) {
     let data = mouse.Anonymous.Anonymous;
     let swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
     for (mask, pressed, physical) in [
@@ -284,29 +316,32 @@ unsafe fn mouse(context: &mut Context, mouse: RAWMOUSE, received_at: Instant) {
         }
     }
     let delta = data.usButtonData as i16;
-    if data.usButtonFlags & 0x800 != 0 && delta != 0 {
-        context.sender.send_at(
-            InputEvent::Wheel {
-                direction: if delta > 0 {
-                    WheelDirection::Right
-                } else {
-                    WheelDirection::Left
-                },
-            },
-            received_at,
-        );
-    }
-    if data.usButtonFlags & 0x400 != 0 && delta != 0 {
-        context.sender.send_at(
-            InputEvent::Wheel {
-                direction: if delta > 0 {
-                    WheelDirection::Up
-                } else {
-                    WheelDirection::Down
-                },
-            },
-            received_at,
-        );
+    if delta != 0 {
+        let directions = [
+            (RI_MOUSE_HWHEEL, WheelDirection::Right, WheelDirection::Left),
+            (RI_MOUSE_WHEEL, WheelDirection::Up, WheelDirection::Down),
+        ]
+        .map(|(flag, positive, negative)| {
+            let direction = if delta > 0 { positive } else { negative };
+            (u32::from(data.usButtonFlags) & flag != 0
+                && context
+                    .scroll_sources
+                    .accept_mouse(direction, received_at, anonymous))
+            .then_some(direction)
+        });
+        let scroll = match directions {
+            [Some(horizontal), Some(vertical)] => Some(InputEvent::DiagonalWheel {
+                left: horizontal == WheelDirection::Left,
+                up: vertical == WheelDirection::Up,
+            }),
+            [Some(direction), None] | [None, Some(direction)] => {
+                Some(InputEvent::Wheel { direction })
+            }
+            [None, None] => None,
+        };
+        if let Some(scroll) = scroll {
+            context.sender.send_at(scroll, received_at);
+        }
     }
     if (mouse.lLastX != 0 || mouse.lLastY != 0)
         && context.last_motion.elapsed() >= Duration::from_millis(34)
@@ -354,6 +389,8 @@ pub(crate) fn run(
         rearm_keys: BTreeMap::new(),
         overlay_mouse: OverlayMouseRoute::new(overlay),
         queue_epoch: 0,
+        touchpads: Touchpads::default(),
+        scroll_sources: ScrollSources::default(),
     });
     unsafe {
         let class: Vec<u16> = "DesktopBuddyRawInput\0".encode_utf16().collect();
@@ -392,7 +429,7 @@ pub(crate) fn run(
             .into_iter()
             .filter_map(|(enabled, usage)| enabled.then_some(usage))
             .collect();
-        let devices: Vec<_> = usages
+        let mut devices: Vec<_> = usages
             .iter()
             .map(|usage| RAWINPUTDEVICE {
                 usUsagePage: 1,
@@ -417,6 +454,18 @@ pub(crate) fn run(
             let _ = ready.send(());
             return;
         }
+        if options.mouse {
+            let device = RAWINPUTDEVICE {
+                usUsagePage: touchpad::DIGITIZER_PAGE,
+                usUsage: touchpad::TOUCHPAD_USAGE,
+                dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
+                hwndTarget: window,
+            };
+            // Registration failure on a touchpad must leave mouse and keyboard capture running.
+            if RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) != 0 {
+                devices.push(device);
+            }
+        }
         WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
         context.rearm();
         *status.lock().unwrap() =
@@ -427,18 +476,13 @@ pub(crate) fn run(
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-        let removals: Vec<_> = usages
-            .iter()
-            .map(|usage| RAWINPUTDEVICE {
-                usUsagePage: 1,
-                usUsage: *usage,
-                dwFlags: RIDEV_REMOVE,
-                hwndTarget: ptr::null_mut(),
-            })
-            .collect();
+        for device in &mut devices {
+            device.dwFlags = RIDEV_REMOVE;
+            device.hwndTarget = ptr::null_mut();
+        }
         RegisterRawInputDevices(
-            removals.as_ptr(),
-            removals.len() as u32,
+            devices.as_ptr(),
+            devices.len() as u32,
             size_of::<RAWINPUTDEVICE>() as u32,
         );
         WTSUnRegisterSessionNotification(window);
@@ -447,11 +491,22 @@ pub(crate) fn run(
     }
 }
 
-enum RawPacket {
-    Keyboard { device: usize, key: RAWKEYBOARD },
-    Mouse(RAWMOUSE),
+enum RawPacket<'a> {
+    Keyboard {
+        device: usize,
+        key: RAWKEYBOARD,
+    },
+    Mouse {
+        device: HANDLE,
+        data: RAWMOUSE,
+    },
+    Hid {
+        device: HANDLE,
+        reports: &'a [u8],
+        report_size: usize,
+    },
 }
-fn parse_packet(bytes: &[u8]) -> Option<RawPacket> {
+fn parse_packet(bytes: &[u8]) -> Option<RawPacket<'_>> {
     let offset = std::mem::offset_of!(RAWINPUT, data);
     if bytes.len() < size_of::<RAWINPUTHEADER>() {
         return None;
@@ -459,9 +514,7 @@ fn parse_packet(bytes: &[u8]) -> Option<RawPacket> {
     // A keyboard packet is smaller than the RAWINPUT union (40 vs 48 bytes on
     // x64). Never form a full RAWINPUT reference over a keyboard-sized buffer.
     let header = unsafe { ptr::read_unaligned(bytes.as_ptr().cast::<RAWINPUTHEADER>()) };
-    if header.dwSize as usize > bytes.len() {
-        return None;
-    }
+    let bytes = bytes.get(..header.dwSize as usize)?;
     match header.dwType {
         RIM_TYPEKEYBOARD if bytes.len() >= offset + size_of::<RAWKEYBOARD>() => {
             Some(RawPacket::Keyboard {
@@ -471,10 +524,24 @@ fn parse_packet(bytes: &[u8]) -> Option<RawPacket> {
                 },
             })
         }
-        RIM_TYPEMOUSE if bytes.len() >= offset + size_of::<RAWMOUSE>() => {
-            Some(RawPacket::Mouse(unsafe {
-                ptr::read_unaligned(bytes.as_ptr().add(offset).cast::<RAWMOUSE>())
-            }))
+        RIM_TYPEMOUSE if bytes.len() >= offset + size_of::<RAWMOUSE>() => Some(RawPacket::Mouse {
+            device: header.hDevice,
+            data: unsafe { ptr::read_unaligned(bytes.as_ptr().add(offset).cast::<RAWMOUSE>()) },
+        }),
+        RIM_TYPEHID => {
+            let data = bytes.get(offset..)?;
+            let report_size = u32::from_ne_bytes(data.get(..4)?.try_into().ok()?) as usize;
+            let count = u32::from_ne_bytes(data.get(4..8)?.try_into().ok()?) as usize;
+            if report_size == 0 || count == 0 {
+                return None;
+            }
+            let start = std::mem::offset_of!(RAWHID, bRawData);
+            let end = start.checked_add(report_size.checked_mul(count)?)?;
+            Some(RawPacket::Hid {
+                device: header.hDevice,
+                reports: data.get(start..end)?,
+                report_size,
+            })
         }
         _ => None,
     }
@@ -578,6 +645,33 @@ fn scan_code(scan: u16, flags: u16) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hid_packets_use_the_declared_report_size_and_count() {
+        let offset = std::mem::offset_of!(RAWINPUT, data);
+        let start = offset + std::mem::offset_of!(RAWHID, bRawData);
+        let mut bytes = vec![0u8; start + 6];
+        let header = RAWINPUTHEADER {
+            dwType: RIM_TYPEHID,
+            dwSize: bytes.len() as u32,
+            ..Default::default()
+        };
+        unsafe { ptr::write_unaligned(bytes.as_mut_ptr().cast::<RAWINPUTHEADER>(), header) };
+        bytes[offset..offset + 4].copy_from_slice(&3u32.to_ne_bytes());
+        bytes[offset + 4..offset + 8].copy_from_slice(&2u32.to_ne_bytes());
+        bytes[start..].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        assert!(matches!(
+            parse_packet(&bytes),
+            Some(RawPacket::Hid {
+                reports: [1, 2, 3, 4, 5, 6],
+                report_size: 3,
+                ..
+            })
+        ));
+        bytes[offset + 4..offset + 8].copy_from_slice(&u32::MAX.to_ne_bytes());
+        assert!(parse_packet(&bytes).is_none());
+    }
+
     #[test]
     fn keyboard_sized_packet_is_valid_and_truncation_is_rejected() {
         let offset = std::mem::offset_of!(RAWINPUT, data);

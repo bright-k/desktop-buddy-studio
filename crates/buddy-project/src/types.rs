@@ -372,6 +372,10 @@ pub enum Trigger {
     Wheel {
         direction: WheelDirection,
     },
+    MouseInput {
+        #[schemars(length(min = 1, max = 11))]
+        inputs: Vec<PointerInput>,
+    },
     CursorMove,
     BuddyClick,
     Drag,
@@ -396,6 +400,19 @@ pub enum Trigger {
 }
 
 impl Trigger {
+    pub fn supports_stop_on_release(&self) -> bool {
+        match self {
+            Self::KeyDown { .. } | Self::MouseDown { .. } => true,
+            Self::MouseInput { inputs } => {
+                !inputs.is_empty()
+                    && inputs
+                        .iter()
+                        .all(|input| matches!(input, PointerInput::MouseDown { .. }))
+            }
+            _ => false,
+        }
+    }
+
     pub fn key_conditions(&self) -> impl Iterator<Item = (&str, Option<&[KeyModifier]>)> {
         let (primary, alternatives) = match self {
             Self::KeyDown {
@@ -565,20 +582,29 @@ pub enum Retrigger {
     Restart,
     Ignore,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum MouseButton {
     Primary,
     Secondary,
     Middle,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum WheelDirection {
     Up,
     Down,
     Left,
     Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PointerInput {
+    MouseDown { button: MouseButton },
+    MouseUp { button: MouseButton },
+    Wheel { direction: WheelDirection },
+    BuddyClick,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub enum KeyboardLayout {
@@ -757,6 +783,7 @@ pub fn typescript_declarations() -> String {
         Binding::decl(),
         SoundCue::decl(),
         Trigger::decl(),
+        PointerInput::decl(),
         KeyModifier::decl(),
         KeyChord::decl(),
         KeywordAlternative::decl(),

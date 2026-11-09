@@ -909,6 +909,187 @@ fn typing_aggregation_is_bounded_even_without_rate_bindings_and_reports_only_cou
 }
 
 #[test]
+fn grouped_pointer_inputs_share_cooldown_and_keep_legacy_wheel_matching() {
+    let mut runtime = runtime(json!([
+        {"id":"mixed","trigger":{"type":"mouseInput","inputs":[
+            {"type":"mouseDown","button":"middle"},
+            {"type":"wheel","direction":"up"},
+            {"type":"buddyClick"}
+        ]},"effect":{"type":"playAnimation","animation":"jump","cooldownMs":1000}},
+        {"id":"legacy","trigger":{"type":"wheel","direction":"down"},
+            "effect":{"type":"playAnimation","animation":"click"}}
+    ]));
+    runtime.handle(
+        100,
+        InputEvent::MouseDown {
+            button: MouseButton::Middle,
+        },
+    );
+    let first = runtime.state().action_instance_id;
+    assert_eq!(runtime.state().animation, "jump");
+    runtime.handle(
+        200,
+        InputEvent::Wheel {
+            direction: WheelDirection::Up,
+        },
+    );
+    assert_eq!(runtime.state().action_instance_id, first);
+    runtime.handle(
+        1100,
+        InputEvent::Wheel {
+            direction: WheelDirection::Up,
+        },
+    );
+    assert_eq!(runtime.state().animation, "jump");
+    assert_ne!(runtime.state().action_instance_id, first);
+    runtime.handle(
+        2100,
+        InputEvent::Wheel {
+            direction: WheelDirection::Down,
+        },
+    );
+    assert_eq!(runtime.state().animation, "click");
+    runtime.handle(3100, InputEvent::BuddyClick);
+    assert_eq!(runtime.state().animation, "jump");
+}
+
+#[test]
+fn a_diagonal_scroll_starts_a_matching_group_once_per_sample() {
+    let mut runtime = runtime(json!([{
+        "id":"scroll","trigger":{"type":"mouseInput","inputs":[
+            {"type":"wheel","direction":"right"},
+            {"type":"wheel","direction":"down"}
+        ]},"effect":{"type":"playAnimation","animation":"click","retrigger":"restart"}
+    }]));
+    let diagonal = InputEvent::DiagonalWheel {
+        left: false,
+        up: false,
+    };
+    let initial = runtime.state().action_instance_id;
+    runtime.handle(100, diagonal.clone());
+    let first = runtime.state().action_instance_id;
+    assert_eq!(runtime.state().animation, "click");
+    assert_eq!(first, initial + 1);
+    runtime.handle(100, diagonal);
+    assert_eq!(runtime.state().action_instance_id, first + 1);
+}
+
+#[test]
+fn a_diagonal_scroll_does_not_fall_through_after_starting_its_group() {
+    for (retrigger, cooldown_ms) in [("ignore", 0), ("restart", 200)] {
+        let mut runtime = runtime(json!([
+            {"id":"scroll","trigger":{"type":"mouseInput","inputs":[
+                {"type":"wheel","direction":"right"},
+                {"type":"wheel","direction":"down"}
+            ]},"effect":{"type":"playAnimation","animation":"click","priority":100,
+                "interruption":"replace","retrigger":retrigger,"cooldownMs":cooldown_ms}},
+            {"id":"vertical","trigger":{"type":"wheel","direction":"down"},
+                "effect":{"type":"playAnimation","animation":"jump","priority":10}}
+        ]));
+        runtime.handle(
+            100,
+            InputEvent::DiagonalWheel {
+                left: false,
+                up: false,
+            },
+        );
+        assert_eq!(
+            runtime.state().animation,
+            "click",
+            "{retrigger}, {cooldown_ms} ms"
+        );
+        assert_eq!(runtime.performance(100).reactions_started, 1);
+
+        runtime.handle(
+            101,
+            InputEvent::Wheel {
+                direction: WheelDirection::Down,
+            },
+        );
+        assert_eq!(runtime.state().animation, "jump");
+    }
+}
+
+#[test]
+fn a_rejected_group_input_cannot_change_the_button_that_ends_playback() {
+    let mut data = data(json!([{
+        "id":"press","trigger":{"type":"mouseInput","inputs":[
+            {"type":"mouseDown","button":"primary"},
+            {"type":"mouseDown","button":"secondary"}
+        ]},"effect":{"type":"playAnimation","animation":"click","priority":10,
+            "stopOnRelease":true,"durationMs":1000}
+    }]));
+    data.project.cursor_follow = Some(
+        serde_json::from_value(json!({
+            "enabled":true,"priority":100,"stopDistanceDip":0,
+            "bands":[{"minDistanceDip":0,"speedDipPerSecond":100,"animation":"walk"}]
+        }))
+        .unwrap(),
+    );
+    let mut runtime = Runtime::new(
+        validate_parts(data.project, data.character).unwrap(),
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        },
+        Point { x: 100.0, y: 100.0 },
+        Point { x: 100.0, y: 100.0 },
+    );
+    runtime.handle(
+        100,
+        InputEvent::MouseDown {
+            button: MouseButton::Primary,
+        },
+    );
+    runtime.handle(110, InputEvent::CursorMove { x: 950.0, y: 150.0 });
+    runtime.handle(
+        120,
+        InputEvent::MouseDown {
+            button: MouseButton::Secondary,
+        },
+    );
+    assert_eq!(runtime.performance(120).ignored_priority, 1);
+
+    runtime.handle(
+        130,
+        InputEvent::MouseUp {
+            button: MouseButton::Primary,
+        },
+    );
+    assert_eq!(runtime.state().source, AnimationSource::CursorFollow);
+    assert_eq!(runtime.performance(130).reactions_cancelled, 1);
+}
+
+#[test]
+fn diagonal_scroll_keeps_axis_order_for_distinct_bindings() {
+    let mut runtime = runtime(json!([
+        {"id":"horizontal","trigger":{"type":"wheel","direction":"right"},
+            "effect":{"type":"playAnimation","animation":"click","interruption":"finish","priority":10}},
+        {"id":"vertical","trigger":{"type":"wheel","direction":"down"},
+            "effect":{"type":"playAnimation","animation":"jump","priority":100}}
+    ]));
+    runtime.handle(
+        100,
+        InputEvent::DiagonalWheel {
+            left: false,
+            up: false,
+        },
+    );
+    assert_eq!(runtime.state().animation, "click");
+
+    runtime.handle(
+        2000,
+        InputEvent::DiagonalWheel {
+            left: true,
+            up: false,
+        },
+    );
+    assert_eq!(runtime.state().animation, "jump");
+}
+
+#[test]
 fn buddy_click_is_distinct_from_global_mouse_events_and_drag() {
     let mut runtime = runtime(json!([
         {"id":"global","trigger":{"type":"mouseDown","button":"primary"},"effect":{"type":"playAnimation","animation":"jump"}},
