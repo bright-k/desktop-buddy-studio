@@ -1,0 +1,256 @@
+{
+  "$defs": {
+    "Animation": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorX": {
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "fps": {
+          "default": 12,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frames": {
+          "default": [],
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "loop": {
+          "type": "boolean"
+        },
+        "regions": {
+          "items": {
+            "$ref": "#/$defs/FrameRegion"
+          },
+          "type": "array"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scalePercent": {
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 50,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sourceFacing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceFacing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "useSourceTiming": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "loop"
+      ],
+      "type": "object"
+    },
+    "FrameRegion": {
+      "additionalProperties": false,
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "x": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "y": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "Point": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "Resource": {
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "image"
+      ],
+      "type": "object"
+    },
+    "Sheet": {
+      "additionalProperties": false,
+      "properties": {
+        "frameCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frameHeight": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frameWidth": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "frameWidth",
+        "frameHeight",
+        "frameCount"
+      ],
+      "type": "object"
+    },
+    "SoundResource": {
+      "additionalProperties": false,
+      "properties": {
+        "audio": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "audio"
+      ],
+      "type": "object"
+    },
+    "SourceFacing": {
+      "enum": [
+        "left",
+        "right"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "anchor": {
+      "$ref": "#/$defs/Point"
+    },
+    "animations": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Animation"
+      },
+      "type": "object"
+    },
+    "defaultAnimation": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "image": {
+      "type": "string"
+    },
+    "license": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "resources": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Resource"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "schemaVersion": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sheet": {
+      "$ref": "#/$defs/Sheet"
+    },
+    "sounds": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SoundResource"
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "license",
+    "image",
+    "sheet",
+    "anchor",
+    "defaultAnimation",
+    "animations"
+  ],
+  "title": "Character",
+  "type": "object"
+}

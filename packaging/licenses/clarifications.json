@@ -1,0 +1,290 @@
+{
+  "formatVersion": 1,
+  "packages": [
+    {
+      "name": "alloc-stdlib",
+      "version": "0.3.0",
+      "license": "BSD-3-Clause",
+      "source": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+      "file": "supplemental/c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae.txt",
+      "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+    },
+    {
+      "name": "block2",
+      "version": "0.6.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/b4167b582b2f75f9a1be75495c41b765344fd03c/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "brotli-decompressor",
+      "version": "6.3.0",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/dropbox/rust-brotli-decompressor/8d921076cbd51dd98525eb2c67505ad763020ef0/LICENSE",
+      "file": "supplemental/c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae.txt",
+      "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+      "kind": "additional-upstream-terms"
+    },
+    {
+      "name": "cargo_toml",
+      "version": "1.0.1",
+      "license": "MIT",
+      "source": "https://gitlab.com/lib.rs/cargo_toml/-/raw/57e06c4f4eb702469db46ef1aa144b9d11e63171/LICENSE",
+      "file": "supplemental/ee874098519e956c23a3c5c7e20581f8e9b1d70aa05eb178f983be9775090a2f.txt",
+      "sha256": "ee874098519e956c23a3c5c7e20581f8e9b1d70aa05eb178f983be9775090a2f"
+    },
+    {
+      "name": "dispatch2",
+      "version": "0.3.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "dpi",
+      "version": "0.1.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/rust-windowing/winit/587ade844dfb0eada3696ba1cb263c66eea80581/dpi/LICENSE",
+      "file": "supplemental/1e881ecf2862d01e6e5bc2b861e46886d2a6fb01499c0c508a209a7271b13cf2.txt",
+      "sha256": "1e881ecf2862d01e6e5bc2b861e46886d2a6fb01499c0c508a209a7271b13cf2",
+      "kind": "upstream-license-text"
+    },
+    {
+      "name": "dunce",
+      "version": "1.0.5",
+      "license": "Apache-2.0",
+      "source": "https://gitlab.com/kornelski/dunce/-/raw/1ee29a83526c9f4c3618e1335f0454c878a54dcf/LICENSE",
+      "file": "supplemental/a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499.txt",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    {
+      "name": "objc2",
+      "version": "0.6.5",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/d7d2fa23ceaa5e6096c923b081040e5d81b3b9df/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "objc2-app-kit",
+      "version": "0.3.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "objc2-core-foundation",
+      "version": "0.3.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "objc2-core-graphics",
+      "version": "0.3.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "objc2-encode",
+      "version": "4.1.0",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "objc2-exception-helper",
+      "version": "0.1.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "objc2-foundation",
+      "version": "0.3.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "objc2-quartz-core",
+      "version": "0.3.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "objc2-web-kit",
+      "version": "0.3.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+      "file": "supplemental/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "kind": "declaration-and-source"
+    },
+    {
+      "name": "ts-rs",
+      "version": "11.1.0",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/Aleph-Alpha/ts-rs/1dce5297090804082e9639d2b7d851ba815aa359/LICENSE",
+      "file": "supplemental/db7f7f8e7236a2d0b41b855b2501b7b913caebbcda6ce498637a304ad1706ce1.txt",
+      "sha256": "db7f7f8e7236a2d0b41b855b2501b7b913caebbcda6ce498637a304ad1706ce1"
+    },
+    {
+      "name": "ts-rs-macros",
+      "version": "11.1.0",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/Aleph-Alpha/ts-rs/1dce5297090804082e9639d2b7d851ba815aa359/LICENSE",
+      "file": "supplemental/db7f7f8e7236a2d0b41b855b2501b7b913caebbcda6ce498637a304ad1706ce1.txt",
+      "sha256": "db7f7f8e7236a2d0b41b855b2501b7b913caebbcda6ce498637a304ad1706ce1"
+    },
+    {
+      "name": "webview2-com",
+      "version": "0.39.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+      "file": "supplemental/0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73.txt",
+      "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+    },
+    {
+      "name": "webview2-com-macros",
+      "version": "0.8.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+      "file": "supplemental/0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73.txt",
+      "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+    },
+    {
+      "name": "webview2-com-sys",
+      "version": "0.39.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+      "file": "supplemental/0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73.txt",
+      "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+    },
+    {
+      "name": "windows",
+      "version": "0.62.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-collections",
+      "version": "0.3.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-core",
+      "version": "0.62.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-future",
+      "version": "0.3.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-implement",
+      "version": "0.60.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-interface",
+      "version": "0.59.3",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-link",
+      "version": "0.2.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/d468916ac27a36fb8a12bafc1bf5c0ec2fe92238/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-numerics",
+      "version": "0.3.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-result",
+      "version": "0.4.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-strings",
+      "version": "0.5.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.61.2",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-threading",
+      "version": "0.2.1",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/d468916ac27a36fb8a12bafc1bf5c0ec2fe92238/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "name": "windows-version",
+      "version": "0.1.7",
+      "license": "MIT",
+      "source": "https://raw.githubusercontent.com/microsoft/windows-rs/32c3144490c016fe496a0aed769bce60987a2e9d/license-mit",
+      "file": "supplemental/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    }
+  ]
+}
