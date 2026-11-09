@@ -91,9 +91,9 @@ export function tarReports(archive) {
       if (size > 4 * 1024 * 1024) fail();
       reports.push({ name, value: JSON.parse(tar.subarray(start, start + size).toString("utf8")) });
     }
-    if (/^[^/]+\/[^/]+\.(exe|dmg)$/.test(name) && !name.slice(name.indexOf("/") + 1).startsWith("._") && [0, 48].includes(h[156]))
+    if (/^[^/]+\/[^/]+(?:\.(exe|dmg)|_windows-x64\.zip)$/.test(name) && !name.slice(name.indexOf("/") + 1).startsWith("._") && [0, 48].includes(h[156]))
       installers.push({ name: name.slice(name.indexOf("/") + 1), bytes: tar.subarray(start, start + size) });
-    if (/^[^/]+\/Installation Guide\.(pdf|html|png|jpe?g)$/.test(name) && [0, 48].includes(h[156]))
+    if (/^[^/]+\/(?:Windows )?Installation Guide\.(pdf|html|png|jpe?g)$/.test(name) && [0, 48].includes(h[156]))
       guides.push({ name: name.slice(name.indexOf("/") + 1), bytes: tar.subarray(start, start + size) });
     at = start + Math.ceil(size / 512) * 512;
   }
@@ -113,6 +113,8 @@ export function verifyArtifact(zip, artifact, job, target) {
       report.identifier !== job.projectId || report.target !== target || report.development !== true || report.staticInspection !== "passed" ||
       receipt.templateHash !== job.github.engineHash || report.templateHash !== job.github.engineHash) fail();
   if (guides.length > 1) fail();
+  const windowsPackages = installers.filter((file) => file.name.endsWith("_windows-x64.zip"));
+  if (windowsPackages.length > 1 || (windowsPackages.length && target !== "windows-x64")) fail();
   for (const installer of [...installers, ...guides]) {
     const expected = report.artifacts?.find((a) => a.path === installer.name);
     if (!expected || expected.bytes !== installer.bytes.length || expected.sha256 !== sha256(installer.bytes) ||

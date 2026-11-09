@@ -606,6 +606,14 @@
           "minimum": 0,
           "type": "integer"
         },
+        "useDefaultBackground": {
+          "default": false,
+          "type": "boolean"
+        },
+        "useDefaultGuide": {
+          "default": false,
+          "type": "boolean"
+        },
         "width": {
           "default": 660,
           "format": "uint32",

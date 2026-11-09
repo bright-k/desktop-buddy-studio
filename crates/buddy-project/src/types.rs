@@ -179,6 +179,8 @@ pub struct MacosDmg {
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guide: Option<String>,
+    pub use_default_background: bool,
+    pub use_default_guide: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guide_position: Option<DmgIconPosition>,
     pub width: u32,
@@ -191,6 +193,8 @@ impl Default for MacosDmg {
         Self {
             background: None,
             guide: None,
+            use_default_background: false,
+            use_default_guide: false,
             guide_position: None,
             width: 660,
             height: 420,
@@ -201,6 +205,17 @@ impl Default for MacosDmg {
 }
 impl MacosDmg {
     pub const ICON_BOTTOM_MARGIN: u32 = 128;
+
+    pub fn installer_default() -> Self {
+        serde_json::from_str(include_str!(
+            "../../../packaging/macos/defaults/layout.json"
+        ))
+        .expect("built-in macOS installer layout")
+    }
+
+    pub fn includes_guide(&self) -> bool {
+        self.guide.is_some() || self.use_default_guide
+    }
 
     fn guide_position_fits(&self, position: DmgIconPosition) -> bool {
         position.x >= 72
@@ -217,6 +232,21 @@ impl MacosDmg {
     pub fn guide_position(&self) -> Option<DmgIconPosition> {
         if let Some(position) = self.guide_position {
             return self.guide_position_fits(position).then_some(position);
+        }
+        if self.use_default_guide
+            && self.app_position.y == self.applications_position.y
+            && self.app_position.x < self.applications_position.x
+        {
+            let gap = self.applications_position.x - self.app_position.x;
+            if let Some(x) = self.app_position.x.checked_sub(gap) {
+                let position = DmgIconPosition {
+                    x,
+                    y: self.app_position.y,
+                };
+                if self.guide_position_fits(position) {
+                    return Some(position);
+                }
+            }
         }
         let right = self.width.checked_sub(72)?;
         // Leave room for Finder's title bar and the icon label.

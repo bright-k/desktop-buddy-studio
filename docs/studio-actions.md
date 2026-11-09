@@ -6,7 +6,7 @@
 2. ‘워크플로 준비’를 누르면 기본 브랜치에 `.github/workflows/studio-build.yml` 한 파일을 추가/업데이트한다. 기존 파일의 blob SHA로 충돌을 검사한다. 브랜치 보호·조직 정책을 우회하지 않는다.
 3. 저장소 공개 여부와 전송 범위를 확인하고 **업로드하고 두 플랫폼 빌드**를 누른다. 변경은 먼저 검증·저장한다. 저장된 정의·참조 원본·아이콘·라이선스·고정 엔진을 별도 브랜치에 보낸다. 임시 편집·다른 프로젝트·이전 빌드·자격 증명·입력 이력은 포함하지 않는다.
 4. macOS arm64·Windows x64 작업을 함께 실행한다. Studio에서 플랫폼별 단계·성공·실패·취소를 확인하고 상세 로그는 Actions 링크로 연다. 편집을 계속해도 실행 중인 빌드 구성은 고정된다.
-5. 성공한 플랫폼의 결과를 검증한 뒤 `builds/actions-<jobId>/`에 보관한다. Windows `.exe`·macOS DMG와 전체 tar.gz·영수증·보고서를 내려받는다. 한 플랫폼만 성공해도 보존한다.
+5. 성공한 플랫폼의 결과를 검증한 뒤 `builds/actions-<jobId>/`에 보관한다. Windows 설치 ZIP, macOS DMG, 전체 tar.gz와 영수증·보고서를 내려받는다. 한 플랫폼만 성공해도 보존한다.
 
 공개 저장소는 원본 리소스도 공개된다. 비공개 리소스는 접근을 제한한 저장소를 선택한다. 비공개 저장소의 실행 시간·보관은 GitHub 요금제 한도를 따른다. Studio는 저장소 공개 범위·과금·조직 정책을 변경하지 않는다.
 
@@ -24,7 +24,7 @@ API origin은 `https://api.github.com`으로 고정한다. artifact 리디렉션
 
 기존 엔진 branch는 전체 파일 수·모드·blob hash가 일치해야 재사용한다. 동일 요청 branch의 다른 tree는 덮어쓰지 않는다. `.gitattributes`로 원격 체크아웃의 줄바꿈 변환을 막는다. workflow는 엔진 manifest SHA-256·개별 파일 hash·요청 정보를 먼저 검증하고, CLI는 project hash가 다르면 중단한다. 프로젝트가 제공한 스크립트는 실행하지 않는다. checkout 자격 증명은 남기지 않고 workflow 기본 권한은 contents:read다.
 
-가져오기는 artifact digest → ZIP CRC·크기·허용 파일명 → job·플랫폼·project/engine hash 영수증 → tar 내부 source.json/build-report.json → `.exe`·DMG의 보고서 SHA-256 순으로 검사한다. ZIP/tar 경로를 그대로 파일시스템에 풀지 않는다. 응답·디코딩 상한은 각각 256 MiB다. `.app` 권한은 tar.gz 안에 보존한다.
+가져오기는 artifact digest → ZIP CRC·크기·허용 파일명 → job·플랫폼·project/engine hash 영수증 → tar 내부 source.json/build-report.json → 설치 파일·Windows 설치 ZIP·가이드의 보고서 SHA-256 순으로 검사한다. ZIP/tar 경로를 그대로 파일시스템에 풀지 않는다. 응답·디코딩 상한은 각각 256 MiB다. `.app` 권한은 tar.gz 안에 보존한다.
 
 Windows Builder는 Node 도구에 일반 드라이브/UNC 경로를 전달한다. MSVC의 긴 출력 경로 제한을 피하려고 중간 Cargo 캐시만 짧은 임시 폴더 아래에 두며 엔진·target·출력 폴더 hash로 격리한다. `BUDDY_BUILD_CACHE`로 짧은 캐시 루트를 지정할 수 있다. 최종 앱·보고서는 프로젝트 출력 폴더에 유지한다.
 

@@ -5,7 +5,7 @@ mod edit;
 mod hit_test;
 mod navigation;
 mod preferences;
-use buddy_platform::{InputOptions, InputSession, WakeSignal};
+use buddy_platform::{InputOptions, InputSession, LaunchAtLogin, WakeSignal};
 use buddy_project::{Anchor, LoadedProject, Point};
 use buddy_runtime::*;
 use display::Display;
@@ -68,6 +68,7 @@ struct Host {
     controller: Mutex<Controller>,
     preferences: Mutex<PreferenceOverrides>,
     store: Mutex<PreferencesStore>,
+    launch_at_login: LaunchAtLogin,
     input_status: Mutex<InputStatus>,
     channel: Mutex<Option<Channel<WireState>>>,
     sequence: AtomicU32,
@@ -375,6 +376,18 @@ impl Host {
             self.save(prefs)?;
         }
         self.place_on_display(display, position, size, None);
+        if all
+            && matches!(
+                self.launch_at_login.status(),
+                LaunchAtLoginStatus::On
+                    | LaunchAtLoginStatus::NeedsApproval
+                    | LaunchAtLoginStatus::PathChanged
+            )
+        {
+            self.launch_at_login.set_enabled(false).map_err(|error| {
+                format!("다른 설정은 초기화했습니다. 자동 실행은 끄지 못했습니다. {error}")
+            })?;
+        }
         Ok(())
     }
     fn refresh_displays(&self, app: &tauri::AppHandle) {
@@ -599,6 +612,7 @@ fn get_runtime_status(
         movement_enabled: c.movement,
         cursor_follow: c.cursor_follow,
         always_on_top: c.always_on_top,
+        launch_at_login: host.launch_at_login.status(),
         scale: c.scale,
         input,
         notice,
@@ -610,6 +624,16 @@ fn get_runtime_status(
             position,
         },
     })
+}
+#[tauri::command]
+fn set_launch_at_login(
+    window: WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    enabled: bool,
+) -> Result<(), String> {
+    require(&window, "settings")?;
+    let _operation = host.edit_operation.lock().unwrap();
+    host.launch_at_login.set_enabled(enabled)
 }
 #[tauri::command]
 fn reset_performance_session(
@@ -1120,7 +1144,7 @@ fn start_worker(app: tauri::AppHandle, host: Arc<Host>, overlay_id: usize) {
         .expect("runtime worker creation");
 }
 
-fn project_path(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn project_path(app: &tauri::AppHandle) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
     #[cfg(feature = "preview")]
     {
         let mut args = std::env::args_os().skip(1);
@@ -1132,21 +1156,22 @@ fn project_path(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::E
             return Err("지원하지 않는 미리보기 인수입니다.".into());
         }
         let _ = app;
-        Ok(PathBuf::from(path))
+        Ok((PathBuf::from(path), false))
     }
     #[cfg(not(feature = "preview"))]
     {
         if let Some(resource) = buddy_project::bundled_project_path(&app.path().resource_dir()?)? {
-            return Ok(resource);
+            return Ok((resource, true));
         }
         if !cfg!(debug_assertions) {
             return Err("Bundled project is missing".into());
         }
-        Ok(std::env::var_os("BUDDY_PROJECT")
+        let path = std::env::var_os("BUDDY_PROJECT")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../examples/typing-cat")
-            }))
+            });
+        Ok((path, false))
     }
 }
 
@@ -1174,12 +1199,12 @@ fn handle_buddy_menu(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         "keyboard" | "mouse" | "movement" | "cursor-follow" => {
             host.toggle_source(event.id.as_ref())
         }
-        "reset-position" | "reset-all" => {
+        "reset-position" => {
             if host.controller.lock().unwrap().mode == Mode::Editing {
                 host.finish_edit(false, None)
-                    .and_then(|_| host.reset_preferences(event.id.as_ref() == "reset-all"))
+                    .and_then(|_| host.reset_preferences(false))
             } else {
-                host.reset_preferences(event.id.as_ref() == "reset-all")
+                host.reset_preferences(false)
             }
         }
         "pause" => {
@@ -1217,6 +1242,7 @@ fn main() {
             ack_character_frame,
             set_character_hit_mask,
             get_runtime_status,
+            set_launch_at_login,
             reset_performance_session,
             export_runtime_diagnostics,
             request_input_access,
@@ -1232,9 +1258,11 @@ fn main() {
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            let project = project_path(app.handle())?;
+            let (project, bundled_project) = project_path(app.handle())?;
             let prepared = app.path().resource_dir()?.join("prepared-render");
             let loaded = buddy_project::load_project_with_prepared(project, &prepared)?;
+            let launch_at_login =
+                LaunchAtLogin::new(bundled_project, &loaded.data.project.product.identifier);
             let preview = cfg!(feature = "preview") || cfg!(debug_assertions);
             let identity = buddy_runtime::preference_identity(
                 &loaded.data.project.product.identifier,
@@ -1325,6 +1353,7 @@ fn main() {
                 controller: Mutex::new(controller),
                 preferences: Mutex::new(prefs),
                 store: Mutex::new(store),
+                launch_at_login,
                 input_status: Mutex::new(InputOptions::default().status(
                     buddy_platform::permission_state(),
                     CaptureState::Stopped,
@@ -1423,7 +1452,7 @@ fn main() {
             let movement = CheckMenuItem::with_id(
                 app,
                 "movement",
-                "키 유지 이동",
+                "키를 누른 채 이동",
                 true,
                 host.controller.lock().unwrap().movement,
                 None::<&str>,
@@ -1446,11 +1475,7 @@ fn main() {
             ] {
                 menu.append(item)?;
             }
-            for (id, label) in [
-                ("reset-position", "위치 초기화"),
-                ("reset-all", "전체 설정 초기화 · 입력 끄기"),
-                ("quit", "종료"),
-            ] {
+            for (id, label) in [("reset-position", "위치 초기화"), ("quit", "종료")] {
                 menu.append(&MenuItem::with_id(app, id, label, true, None::<&str>)?)?;
             }
             app.manage(TrayControls {
@@ -1571,6 +1596,7 @@ mod drag_tests {
             controller: Mutex::new(controller),
             preferences: Mutex::new(prefs),
             store: Mutex::new(store),
+            launch_at_login: LaunchAtLogin::default(),
             input_status: Mutex::new(InputOptions::default().status(
                 PermissionState::NotRequired,
                 CaptureState::Stopped,

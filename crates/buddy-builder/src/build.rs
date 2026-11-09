@@ -192,7 +192,14 @@ pub fn build(
         start_stage("compile-and-package", started, &mut stages, &mut progress);
         let cache = build_cache_directory(&output, options.target);
         fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
-        let dmg_layout = snapshot.data.project.build.macos_dmg.as_ref();
+        let default_dmg = buddy_project::MacosDmg::installer_default();
+        let dmg_layout = snapshot
+            .data
+            .project
+            .build
+            .macos_dmg
+            .as_ref()
+            .unwrap_or(&default_dmg);
         let mut package_command = Command::new("node");
         package_command.arg(&tauri).args([
             "build",
@@ -200,11 +207,7 @@ pub fn build(
             options.target.rust_target(),
             "--bundles",
             if options.target == Target::MacosArm64 {
-                if dmg_layout.is_some() {
-                    "app"
-                } else {
-                    "app,dmg"
-                }
+                "app"
             } else {
                 "nsis"
             },
@@ -227,25 +230,37 @@ pub fn build(
             } else {
                 "release/bundle"
             });
-        let guide = snapshot
-            .data
-            .project
-            .build
-            .macos_dmg
-            .as_ref()
-            .and_then(|dmg| dmg.guide.as_ref())
-            .map(|relative| {
-                let extension = Path::new(relative)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .unwrap_or("html")
-                    .to_ascii_lowercase();
-                let path = staged.join(format!("Installation Guide.{extension}"));
-                fs::write(&path, &snapshot.files[relative].bytes).map_err(|e| e.to_string())?;
-                Ok::<_, String>(path)
-            })
-            .transpose()?;
-        if options.target == Target::MacosArm64 {
+        let default_assets = workspace.join("packaging/macos/defaults");
+        let (guide_name, default_guide) = match options.target {
+            Target::MacosArm64 => (
+                "Installation Guide",
+                dmg_layout
+                    .use_default_guide
+                    .then(|| default_assets.join("installation-guide.pdf")),
+            ),
+            Target::WindowsX64 => (
+                "Windows Installation Guide",
+                Some(workspace.join("packaging/windows/defaults/installation-guide.pdf")),
+            ),
+        };
+        let guide = if let Some(relative) = &dmg_layout.guide {
+            let extension = Path::new(relative)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("html")
+                .to_ascii_lowercase();
+            let path = staged.join(format!("{guide_name}.{extension}"));
+            fs::write(&path, &snapshot.files[relative].bytes).map_err(|e| e.to_string())?;
+            Some(path)
+        } else if let Some(default_guide) = default_guide {
+            let path = staged.join(format!("{guide_name}.pdf"));
+            fs::copy(default_guide, &path)
+                .map_err(|e| format!("Could not copy default installation guide: {e}"))?;
+            Some(path)
+        } else {
+            None
+        };
+        let windows_installer = if options.target == Target::MacosArm64 {
             let app = bundle
                 .join("macos")
                 .join(format!("{}.app", snapshot.data.project.product.name));
@@ -287,7 +302,8 @@ pub fn build(
             }
             let timestamp = String::from_utf8(timestamp.stdout).map_err(|e| e.to_string())?;
             let product = &snapshot.data.project.product;
-            if let Some(layout) = dmg_layout {
+            {
+                let layout = dmg_layout;
                 let name = format!(
                     "{}_{}_aarch64_{}.dmg",
                     product.name,
@@ -300,7 +316,9 @@ pub fn build(
                     json!({
                         "app": staged_app,
                         "guide": guide,
-                        "background": layout.background.as_ref().map(|path| snapshot.root.join(path)),
+                        "background": layout.background.as_ref()
+                            .map(|path| snapshot.root.join(path))
+                            .or_else(|| layout.use_default_background.then(|| default_assets.join("background.png"))),
                         "volume": product.name,
                         "output": staged.join(name),
                         "width": layout.width,
@@ -313,14 +331,6 @@ pub fn build(
                     &cancellation,
                     &mut progress,
                 )?;
-            } else {
-                copy_matching(
-                    &bundle.join("dmg"),
-                    &staged,
-                    "dmg",
-                    &format!("{}_{}_", product.name, product.version),
-                    &format!("_{}", timestamp.trim()),
-                )?;
             }
             process::run(
                 Command::new("codesign")
@@ -329,8 +339,9 @@ pub fn build(
                 &cancellation,
                 &mut progress,
             )?;
+            None
         } else {
-            copy_matching(
+            let installers = copy_matching(
                 &bundle.join("nsis"),
                 &staged,
                 "exe",
@@ -340,7 +351,11 @@ pub fn build(
                 ),
                 "",
             )?;
-        }
+            let [installer] = installers.as_slice() else {
+                return Err("Expected one Windows installer in the build".into());
+            };
+            Some(installer.clone())
+        };
         let sign = match options.target {
             Target::MacosArm64 => match snapshot.data.project.build.signing.macos {
                 MacSigning::AdHoc => "ad-hoc",
@@ -371,6 +386,19 @@ pub fn build(
         )
         .map_err(|e| e.to_string())?;
         crate::copy_verified_notices(&workspace, &licenses.join("engine"))?;
+        if let Some(installer) = windows_installer {
+            let product = &snapshot.data.project.product;
+            let package = format!("{}_{}_windows-x64.zip", product.slug, product.version);
+            let guide = guide
+                .as_deref()
+                .and_then(Path::file_name)
+                .ok_or("Missing Windows installation guide")?;
+            process::run(
+                &mut windows_package_command(&staged, &package, &installer, guide),
+                &cancellation,
+                &mut progress,
+            )?;
+        }
         if let Some(error) = log_error.borrow().as_ref() {
             return Err(format!("BUILD_LOG_FAILED: {error}"));
         }
@@ -633,8 +661,8 @@ fn copy_matching(
     extension: &str,
     expected_prefix: &str,
     suffix: &str,
-) -> Result<(), String> {
-    let mut count = 0;
+) -> Result<Vec<String>, String> {
+    let mut copied = Vec::new();
     for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -643,15 +671,38 @@ fn copy_matching(
         if path.extension().and_then(|s| s.to_str()) == Some(extension)
             && stem.starts_with(expected_prefix)
         {
-            let destination = destination.join(format!("{stem}{suffix}.{extension}"));
-            fs::copy(&path, &destination).map_err(|e| e.to_string())?;
-            count += 1;
+            let name = format!("{stem}{suffix}.{extension}");
+            fs::copy(&path, destination.join(&name)).map_err(|e| e.to_string())?;
+            copied.push(name);
         }
     }
-    if count == 0 {
+    if copied.is_empty() {
         return Err(format!("Missing {extension} installer"));
     }
-    Ok(())
+    Ok(copied)
+}
+
+fn windows_package_command(
+    directory: &Path,
+    package: &str,
+    installer: &str,
+    guide: &std::ffi::OsStr,
+) -> Command {
+    // Use Windows' bsdtar even when Git Bash puts GNU tar on PATH.
+    let tar = if cfg!(windows) {
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
+            .join("System32")
+            .join("tar.exe")
+    } else {
+        PathBuf::from("tar")
+    };
+    let mut command = Command::new(tar);
+    command
+        .current_dir(directory)
+        .args(["-a", "-cf", package, "--", installer])
+        .arg(guide)
+        .arg("LICENSES");
+    command
 }
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|e| e.to_string())?;
@@ -755,6 +806,37 @@ mod tests {
         assert!(verify_bundled_project(&resources, &snapshot)
             .unwrap_err()
             .contains("differs from validated snapshot"));
+    }
+    #[test]
+    fn windows_package_keeps_unicode_installer_and_guide_at_the_zip_root() {
+        let source = tempfile::tempdir().unwrap();
+        let extracted = tempfile::tempdir().unwrap();
+        let installer = "먼작버 치이카와_0.1.4_x64-setup.exe";
+        let guide = "Windows Installation Guide.pdf";
+        let package = "chiikawa-buddy_0.1.4_windows-x64.zip";
+        fs::write(source.path().join(installer), b"installer").unwrap();
+        fs::write(source.path().join(guide), b"guide").unwrap();
+        fs::create_dir(source.path().join("LICENSES")).unwrap();
+        fs::write(source.path().join("LICENSES/character.txt"), b"license").unwrap();
+        let mut command =
+            windows_package_command(source.path(), package, installer, guide.as_ref());
+        assert!(command.status().unwrap().success());
+        assert!(Command::new(command.get_program())
+            .current_dir(source.path())
+            .args(["-xf", package, "-C"])
+            .arg(extracted.path())
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(
+            fs::read(extracted.path().join(installer)).unwrap(),
+            b"installer"
+        );
+        assert_eq!(fs::read(extracted.path().join(guide)).unwrap(), b"guide");
+        assert_eq!(
+            fs::read(extracted.path().join("LICENSES/character.txt")).unwrap(),
+            b"license"
+        );
     }
     #[test]
     fn previous_products_installers_are_not_published_from_shared_cache() {

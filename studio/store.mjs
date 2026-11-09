@@ -756,6 +756,7 @@ export class ProjectStore {
       records.push({
         revision,
         name: project.product.name,
+        identifier: project.product.identifier,
         version: project.product.version,
         updatedAt: (await fs.stat(join(base, revision))).mtime.toISOString(),
       });
@@ -776,6 +777,8 @@ export class ProjectStore {
           409,
         );
       const view = await this.loadRevision(id, { ...meta, revision });
+      if (view.project.product.identifier !== meta.identifier)
+        throw new StudioError("패키지 ID가 다른 저장본은 복원할 수 없습니다.", 409);
       if (meta.builtSlug && view.project.product.slug !== meta.builtSlug)
         throw new StudioError("빌드에 사용한 실행 파일 이름이 다른 버전은 복원할 수 없습니다.", 409);
       const nextMeta = {

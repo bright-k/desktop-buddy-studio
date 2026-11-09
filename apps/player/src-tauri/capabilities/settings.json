@@ -1,5 +1,5 @@
 {
   "identifier": "settings",
   "windows": ["settings"],
-  "permissions": ["allow-get-runtime-status", "allow-request-input-access", "allow-apply-user-preferences", "allow-reset-user-preferences", "allow-reset-performance-session", "allow-export-runtime-diagnostics", "core:window:allow-destroy", "core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": ["allow-get-runtime-status", "allow-set-launch-at-login", "allow-request-input-access", "allow-apply-user-preferences", "allow-reset-user-preferences", "allow-reset-performance-session", "allow-export-runtime-diagnostics", "core:window:allow-destroy", "core:event:allow-listen", "core:event:allow-unlisten"]
 }

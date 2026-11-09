@@ -69,8 +69,10 @@ export class BuildQueue {
       // history and report have been removed.
       if (!meta.builtSlug && (job.status === "succeeded" || job.status === "partial" || job.result?.jobId)) {
         const definition = JSON.parse(await fs.readFile(join(project, "revisions", requireId(job.revision), "buddy.project.json"), "utf8"));
-        meta.builtSlug = definition.product.slug;
-        await atomicJson(join(project, "project.json"), meta);
+        if (definition.product.identifier === meta.identifier) {
+          meta.builtSlug = definition.product.slug;
+          await atomicJson(join(project, "project.json"), meta);
+        }
       }
       if (removeFiles) await this.removeBuildFiles(projectId, job);
       await fs.unlink(path);
@@ -244,7 +246,7 @@ export class BuildQueue {
       job.downloads = [
         ...(job.downloads ?? []),
         ...result.artifacts
-          .filter((a) => /\.(dmg|exe|msi|zip)$/.test(a.path) || /^Installation Guide\.(pdf|html|png|jpe?g)$/.test(a.path))
+          .filter((a) => /\.(dmg|exe|msi|zip)$/.test(a.path) || /^(?:Windows )?Installation Guide\.(pdf|html|png|jpe?g)$/.test(a.path))
           .map((a) => ({
             name: basename(a.path),
             path: `${basename(result.directory)}/${a.path}`,

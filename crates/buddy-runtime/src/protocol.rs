@@ -94,6 +94,16 @@ pub struct PreferenceUpdate {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
+pub enum LaunchAtLoginStatus {
+    Off,
+    On,
+    NeedsApproval,
+    PathChanged,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus {
     pub product_name: String,
     pub visible: bool,
@@ -105,6 +115,7 @@ pub struct RuntimeStatus {
     pub movement_enabled: bool,
     pub cursor_follow: bool,
     pub always_on_top: bool,
+    pub launch_at_login: LaunchAtLoginStatus,
     pub scale: f64,
     pub input: InputStatus,
     pub notice: Option<String>,
@@ -159,6 +170,7 @@ pub(crate) fn declarations() -> String {
         PlayerBootstrap::decl(),
         WireState::decl(),
         PreferenceUpdate::decl(),
+        LaunchAtLoginStatus::decl(),
         RuntimeStatus::decl(),
         MonitorChoice::decl(),
         BasePlacement::decl(),

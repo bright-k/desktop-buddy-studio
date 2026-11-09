@@ -134,5 +134,5 @@ async function startOverlay() {
   close: () => getCurrentWindow().destroy(),
   onCloseRequested: (callback) => getCurrentWindow().onCloseRequested((event) => { event.preventDefault(); callback(); }),
 }) : startOverlay()).catch((error) => {
-  app.textContent = `캐릭터를 준비하지 못했습니다: ${String(error)}`;
+  app.textContent = `${settings ? "설정을 불러오지 못했습니다." : "캐릭터를 준비하지 못했습니다."} ${String(error)}`;
 });

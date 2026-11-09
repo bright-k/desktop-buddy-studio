@@ -1,3 +1,5 @@
+mod launch_at_login;
+pub use launch_at_login::LaunchAtLogin;
 #[cfg(target_os = "macos")]
 mod macos;
 mod queue;

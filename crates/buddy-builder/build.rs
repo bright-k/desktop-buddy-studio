@@ -15,7 +15,7 @@ fn collect(root: &Path, path: &Path, files: &mut Vec<String>) {
             .is_some_and(|ext| {
                 [
                     "rs", "toml", "ts", "css", "html", "json", "mjs", "png", "ico", "icns", "txt",
-                    "py", "nsi", "crate", "whl", "gif", "jpg", "jpeg", "webp", "bmp",
+                    "py", "nsi", "crate", "whl", "gif", "jpg", "jpeg", "webp", "bmp", "pdf",
                 ]
                 .contains(&ext)
             })

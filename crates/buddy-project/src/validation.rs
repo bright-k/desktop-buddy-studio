@@ -331,7 +331,7 @@ pub fn validate_parts(
             "window 400..1600 × 260..1200; keep icons separated and inside the window",
         );
         check(
-            dmg.guide.is_none() || dmg.guide_position().is_some(),
+            !dmg.includes_guide() || dmg.guide_position().is_some(),
             file,
             "$.build.macosDmg.guidePosition",
             "keep the guide icon inside the window and separated from the other icons",

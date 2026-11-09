@@ -89,12 +89,20 @@ async function completeArtifact(root, fake, job, target, id) {
   await fs.mkdir(join(dir, bundle), { recursive: true });
   const installer = target === "windows-x64" ? "buddy-setup.exe" : "Buddy.dmg", binary = Buffer.from("fixture installer");
   await fs.writeFile(join(dir, bundle, installer), binary);
-  const guide = "Installation Guide.pdf", pdf = Buffer.from("fixture PDF guide");
+  const guide = target === "windows-x64" ? "Windows Installation Guide.pdf" : "Installation Guide.pdf";
+  const pdf = Buffer.from(`fixture PDF guide for ${target}`);
   await fs.writeFile(join(dir, bundle, guide), pdf);
   // macOS tar may preserve AppleDouble metadata beside the actual installer.
   await fs.writeFile(join(dir, bundle, "._" + installer), "metadata");
   const report = { projectHash: job.contentHash, identifier: job.projectId, templateHash: job.github.engineHash, target, development: true, staticInspection: "passed",
     artifacts: [{ path: installer, bytes: binary.length, sha256: sha(binary) }, { path: guide, bytes: pdf.length, sha256: sha(pdf) }] };
+  if (target === "windows-x64") {
+    const name = "remote-buddy_0.1.0_windows-x64.zip";
+    const path = join(dir, bundle, name);
+    await run(tarExecutable, ["-a", "-cf", path, "-C", join(dir, bundle), installer, guide]);
+    const bytes = await fs.readFile(path);
+    report.artifacts.push({ path: name, bytes: bytes.length, sha256: sha(bytes) });
+  }
   await fs.writeFile(join(dir, "source.json"), JSON.stringify({ contentHash: job.contentHash, identifier: job.projectId }));
   await fs.writeFile(join(dir, bundle, "build-report.json"), JSON.stringify(report));
   const name = `project-${target}.tar.gz`;
@@ -160,9 +168,17 @@ test("dispatch timeout recovers without duplicate runs; completed platform artif
   assert.equal(job.status, "partial"); assert.equal(job.platforms["macos-arm64"].imported, true);
   await completeArtifact(root, fake, job, "windows-x64", 2);
   fake.conclusion = "success"; await remote.retryImport(doc.meta.id, job.id); await remote.tick(); job = (await jobs.list(doc.meta.id))[0];
-  assert.equal(job.status, "succeeded"); assert.equal(job.downloads.length, 9);
-  const guide = job.downloads.find(d => d.name === "Installation Guide.pdf");
-  assert.equal(await fs.readFile(join(store.path(doc.meta.id), "builds", guide.path), "utf8"), "fixture PDF guide"); assert.equal(fake.dispatches, 1);
+  assert.equal(job.status, "succeeded"); assert.equal(job.downloads.length, 11);
+  const artifactRoot = join(store.path(doc.meta.id), "builds");
+  const macGuide = job.downloads.find(d => d.name === "Installation Guide.pdf");
+  const windowsGuide = job.downloads.find(d => d.name === "Windows Installation Guide.pdf");
+  assert.equal(await fs.readFile(join(artifactRoot, macGuide.path), "utf8"), "fixture PDF guide for macos-arm64");
+  assert.equal(await fs.readFile(join(artifactRoot, windowsGuide.path), "utf8"), "fixture PDF guide for windows-x64");
+  const packageDownload = job.downloads.find(d => d.name === "remote-buddy_0.1.0_windows-x64.zip");
+  const files = artifactFiles(await fs.readFile(join(artifactRoot, packageDownload.path)), ["buddy-setup.exe", windowsGuide.name]);
+  assert.equal(files.get("buddy-setup.exe").toString(), "fixture installer");
+  assert.equal(files.get(windowsGuide.name).toString(), "fixture PDF guide for windows-x64");
+  assert.equal(fake.dispatches, 1);
   const zip = Buffer.from(first.zip); zip[50] ^= 1;
   assert.throws(() => artifactFiles(zip, ["project-macos-arm64.tar.gz", "receipt-macos-arm64.json"]));
   assert.throws(() => artifactFiles(first.zip, ["../escape", "receipt-macos-arm64.json"]));

@@ -7,6 +7,7 @@ fn main() {
             "ack_character_frame",
             "set_character_hit_mask",
             "get_runtime_status",
+            "set_launch_at_login",
             "reset_performance_session",
             "export_runtime_diagnostics",
             "request_input_access",
