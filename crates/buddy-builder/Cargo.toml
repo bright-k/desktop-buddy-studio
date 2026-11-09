@@ -1,0 +1,31 @@
+[package]
+name = "buddy-builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+buddy-project = { path = "../buddy-project" }
+buddy-runtime = { path = "../buddy-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+uuid.workspace = true
+toml = "1"
+fs2 = "0.4"
+plist = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+tar = { version = "0.4.46", default-features = false }
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
+
+[build-dependencies]
+serde_json.workspace = true
+sha2.workspace = true

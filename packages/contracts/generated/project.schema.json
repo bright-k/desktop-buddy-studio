@@ -1,0 +1,1109 @@
+{
+  "$defs": {
+    "Anchor": {
+      "enum": [
+        "topLeft",
+        "topRight",
+        "bottomLeft",
+        "bottomRight"
+      ],
+      "type": "string"
+    },
+    "Binding": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "followCursor": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "sound": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SoundCue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trigger": {
+          "$ref": "#/$defs/Trigger"
+        }
+      },
+      "required": [
+        "id",
+        "trigger",
+        "effect"
+      ],
+      "type": "object"
+    },
+    "Build": {
+      "additionalProperties": false,
+      "properties": {
+        "macosDmg": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MacosDmg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signing": {
+          "$ref": "#/$defs/Signing",
+          "default": {
+            "macos": "ad-hoc",
+            "windows": "none"
+          }
+        },
+        "targets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Target"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "CursorFollow": {
+      "additionalProperties": false,
+      "properties": {
+        "bands": {
+          "items": {
+            "$ref": "#/$defs/CursorFollowBand"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "priority": {
+          "format": "uint8",
+          "maximum": 100,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stopDistanceDip": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "stopDistanceDip",
+        "bands"
+      ],
+      "type": "object"
+    },
+    "CursorFollowBand": {
+      "additionalProperties": false,
+      "properties": {
+        "animation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minDistanceDip": {
+          "format": "double",
+          "type": "number"
+        },
+        "speedDipPerSecond": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "minDistanceDip",
+        "speedDipPerSecond"
+      ],
+      "type": "object"
+    },
+    "CursorPose": {
+      "additionalProperties": false,
+      "properties": {
+        "animation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mirror": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Defaults": {
+      "additionalProperties": false,
+      "properties": {
+        "alwaysOnTop": {
+          "default": true,
+          "type": "boolean"
+        },
+        "displayHeightDip": {
+          "format": "double",
+          "maximum": 1024,
+          "minimum": 16,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "input": {
+          "$ref": "#/$defs/InputPreferences",
+          "default": {
+            "keyboard": true,
+            "mouse": true
+          }
+        },
+        "movementEnabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "position": {
+          "$ref": "#/$defs/InitialPosition",
+          "default": {
+            "anchor": "bottomRight",
+            "marginDip": 10.0,
+            "monitor": "primary"
+          }
+        },
+        "scale": {
+          "default": 1.0,
+          "format": "double",
+          "type": "number"
+        },
+        "timing": {
+          "$ref": "#/$defs/Timing",
+          "default": {
+            "idleTimeoutMs": 250,
+            "rateEvaluationMs": 50,
+            "rateStabilityMs": 100,
+            "rateWindowMs": 2000
+          }
+        }
+      },
+      "type": "object"
+    },
+    "DmgIconPosition": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "y": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "Effect": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "animation": {
+              "type": "string"
+            },
+            "cooldownMs": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "durationMs": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "interruption": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Interruption"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "priority": {
+              "default": 50,
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "retrigger": {
+              "$ref": "#/$defs/Retrigger",
+              "default": "restart"
+            },
+            "stopOnRelease": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "const": "playAnimation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "animation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "animation": {
+              "type": "string"
+            },
+            "priority": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "sustainAnimation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "animation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "animation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "speedDipPerSecond": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "move",
+              "type": "string"
+            },
+            "x": {
+              "format": "double",
+              "type": "number"
+            },
+            "y": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "x",
+            "y",
+            "speedDipPerSecond"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "directions": {
+              "additionalProperties": false,
+              "properties": {
+                "center": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "down": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "downLeft": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "downRight": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "left": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "right": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "up": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "upLeft": {
+                  "$ref": "#/$defs/CursorPose"
+                },
+                "upRight": {
+                  "$ref": "#/$defs/CursorPose"
+                }
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "faceCursor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "IdleSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "cursorEnabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "directions": {
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "center": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "down": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "downLeft": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "downRight": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "left": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "right": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "up": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "upLeft": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "upRight": {
+              "$ref": "#/$defs/CursorPose"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "InitialPosition": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "$ref": "#/$defs/Anchor",
+          "default": "bottomRight"
+        },
+        "marginDip": {
+          "default": 10.0,
+          "format": "double",
+          "type": "number"
+        },
+        "monitor": {
+          "default": "primary",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "InputPreferences": {
+      "additionalProperties": false,
+      "properties": {
+        "keyboard": {
+          "default": true,
+          "type": "boolean"
+        },
+        "mouse": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Interruption": {
+      "enum": [
+        "byPriority",
+        "replace",
+        "finish"
+      ],
+      "type": "string"
+    },
+    "KeyChord": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "modifiers": {
+          "items": {
+            "$ref": "#/$defs/KeyModifier"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
+    "KeyModifier": {
+      "enum": [
+        "control",
+        "alt",
+        "shift",
+        "meta"
+      ],
+      "type": "string"
+    },
+    "KeyStep": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "shift": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "shift"
+      ],
+      "type": "object"
+    },
+    "KeyboardLayout": {
+      "enum": [
+        "ko-KR-2set",
+        "en-US-qwerty"
+      ],
+      "type": "string"
+    },
+    "KeywordAlternative": {
+      "additionalProperties": false,
+      "properties": {
+        "keyword": {
+          "type": "string"
+        },
+        "layout": {
+          "$ref": "#/$defs/KeyboardLayout"
+        }
+      },
+      "required": [
+        "keyword",
+        "layout"
+      ],
+      "type": "object"
+    },
+    "MacSigning": {
+      "enum": [
+        "ad-hoc",
+        "self-signed"
+      ],
+      "type": "string"
+    },
+    "MacosDmg": {
+      "additionalProperties": false,
+      "properties": {
+        "appPosition": {
+          "$ref": "#/$defs/DmgIconPosition",
+          "default": {
+            "x": 180,
+            "y": 180
+          }
+        },
+        "applicationsPosition": {
+          "$ref": "#/$defs/DmgIconPosition",
+          "default": {
+            "x": 480,
+            "y": 180
+          }
+        },
+        "background": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guide": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guidePosition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DmgIconPosition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "height": {
+          "default": 420,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "useDefaultBackground": {
+          "default": false,
+          "type": "boolean"
+        },
+        "useDefaultGuide": {
+          "default": false,
+          "type": "boolean"
+        },
+        "width": {
+          "default": 660,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "MouseButton": {
+      "enum": [
+        "primary",
+        "secondary",
+        "middle"
+      ],
+      "type": "string"
+    },
+    "Product": {
+      "additionalProperties": false,
+      "properties": {
+        "icon": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "slug",
+        "name",
+        "version",
+        "identifier",
+        "icon"
+      ],
+      "type": "object"
+    },
+    "Retrigger": {
+      "enum": [
+        "restart",
+        "ignore"
+      ],
+      "type": "string"
+    },
+    "Signing": {
+      "additionalProperties": false,
+      "properties": {
+        "macos": {
+          "$ref": "#/$defs/MacSigning",
+          "default": "ad-hoc"
+        },
+        "windows": {
+          "$ref": "#/$defs/WindowsSigning",
+          "default": "none"
+        }
+      },
+      "type": "object"
+    },
+    "SoundCue": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "type": "string"
+        },
+        "volume": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "resource",
+        "volume"
+      ],
+      "type": "object"
+    },
+    "Target": {
+      "enum": [
+        "windows-x64",
+        "macos-arm64"
+      ],
+      "type": "string"
+    },
+    "Timing": {
+      "additionalProperties": false,
+      "properties": {
+        "idleTimeoutMs": {
+          "default": 250,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rateEvaluationMs": {
+          "default": 50,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rateStabilityMs": {
+          "default": 100,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rateWindowMs": {
+          "default": 2000,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "Trigger": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/KeyChord"
+              },
+              "type": "array"
+            },
+            "code": {
+              "type": "string"
+            },
+            "modifiers": {
+              "items": {
+                "$ref": "#/$defs/KeyModifier"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "repeat": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "const": "keyDown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/KeyChord"
+              },
+              "type": "array"
+            },
+            "code": {
+              "type": "string"
+            },
+            "modifiers": {
+              "items": {
+                "$ref": "#/$defs/KeyModifier"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "keyUp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/KeyChord"
+              },
+              "type": "array"
+            },
+            "code": {
+              "type": "string"
+            },
+            "modifiers": {
+              "items": {
+                "$ref": "#/$defs/KeyModifier"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "whileKeyDown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/MouseButton"
+            },
+            "type": {
+              "const": "mouseDown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "button"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/MouseButton"
+            },
+            "type": {
+              "const": "mouseUp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "button"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/WheelDirection"
+            },
+            "type": {
+              "const": "wheel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "direction"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "cursorMove",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "buddyClick",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "drag",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maxKps": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "minKps": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "typingRate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "minKps"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/KeywordAlternative"
+              },
+              "type": "array"
+            },
+            "keyword": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "layout": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/KeyboardLayout"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "steps": {
+              "items": {
+                "$ref": "#/$defs/KeyStep"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "timeoutMs": {
+              "default": 5000,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "keySequence",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WheelDirection": {
+      "enum": [
+        "up",
+        "down",
+        "left",
+        "right"
+      ],
+      "type": "string"
+    },
+    "WindowsSigning": {
+      "enum": [
+        "none",
+        "self-signed"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "bindings": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Binding"
+      },
+      "type": "array"
+    },
+    "build": {
+      "$ref": "#/$defs/Build",
+      "default": {
+        "signing": {
+          "macos": "ad-hoc",
+          "windows": "none"
+        },
+        "targets": []
+      }
+    },
+    "character": {
+      "type": "string"
+    },
+    "cursorFollow": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CursorFollow"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "defaults": {
+      "$ref": "#/$defs/Defaults",
+      "default": {
+        "alwaysOnTop": true,
+        "input": {
+          "keyboard": true,
+          "mouse": true
+        },
+        "movementEnabled": false,
+        "position": {
+          "anchor": "bottomRight",
+          "marginDip": 10.0,
+          "monitor": "primary"
+        },
+        "scale": 1.0,
+        "timing": {
+          "idleTimeoutMs": 250,
+          "rateEvaluationMs": 50,
+          "rateStabilityMs": 100,
+          "rateWindowMs": 2000
+        }
+      }
+    },
+    "idle": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IdleSettings"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "product": {
+      "$ref": "#/$defs/Product"
+    },
+    "projectId": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "product",
+    "character"
+  ],
+  "title": "Project",
+  "type": "object"
+}
