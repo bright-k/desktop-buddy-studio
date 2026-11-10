@@ -14,12 +14,140 @@ pub struct Project {
     pub defaults: Defaults,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle: Option<IdleSettings>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 4))]
+    pub idle_groups: Vec<IdleGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_follow: Option<CursorFollow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer: Option<TimerDefaults>,
     #[serde(default)]
     pub bindings: Vec<Binding>,
     #[serde(default)]
     pub build: Build,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum TimerMode {
+    #[default]
+    Countdown,
+    Pomodoro,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, TS,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum TimerPhase {
+    Countdown,
+    Focus,
+    ShortBreak,
+    LongBreak,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum TimerCompletion {
+    Countdown,
+    Focus,
+    Break,
+    ShortBreak,
+    LongBreak,
+}
+
+impl From<TimerPhase> for TimerCompletion {
+    fn from(phase: TimerPhase) -> Self {
+        match phase {
+            TimerPhase::Countdown => Self::Countdown,
+            TimerPhase::Focus => Self::Focus,
+            TimerPhase::ShortBreak => Self::ShortBreak,
+            TimerPhase::LongBreak => Self::LongBreak,
+        }
+    }
+}
+
+impl TimerCompletion {
+    pub(crate) fn matches(self, completed: Self) -> bool {
+        self == completed
+            || (self == Self::Break && matches!(completed, Self::ShortBreak | Self::LongBreak))
+    }
+}
+
+pub const BUDDY_HOLD_MIN_MS: u32 = 300;
+pub const BUDDY_HOLD_MAX_MS: u32 = 2000;
+pub const BUDDY_HOLD_DEFAULT_MS: u32 = 600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct PomodoroSettings {
+    #[schemars(range(min = 1, max = 120))]
+    pub focus_minutes: u32,
+    #[schemars(range(min = 1, max = 60))]
+    pub short_break_minutes: u32,
+    #[schemars(range(min = 1, max = 60))]
+    pub long_break_minutes: u32,
+    #[schemars(range(min = 2, max = 8))]
+    pub rounds: u32,
+}
+impl Default for PomodoroSettings {
+    fn default() -> Self {
+        Self {
+            focus_minutes: 25,
+            short_break_minutes: 5,
+            long_break_minutes: 15,
+            rounds: 4,
+        }
+    }
+}
+impl PomodoroSettings {
+    pub fn is_valid(self) -> bool {
+        (1..=120).contains(&self.focus_minutes)
+            && (1..=60).contains(&self.short_break_minutes)
+            && (1..=60).contains(&self.long_break_minutes)
+            && (2..=8).contains(&self.rounds)
+    }
+}
+
+pub const DEFAULT_TIMER_PRESETS: [u32; 4] = [60, 300, 600, 1500];
+pub const MAX_TIMER_PRESETS: usize = 10;
+
+pub fn valid_timer_presets(presets: &[u32]) -> bool {
+    presets.len() <= MAX_TIMER_PRESETS
+        && presets.iter().enumerate().all(|(index, seconds)| {
+            (1..=10_800).contains(seconds) && !presets[..index].contains(seconds)
+        })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct TimerDefaults {
+    pub enabled: bool,
+    pub mode: TimerMode,
+    #[schemars(range(min = 1, max = 10800))]
+    pub countdown_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 10))]
+    pub countdown_presets: Option<Vec<u32>>,
+    pub pomodoro: PomodoroSettings,
+}
+impl Default for TimerDefaults {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: TimerMode::Countdown,
+            countdown_seconds: 600,
+            countdown_presets: None,
+            pomodoro: PomodoroSettings::default(),
+        }
+    }
+}
+impl TimerDefaults {
+    pub fn countdown_presets(&self) -> &[u32] {
+        self.countdown_presets
+            .as_deref()
+            .unwrap_or(&DEFAULT_TIMER_PRESETS)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -378,12 +506,47 @@ pub enum Trigger {
     },
     CursorMove,
     BuddyClick,
+    BuddyLongPress {
+        #[serde(rename = "holdMs")]
+        #[schemars(range(min = 300, max = 2000))]
+        hold_ms: u32,
+    },
     Drag,
+    DragDropped,
+    FirstShown,
+    ShownAgain,
+    TimerStarted {
+        phase: TimerPhase,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[schemars(length(max = 3))]
+        alternatives: Vec<TimerPhase>,
+    },
+    TimerCompleted {
+        phase: TimerCompletion,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[schemars(length(max = 3))]
+        alternatives: Vec<TimerCompletion>,
+    },
+    IdleFor {
+        #[schemars(range(min = 1, max = 3600))]
+        seconds: u32,
+    },
     TypingRate {
         #[serde(rename = "minKps")]
         min_kps: f64,
         #[serde(rename = "maxKps", default, skip_serializing_if = "Option::is_none")]
         max_kps: Option<f64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    TypingStopped {
+        #[schemars(range(min = 2, max = 60))]
+        min_typing_seconds: u32,
+        #[schemars(range(min = 2, max = 100))]
+        min_keys: u32,
+        #[schemars(range(min = 500, max = 5000))]
+        pause_ms: u32,
+        #[schemars(range(min = 10, max = 600))]
+        min_interval_seconds: u32,
     },
     KeySequence {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,6 +563,28 @@ pub enum Trigger {
 }
 
 impl Trigger {
+    pub fn matches_timer_start(&self, started: TimerPhase) -> bool {
+        matches!(self, Self::TimerStarted { phase, alternatives }
+            if *phase == started || alternatives.contains(&started))
+    }
+
+    pub fn matches_timer_completion(&self, completed: TimerCompletion) -> bool {
+        matches!(self, Self::TimerCompleted { phase, alternatives }
+            if phase.matches(completed) || alternatives.iter().any(|phase| phase.matches(completed)))
+    }
+
+    pub fn is_automatic(&self) -> bool {
+        matches!(
+            self,
+            Self::FirstShown
+                | Self::ShownAgain
+                | Self::IdleFor { .. }
+                | Self::TypingStopped { .. }
+                | Self::TimerStarted { .. }
+                | Self::TimerCompleted { .. }
+        )
+    }
+
     pub fn supports_stop_on_release(&self) -> bool {
         match self {
             Self::KeyDown { .. } | Self::MouseDown { .. } => true,
@@ -488,11 +673,32 @@ fn default_timeout() -> u32 {
     5000
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum MotionVariationMode {
+    Cycle,
+    Shuffle,
+    Weighted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MotionVariation {
+    pub mode: MotionVariationMode,
+    #[schemars(length(min = 1, max = 7))]
+    pub alternatives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 2, max = 8))]
+    pub weights: Option<Vec<u16>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Effect {
     PlayAnimation {
         animation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variation: Option<MotionVariation>,
         #[serde(default = "default_priority")]
         priority: u8,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -577,6 +783,31 @@ pub struct IdleSettings {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
+pub enum IdleCursorMode {
+    #[default]
+    Inherit,
+    Custom,
+    Off,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdleGroup {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[schemars(length(min = 1, max = 4))]
+    pub states: Vec<TimerPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<String>,
+    #[serde(default)]
+    pub cursor_mode: IdleCursorMode,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub directions: BTreeMap<CursorDirection, CursorPose>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub enum Retrigger {
     #[default]
     Restart,
@@ -627,7 +858,8 @@ pub struct Character {
     pub id: String,
     pub name: String,
     pub license: String,
-    pub image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     #[serde(default)]
     pub resources: BTreeMap<String, Resource>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -636,12 +868,28 @@ pub struct Character {
     pub anchor: Point,
     pub default_animation: String,
     pub animations: BTreeMap<String, Animation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_layout: Option<CanvasLayout>,
+}
+
+/// The viewport of the source project before unused clips were removed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CanvasLayout {
+    #[schemars(range(min = 0.5, max = 1.0))]
+    pub horizontal_anchor_extent: f64,
+    #[schemars(range(min = 1.0, max = 2.0))]
+    pub scale_envelope: f64,
 }
 
 pub const MIN_ANIMATION_SCALE_PERCENT: u16 = 50;
 pub const MAX_ANIMATION_SCALE_PERCENT: u16 = 200;
 
 impl Character {
+    pub fn awaiting_sprite(&self) -> bool {
+        self.image.is_none() && self.default_animation.is_empty() && self.animations.is_empty()
+    }
+
     pub fn canvas_size(&self, scale: f64) -> Point {
         let scale = scale * self.animation_scale_envelope();
         Point {
@@ -650,13 +898,17 @@ impl Character {
         }
     }
 
-    pub(crate) fn horizontal_anchor_extent(&self) -> f64 {
+    pub fn horizontal_anchor_extent(&self) -> f64 {
         self.animations
             .values()
             .filter_map(|animation| animation.anchor_x)
             .chain(std::iter::once(self.anchor.x))
             .map(|x| x.max(1.0 - x))
-            .fold(0.5, f64::max)
+            .fold(
+                self.canvas_layout
+                    .map_or(0.5, |layout| layout.horizontal_anchor_extent),
+                f64::max,
+            )
     }
 
     /// A fixed viewport for the whole project keeps large clips in bounds.
@@ -666,7 +918,10 @@ impl Character {
             .values()
             .filter_map(|animation| animation.scale_percent)
             .fold(100, u16::max);
-        f64::from(largest) / 100.0
+        (f64::from(largest) / 100.0).max(
+            self.canvas_layout
+                .map_or(1.0, |layout| layout.scale_envelope),
+        )
     }
 }
 
@@ -728,6 +983,9 @@ fn default_source_timing() -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Resource {
     pub image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 80))]
+    pub name: Option<String>,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
@@ -760,6 +1018,9 @@ pub struct RenderPlan {
 #[serde(deny_unknown_fields)]
 pub struct SoundResource {
     pub audio: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 80))]
+    pub name: Option<String>,
 }
 
 pub fn typescript_declarations() -> String {
@@ -770,6 +1031,11 @@ pub fn typescript_declarations() -> String {
         CursorFollow::decl(),
         CursorFollowBand::decl(),
         Timing::decl(),
+        TimerMode::decl(),
+        TimerPhase::decl(),
+        TimerCompletion::decl(),
+        TimerDefaults::decl(),
+        PomodoroSettings::decl(),
         InitialPosition::decl(),
         Anchor::decl(),
         InputPreferences::decl(),
@@ -787,17 +1053,22 @@ pub fn typescript_declarations() -> String {
         KeyModifier::decl(),
         KeyChord::decl(),
         KeywordAlternative::decl(),
+        MotionVariationMode::decl(),
+        MotionVariation::decl(),
         Effect::decl(),
         Interruption::decl(),
         CursorDirection::decl(),
         CursorPose::decl(),
         IdleSettings::decl(),
+        IdleCursorMode::decl(),
+        IdleGroup::decl(),
         Retrigger::decl(),
         MouseButton::decl(),
         WheelDirection::decl(),
         KeyboardLayout::decl(),
         KeyStep::decl(),
         Character::decl(),
+        CanvasLayout::decl(),
         Sheet::decl(),
         Point::decl(),
         SourceFacing::decl(),
@@ -820,6 +1091,12 @@ pub fn typescript_declarations() -> String {
     ));
     output.push_str(&format!(
         "export const animationScaleLimits = {{ min: {MIN_ANIMATION_SCALE_PERCENT}, max: {MAX_ANIMATION_SCALE_PERCENT} }} as const;\n"
+    ));
+    output.push_str(&format!(
+        "export const timerPresetLimit = {MAX_TIMER_PRESETS};\nexport const defaultTimerPresets = {DEFAULT_TIMER_PRESETS:?} as const;\n"
+    ));
+    output.push_str(&format!(
+        "export const buddyHoldMs = {{ min: {BUDDY_HOLD_MIN_MS}, max: {BUDDY_HOLD_MAX_MS}, default: {BUDDY_HOLD_DEFAULT_MS} }} as const;\n"
     ));
     output
 }

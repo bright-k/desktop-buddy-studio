@@ -1,12 +1,40 @@
 use tauri::Url;
 
 pub fn allow_player_navigation(url: &Url) -> bool {
-    let (scheme, host) = if cfg!(windows) {
+    let (scheme, host) = player_origin();
+    is_entry_document(url, scheme, host) && url.query().is_none()
+}
+
+fn player_origin() -> (&'static str, &'static str) {
+    if cfg!(windows) {
         ("http", "tauri.localhost")
     } else {
         ("tauri", "localhost")
-    };
+    }
+}
+
+pub fn overlay_recovery_url(generation: u32) -> Result<Url, String> {
+    let (scheme, host) = player_origin();
+    Url::parse(&format!(
+        "{scheme}://{host}/index.html?overlay-recovery={generation}"
+    ))
+    .map_err(|error| error.to_string())
+}
+
+pub fn allow_overlay_navigation(url: &Url) -> bool {
+    let (scheme, host) = player_origin();
     is_entry_document(url, scheme, host)
+        && url.query().is_none_or(|query| {
+            url.path() == "/index.html"
+                && url.fragment().is_none()
+                && query
+                    .strip_prefix("overlay-recovery=")
+                    .is_some_and(|generation| {
+                        !generation.is_empty()
+                            && generation.bytes().all(|b| b.is_ascii_digit())
+                            && generation.parse::<u32>().is_ok_and(|value| value > 0)
+                    })
+        })
 }
 
 fn is_entry_document(url: &Url, scheme: &str, host: &str) -> bool {
@@ -16,7 +44,6 @@ fn is_entry_document(url: &Url, scheme: &str, host: &str) -> bool {
         && url.username().is_empty()
         && url.password().is_none()
         && matches!(url.path(), "" | "/" | "/index.html")
-        && url.query().is_none()
 }
 
 #[cfg(test)]
@@ -55,8 +82,8 @@ mod tests {
             "tauri://localhost/index.html?external=true",
         ] {
             let url = Url::parse(url).unwrap();
-            assert!(!is_entry_document(&url, "tauri", "localhost"), "{url}");
-            assert!(!is_entry_document(&url, "http", "tauri.localhost"), "{url}");
+            assert!(!allow_player_navigation(&url), "{url}");
+            assert!(!allow_overlay_navigation(&url), "{url}");
         }
         assert!(!is_entry_document(
             &Url::parse("http://tauri.localhost/index.html").unwrap(),
@@ -68,5 +95,17 @@ mod tests {
             "http",
             "tauri.localhost"
         ));
+    }
+
+    #[test]
+    fn only_the_overlay_accepts_its_numeric_recovery_url() {
+        let url = overlay_recovery_url(7).unwrap();
+        assert!(allow_overlay_navigation(&url));
+        assert!(!allow_player_navigation(&url));
+        let mut invalid = url;
+        invalid.set_query(Some("overlay-recovery=7&redirect=external"));
+        assert!(!allow_overlay_navigation(&invalid));
+        invalid.set_query(Some("overlay-recovery=0"));
+        assert!(!allow_overlay_navigation(&invalid));
     }
 }

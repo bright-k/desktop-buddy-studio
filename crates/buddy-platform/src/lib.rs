@@ -78,14 +78,14 @@ pub struct InputSession {
 /// capture restarts, an unmatched release cannot create a global reaction.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 struct OverlayMouseRoute {
-    overlay: Option<usize>,
+    targets: Vec<usize>,
     global_down: [bool; 2],
 }
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl OverlayMouseRoute {
-    fn new(overlay: Option<usize>) -> Self {
+    fn new(targets: Vec<usize>) -> Self {
         Self {
-            overlay,
+            targets,
             global_down: [false; 2],
         }
     }
@@ -95,7 +95,7 @@ impl OverlayMouseRoute {
     }
 
     fn routes(&self, button: buddy_project::MouseButton) -> bool {
-        self.overlay.is_some() && button != buddy_project::MouseButton::Middle
+        !self.targets.is_empty() && button != buddy_project::MouseButton::Middle
     }
 
     fn forward(
@@ -109,7 +109,7 @@ impl OverlayMouseRoute {
         }
         let index = usize::from(button == buddy_project::MouseButton::Secondary);
         if pressed {
-            self.global_down[index] = target != self.overlay;
+            self.global_down[index] = target.is_none_or(|target| !self.targets.contains(&target));
             self.global_down[index]
         } else {
             std::mem::take(&mut self.global_down[index])
@@ -122,20 +122,16 @@ impl InputSession {
         Self::start_with_signal(options, WakeSignal::default())
     }
     pub fn start_with_signal(options: InputOptions, signal: WakeSignal) -> Result<Self, String> {
-        Self::start_routed(options, signal, None)
+        Self::start_with_mouse_targets(options, signal, Vec::new())
     }
-    /// `overlay` is the Player PID on macOS and the overlay HWND on Windows.
-    pub fn start_for_overlay(
+    /// The Player's own windows can come and go without restarting capture.
+    pub fn start_for_player(options: InputOptions, signal: WakeSignal) -> Result<Self, String> {
+        Self::start_with_mouse_targets(options, signal, vec![std::process::id() as usize])
+    }
+    fn start_with_mouse_targets(
         options: InputOptions,
         signal: WakeSignal,
-        overlay: usize,
-    ) -> Result<Self, String> {
-        Self::start_routed(options, signal, (overlay != 0).then_some(overlay))
-    }
-    fn start_routed(
-        options: InputOptions,
-        signal: WakeSignal,
-        overlay: Option<usize>,
+        targets: Vec<usize>,
     ) -> Result<Self, String> {
         let (sender, receiver) = queue::bounded_with_signal(1024, signal);
         let status = Arc::new(Mutex::new(options.status(
@@ -157,7 +153,7 @@ impl InputSession {
                     worker_status,
                     worker_stop,
                     ready_tx,
-                    overlay,
+                    targets,
                 );
                 #[cfg(target_os = "windows")]
                 windows::run(
@@ -166,11 +162,11 @@ impl InputSession {
                     worker_status,
                     worker_stop,
                     ready_tx,
-                    overlay,
+                    targets,
                 );
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
-                    let _ = (options, sender, worker_status, worker_stop, overlay);
+                    let _ = (options, sender, worker_status, worker_stop, targets);
                     let _ = ready_tx.send(());
                 }
             })
@@ -255,6 +251,21 @@ pub fn request_input_permission() -> bool {
     }
 }
 
+pub fn desktop_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::desktop_available()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::desktop_available()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        true
+    }
+}
+
 #[cfg(test)]
 mod overlay_mouse_tests {
     use super::OverlayMouseRoute;
@@ -262,7 +273,7 @@ mod overlay_mouse_tests {
 
     #[test]
     fn the_press_target_owns_the_release_even_across_window_edges() {
-        let mut route = OverlayMouseRoute::new(Some(10));
+        let mut route = OverlayMouseRoute::new(vec![10, 30]);
         assert!(!route.forward(Primary, true, Some(10)));
         assert!(route.forward(Secondary, true, Some(20)));
         assert!(!route.forward(Primary, false, Some(20)));
@@ -272,6 +283,8 @@ mod overlay_mouse_tests {
         assert!(!route.forward(Secondary, false, Some(20)));
         assert!(route.forward(Middle, true, Some(10)));
 
+        assert!(!route.forward(Primary, true, Some(30)));
+        assert!(!route.forward(Primary, false, Some(20)));
         assert!(route.forward(Secondary, true, Some(20)));
         route.reset();
         assert!(!route.forward(Secondary, false, Some(20)));

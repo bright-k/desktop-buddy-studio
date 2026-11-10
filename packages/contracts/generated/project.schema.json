@@ -272,6 +272,16 @@
             "type": {
               "const": "playAnimation",
               "type": "string"
+            },
+            "variation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MotionVariation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -399,6 +409,84 @@
           "type": "object"
         }
       ]
+    },
+    "IdleCursorMode": {
+      "enum": [
+        "inherit",
+        "custom",
+        "off"
+      ],
+      "type": "string"
+    },
+    "IdleGroup": {
+      "additionalProperties": false,
+      "properties": {
+        "animation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursorMode": {
+          "$ref": "#/$defs/IdleCursorMode",
+          "default": "inherit"
+        },
+        "directions": {
+          "additionalProperties": false,
+          "properties": {
+            "center": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "down": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "downLeft": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "downRight": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "left": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "right": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "up": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "upLeft": {
+              "$ref": "#/$defs/CursorPose"
+            },
+            "upRight": {
+              "$ref": "#/$defs/CursorPose"
+            }
+          },
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "states": {
+          "items": {
+            "$ref": "#/$defs/TimerPhase"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "states"
+      ],
+      "type": "object"
     },
     "IdleSettings": {
       "additionalProperties": false,
@@ -623,6 +711,49 @@
       },
       "type": "object"
     },
+    "MotionVariation": {
+      "additionalProperties": false,
+      "properties": {
+        "alternatives": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 7,
+          "minItems": 1,
+          "type": "array"
+        },
+        "mode": {
+          "$ref": "#/$defs/MotionVariationMode"
+        },
+        "weights": {
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 8,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "alternatives"
+      ],
+      "type": "object"
+    },
+    "MotionVariationMode": {
+      "enum": [
+        "cycle",
+        "shuffle",
+        "weighted"
+      ],
+      "type": "string"
+    },
     "MouseButton": {
       "enum": [
         "primary",
@@ -699,6 +830,40 @@
         }
       ]
     },
+    "PomodoroSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "focusMinutes": {
+          "default": 25,
+          "format": "uint32",
+          "maximum": 120,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "longBreakMinutes": {
+          "default": 15,
+          "format": "uint32",
+          "maximum": 60,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "rounds": {
+          "default": 4,
+          "format": "uint32",
+          "maximum": 8,
+          "minimum": 2,
+          "type": "integer"
+        },
+        "shortBreakMinutes": {
+          "default": 5,
+          "format": "uint32",
+          "maximum": 60,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "Product": {
       "additionalProperties": false,
       "properties": {
@@ -769,6 +934,74 @@
       "enum": [
         "windows-x64",
         "macos-arm64"
+      ],
+      "type": "string"
+    },
+    "TimerCompletion": {
+      "enum": [
+        "countdown",
+        "focus",
+        "break",
+        "shortBreak",
+        "longBreak"
+      ],
+      "type": "string"
+    },
+    "TimerDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "countdownPresets": {
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 10,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "countdownSeconds": {
+          "default": 600,
+          "format": "uint32",
+          "maximum": 10800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/TimerMode",
+          "default": "countdown"
+        },
+        "pomodoro": {
+          "$ref": "#/$defs/PomodoroSettings",
+          "default": {
+            "focusMinutes": 25,
+            "longBreakMinutes": 15,
+            "rounds": 4,
+            "shortBreakMinutes": 5
+          }
+        }
+      },
+      "type": "object"
+    },
+    "TimerMode": {
+      "enum": [
+        "countdown",
+        "pomodoro"
+      ],
+      "type": "string"
+    },
+    "TimerPhase": {
+      "enum": [
+        "countdown",
+        "focus",
+        "shortBreak",
+        "longBreak"
       ],
       "type": "string"
     },
@@ -1006,6 +1239,26 @@
         {
           "additionalProperties": false,
           "properties": {
+            "holdMs": {
+              "format": "uint32",
+              "maximum": 2000,
+              "minimum": 300,
+              "type": "integer"
+            },
+            "type": {
+              "const": "buddyLongPress",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "holdMs"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "type": {
               "const": "drag",
               "type": "string"
@@ -1013,6 +1266,113 @@
           },
           "required": [
             "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "dragDropped",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "firstShown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "shownAgain",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/TimerPhase"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            "phase": {
+              "$ref": "#/$defs/TimerPhase"
+            },
+            "type": {
+              "const": "timerStarted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "phase"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/TimerCompletion"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            "phase": {
+              "$ref": "#/$defs/TimerCompletion"
+            },
+            "type": {
+              "const": "timerCompleted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "phase"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "seconds": {
+              "format": "uint32",
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "idleFor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seconds"
           ],
           "type": "object"
         },
@@ -1038,6 +1398,47 @@
           "required": [
             "type",
             "minKps"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "minIntervalSeconds": {
+              "format": "uint32",
+              "maximum": 600,
+              "minimum": 10,
+              "type": "integer"
+            },
+            "minKeys": {
+              "format": "uint32",
+              "maximum": 100,
+              "minimum": 2,
+              "type": "integer"
+            },
+            "minTypingSeconds": {
+              "format": "uint32",
+              "maximum": 60,
+              "minimum": 2,
+              "type": "integer"
+            },
+            "pauseMs": {
+              "format": "uint32",
+              "maximum": 5000,
+              "minimum": 500,
+              "type": "integer"
+            },
+            "type": {
+              "const": "typingStopped",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "minTypingSeconds",
+            "minKeys",
+            "pauseMs",
+            "minIntervalSeconds"
           ],
           "type": "object"
         },
@@ -1176,6 +1577,13 @@
         }
       ]
     },
+    "idleGroups": {
+      "items": {
+        "$ref": "#/$defs/IdleGroup"
+      },
+      "maxItems": 4,
+      "type": "array"
+    },
     "product": {
       "$ref": "#/$defs/Product"
     },
@@ -1186,6 +1594,16 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "timer": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TimerDefaults"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [

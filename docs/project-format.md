@@ -136,6 +136,8 @@ defaults의 부분 객체도 필드별로 기본값을 채운다. scale은 0.25~
 
 manifest의 이미지·라이선스 경로는 manifest가 있는 디렉토리 기준이다. 프로젝트의 다른 자산 경로 기준과 혼동하지 않는다. 이름만 적은 라이선스를 권리 증명으로 해석하지 않으며 제작자가 사용 권한을 확보한 리소스를 포함한다.
 
+모든 동작이 `resource`로 이미지나 GIF를 참조하면 manifest의 `image`를 생략할 수 있다. 이 경우 `sheet.frameWidth`와 `sheet.frameHeight`를 표시 기준으로 사용한다. Studio는 첫 스프라이트를 기다리는 빈 프로젝트를 저장할 수 있다. 미리보기와 빌드에는 반복 재생되는 `defaultAnimation`이 필요하다.
+
 ## 4. 이벤트·행동 계약
 
 | Trigger type | 허용 effect | 의미 |
@@ -149,6 +151,10 @@ manifest의 이미지·라이선스 경로는 manifest가 있는 디렉토리 �
 | `typingRate` | `sustainAnimation` | 설정한 측정 창(기본 2초)의 실제 키 입력 속도 구간에 머무르는 동안 반복 애니메이션 |
 | `keySequence` | `playAnimation` | keyword+layout으로 변환한 물리 키 순서 또는 명시적 steps의 매칭 |
 | `drag` | `sustainAnimation` | 버디를 직접 드래그하는 동안 반복 동작. 놓으면 즉시 해제 |
+| `dragDropped` | `playAnimation` | 직접 드래그한 위치를 성공적으로 저장했을 때 한 번 실행 |
+| `firstShown`, `shownAgain` | `playAnimation` | 첫 표시 또는 숨겼다가 다시 표시한 순간에 한 번 실행 |
+| `idleFor` | `playAnimation` | 버디의 대기 상태가 `seconds`(1~3600)만큼 이어졌을 때 실행 |
+| `typingStopped` | `playAnimation` | 일정 시간 타이핑한 뒤 마지막 유효 키 입력에서 멈춤 판정 시간이 지나면 실행 |
 
 typingRate.minKps는 0.5~1000, maxKps는 minKps보다 큰 1000 이하 값이며 생략하면 상한 없음이다. 구간은 `[minKps, maxKps)`이고 프로젝트당 최대 8개, 서로 겹치면 검증 오류다. sustainAnimation은 loop=true인 animation을 참조한다. 키 유지·속도 동작과 이동은 priority를 정수 0~100으로 지정할 수 있다. 생략하면 일회성 → 키 유지 → 속도 → 이동 순서가 적용된다. 드래그 중에는 편집용 동작을 표시한다.
 
@@ -163,10 +169,19 @@ keySequence는 keyword+layout 또는 steps 중 하나만 가진다. keyword는 N
 ### 일회성 반응
 
 - `playAnimation`이 참조하는 animation.loop는 false여야 한다. priority는 정수 0~100(기본 50), cooldownMs는 정수 0~10000(기본 0), retrigger는 restart/ignore(기본 restart)다. animation 참조는 필수다.
+- 선택 필드 `variation`의 `mode`는 `cycle`, `shuffle`, `weighted` 중 하나다. `alternatives`에는 1~7개의 애니메이션 ID를 지정한다. 첫 후보는 `animation`이다. 전체 후보는 서로 다른 일회성 애니메이션이어야 한다. `cycle`은 목록 순서대로 반복하고, `shuffle`은 한 라운드에서 각 후보를 한 번씩 사용하고 라운드 경계에서도 같은 후보가 연속되지 않도록 섞는다.
+- `weighted`는 `weights`에 첫 후보부터 순서대로 후보당 하나의 정수(0~10000)를 요구한다. 최소 한 값은 양수여야 한다. 매번 후보의 비중을 전체 합계로 나눈 확률로 독립 추첨한다. 비중 0은 선택에서 제외된다. `cycle`과 `shuffle`에 보관된 비중은 재생에 사용하지 않는다.
+- 선택 순서는 실행 중 이벤트별로 관리하고, 실제로 반응을 시작했을 때만 전진한다. 숨김·다시 표시 뒤에도 순서는 이어진다. 후보는 이벤트에 설정한 사운드·우선순위·쿨다운을 공유한다. `durationMs`를 생략하면 선택된 애니메이션의 길이를 사용한다.
 - 한 이벤트의 적격 후보는 priority 내림차순, bindings 배열 순서 오름차순으로 하나를 선택한다. 이벤트 간에는 정규화 seq 순서를 따른다. 적격 후보가 없으면 아무것도 시작하지 않는다.
 - 현재 재생 중인 동작의 interruption이 byPriority(기본)이면 더 높은 우선순위 또는 같은 우선순위에서 앞선 정의가 교체한다. replace이면 새로 시작한 적격 이벤트가 즉시 교체한다. finish이면 원래 종료 시각까지 새 이벤트와 반복 입력을 무시한다. 그 외의 동일 이벤트 반복은 retrigger를 따른다.
 - 쿨다운은 binding별 마지막 실제 시작 시각부터 잰다. 쿨다운·우선순위·ignore로 버린 입력은 시각을 갱신하지 않는다. 중단된 반응은 재개·대기열 저장하지 않는다.
 - Rust가 정규화된 프레임 시간 합계 또는 지정한 durationMs 후 종료한다. finish 이외의 동작은 stopOnRelease가 켜져 있으면 해당 키나 버튼을 떼는 시점에도 중단한다. 렌더러 ACK는 완료 조건이 아니다. 종료 시 현재 활성화된 유지 조건의 우선순위를 다시 적용한다. 드래그 중에는 drag 동작이 우선한다.
+
+첫 표시·다시 표시·대기 상태 지속은 입력 반응과 실제 이동에 양보하는 자동 동작이다. 시작할 때 다른 동작이 활성 상태면 해당 차례를 건너뛴다. 숨김·일시정지·편집·설정 중에는 실행하지 않는다. 시선·반전·방향별 대기 애니메이션의 변화는 대기 시간에 포함한다. 실제 이동과 입력 반응이 끝나거나 버디를 다시 활성화한 뒤에는 대기 시간을 새로 센다. 대기 이벤트가 재생되면 같은 이벤트의 다음 간격은 동작이 끝나는 시각부터 센다. 여러 대기 이벤트의 시간이 동시에 되면 기존 우선순위와 목록 순서로 하나를 고른다.
+
+`typingStopped`는 프로젝트당 하나다. Studio는 `minTypingSeconds` 8(2~60), `minKeys` 12(2~100), `pauseMs` 1500(500~5000), `minIntervalSeconds` 45(10~600)를 기본값으로 채운다. 첫 키와 마지막 키 사이의 시간과 키 수가 모두 기준을 채워야 한다. 글자·숫자·공백·문장부호 물리 키를 세고, 자동 반복·Ctrl/Alt/Meta 조합·탐색 키는 건너뛴다. 같은 입력 배치에서 판정 시각에 유효 키가 들어오면 구간을 이어 센다. 입력 감지가 꺼지거나 재시작되거나 버디를 숨기면 진행 중인 구간을 폐기한다.
+
+타이핑 종료는 속도 애니메이션의 중단 시간과 별도로 평가한다. 입력 반응·드래그·실제 이동이 우선하며, 대기 상태 지속과 동시에 실행할 수 있으면 타이핑 종료를 먼저 선택한다. 최소 재반응 간격은 실제 재생을 시작한 시각부터 센다. 실행할 수 없었던 회차와 처리 시점이 판정보다 500ms 넘게 늦어진 회차는 폐기한다.
 
 ### 유지 이동과 방향
 
@@ -247,3 +262,15 @@ preferences v1은 자체 schemaVersion=1과 scale·alwaysOnTop·basePlacement·i
 `defaults.timing`은 `{ "rateWindowMs": 2000, "rateEvaluationMs": 50, "rateStabilityMs": 100, "idleTimeoutMs": 250 }`가 기본이다. 순서대로 범위는 100~10000, 10~250, 0~2000, 50~5000ms이고 평가 간격은 유휴 시간 이하여야 한다. 앱 사용자 설정은 프로젝트 기본값을 덮어쓰며 프로젝트 원본을 변경하지 않는다.
 
 playAnimation의 `durationMs`는 선택적 1~60000ms 표시 시간이다. 생략하면 프레임 시간 합계, 지정하면 마지막 프레임을 유지한 채 그 시간까지 보여준다. `stopOnRelease`는 기본 false이며 `keyDown`, `mouseDown`, 버튼 누름만 포함한 `mouseInput`에서 설정할 수 있다. 반응을 시작한 키나 버튼을 떼면 재생을 즉시 중단한다. `drag` → `sustainAnimation`, `whileKeyDown` → `sustainAnimation`도 허용하며 반복 동작을 참조한다. 드래그가 최우선이고 놓으면 현재 기본 상태로 돌아간다.
+
+## 타이머
+
+선택 필드 `timer`의 `enabled`로 Player 타이머를 켠다. `mode`는 처음 사용할 `countdown` 또는 `pomodoro`다. `countdownSeconds`는 1~10800초(기본 600)다. `pomodoro`에서 `focusMinutes`는 1~120분(기본 25), `shortBreakMinutes`와 `longBreakMinutes`는 각각 1~60분(기본 5, 15), `rounds`는 2~8회(기본 4)다. Player의 개인 설정과 자주 쓰는 시간은 앱별 로컬 저장소에 기록한다.
+
+`countdownPresets`는 표시 순서대로 서로 다른 1~10800초 값을 최대 10개 지정한다. 생략하면 1·5·10·25분 바로가기를 사용하며, 빈 배열이면 바로가기 없이 시작한다. Player에서 목록을 편집하면 개인 목록을 우선 사용한다. **Studio 기본 목록 복원**은 개인 목록을 지운 뒤 현재 배포 설정을 다시 읽는다.
+
+`timerStarted`는 새 단계가 실행될 때, `timerCompleted`는 자연 만료 시에 발생한다. `phase`와 선택 필드 `alternatives`에는 서로 다른 `countdown`, `focus`, `shortBreak`, `longBreak`를 지정한다. 기존 완료 조건의 `break`는 두 휴식에 모두 대응한다. 재개는 남은 시간을 이어서 세며, 건너뛰어 다음 단계가 바로 시작되면 새 단계의 시작 반응이 발생한다. 여러 단계에 연결한 이벤트는 재반응 대기, 모션 선택 순서와 사운드를 공유한다. 입력·드래그·이동에 양보하며 최대 3초 대기한다. 숨김·잠금 중에는 반응 재생 없이 타이머 상태를 갱신한다.
+
+`idleGroups`의 각 묶음에는 고유한 `id`, 선택적인 `name`, 하나 이상의 `states`를 둔다. 상태는 타이머 단계와 같은 값이며 프로젝트 전체에서 한 번만 선택할 수 있다. 선택적인 `animation`은 반복 동작을 지정한다. `cursorMode`는 기본 대기의 방향 설정을 쓰는 `inherit`, 묶음의 `directions`를 쓰는 `custom`, 방향 반응을 끄는 `off`다. 방향에 리소스가 없으면 묶음의 기본 모습, 이어서 필수 `defaultAnimation`을 사용한다. 타이머가 실행 중이며 다른 입력 동작을 재생하지 않을 때 묶음이 적용된다.
+
+`buddyLongPress`는 버디 위에서 이동 기준을 넘지 않고 기본 버튼을 `holdMs`(300~2000ms) 이상 누른 뒤 놓을 때 발동한다. 프로젝트당 하나를 설정할 수 있다.

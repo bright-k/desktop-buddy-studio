@@ -259,6 +259,7 @@ mod tests {
         let first = PreferenceOverrides {
             scale: Some(1.0),
             keyboard: Some(false),
+            sound_enabled: Some(false),
             ..Default::default()
         };
         store.save(&first).unwrap();
@@ -271,6 +272,7 @@ mod tests {
         let (store, recovered) = PreferencesStore::open(dir.path()).unwrap();
         assert_eq!(recovered.scale, Some(1.0));
         assert_eq!(recovered.keyboard, Some(false));
+        assert_eq!(recovered.sound_enabled, Some(false));
         assert!(store.notice.is_some());
     }
 }

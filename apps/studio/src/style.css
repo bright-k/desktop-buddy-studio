@@ -888,6 +888,8 @@ textarea {
 }
 .resource-bottom {
   display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   justify-content: space-between;
   align-items: center;
   padding-top: 0 !important;
@@ -1962,7 +1964,7 @@ textarea:disabled {
 .remote-platforms .error-text {
   overflow-wrap: anywhere;
 }
-.job-status.partial, .job-status.import_failed, .job-status.awaiting_auth {
+.job-status.partial, .job-status.import_failed, .job-status.awaiting_auth, .job-status.sync_failed {
   background: #f7eadc;
   color: #996c35;
 }
@@ -1994,6 +1996,30 @@ textarea:disabled {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+.idle-group-list {
+  margin: 12px 0 0;
+}
+.idle-group-list .binding-row {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+.idle-group-list .binding-row strong,
+.idle-group-list .binding-row small {
+  font-size: 12px;
+}
+.idle-state-owner {
+  display: block;
+  color: #52644d;
+  margin: -4px 0 4px 24px;
+}
+.idle-direction-picker {
+  margin: 10px 0;
+}
+.idle-direction-picker button[aria-pressed="true"] {
+  background: #f0f6e9;
+  border-color: #8aa975;
 }
 .cursor-direction {
   min-width: 0;
@@ -2027,4 +2053,18 @@ textarea:disabled {
 }
 .sound-resource audio {
   width: 100%;
+}
+.sound-resource strong,
+.library-row > span {
+  overflow-wrap: anywhere;
+}
+.form-grid.timer-duration-fields {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+[data-timer-preset] {
+  margin: 8px 0;
+  min-width: 0;
+}
+[data-timer-preset] .row-actions {
+  margin-top: 5px;
 }

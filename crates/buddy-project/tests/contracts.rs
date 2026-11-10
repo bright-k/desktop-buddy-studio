@@ -139,6 +139,147 @@ fn loops_references_and_frame_count_are_semantically_checked() {
     assert!(error.contains("move must reference"));
 }
 #[test]
+fn typing_stopped_validates_timing_and_allows_only_one_binding() {
+    let (mut project, character) = parts();
+    let mut event = serde_json::json!({
+        "id":"typing-done",
+        "trigger":{"type":"typingStopped","minTypingSeconds":2,"minKeys":5,"pauseMs":500,"minIntervalSeconds":10},
+        "effect":{"type":"playAnimation","animation":"click"}
+    });
+    project
+        .bindings
+        .push(serde_json::from_value(event.clone()).unwrap());
+    validate_parts(project.clone(), character.clone()).unwrap();
+    event["id"] = "second-typing-done".into();
+    event["trigger"]["pauseMs"] = 499.into();
+    project
+        .bindings
+        .push(serde_json::from_value(event).unwrap());
+    let error = validate_parts(project, character).unwrap_err().to_string();
+    assert!(
+        error.contains("maximum one typing-stopped event"),
+        "{error}"
+    );
+    assert!(error.contains("trigger.pauseMs"), "{error}");
+}
+
+#[test]
+fn timer_phase_groups_and_weighted_motion_validate_with_legacy_defaults() {
+    use serde_json::json;
+    let (project, character) = parts();
+    let check_binding =
+        |trigger, variation| {
+            let mut project = project.clone();
+            project.bindings.push(serde_json::from_value(json!({
+            "id": "timer-motion",
+            "trigger": trigger,
+            "effect": { "type": "playAnimation", "animation": "click", "variation": variation }
+        })).unwrap());
+            validate_parts(project, character.clone())
+        };
+    let legacy = json!({"type": "timerCompleted", "phase": "focus"});
+    let grouped =
+        json!({"type": "timerCompleted", "phase": "focus", "alternatives": ["countdown", "break"]});
+    assert!(check_binding(legacy, json!({"mode": "cycle", "alternatives": ["jump"]})).is_ok());
+    assert!(check_binding(
+        grouped.clone(),
+        json!({"mode": "weighted", "alternatives": ["jump"], "weights": [0, 10000]})
+    )
+    .is_ok());
+    for weights in [json!(null), json!([10]), json!([0, 0]), json!([10001, 1])] {
+        let error = check_binding(
+            grouped.clone(),
+            json!({"mode": "weighted", "alternatives": ["jump"], "weights": weights}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("effect.variation.weights"), "{error}");
+    }
+    for alternatives in [
+        json!(["focus"]),
+        json!(["break", "break"]),
+        json!(["break", "countdown", "focus"]),
+        json!(["break", "shortBreak"]),
+    ] {
+        let error = check_binding(
+            json!({"type": "timerCompleted", "phase": "focus", "alternatives": alternatives}),
+            json!({"mode": "cycle", "alternatives": ["jump"]}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("trigger.alternatives"), "{error}");
+    }
+    for trigger in [
+        json!({"type":"timerStarted","phase":"countdown","alternatives":["focus","shortBreak","longBreak"]}),
+        json!({"type":"timerCompleted","phase":"countdown","alternatives":["focus","shortBreak","longBreak"]}),
+    ] {
+        assert!(check_binding(trigger, json!({"mode":"cycle","alternatives":["jump"]})).is_ok());
+    }
+}
+
+#[test]
+fn idle_groups_require_unique_states_and_looping_appearances() {
+    use serde_json::json;
+    let (mut project, character) = parts();
+    project.idle_groups = serde_json::from_value(json!([
+        {"id":"rest","name":"휴식","states":["shortBreak","longBreak"],"animation":"walk"},
+        {"id":"work","name":"작업","states":["countdown","focus"],"cursorMode":"custom",
+         "directions":{"up":{"animation":"typing","mirror":true}}}
+    ]))
+    .unwrap();
+    assert!(validate_parts(project.clone(), character.clone()).is_ok());
+    project.idle_groups[1].states.push(TimerPhase::ShortBreak);
+    let error = validate_parts(project.clone(), character.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("$.idleGroups[1].states")
+            && error.contains("휴식")
+            && error.contains("작업"),
+        "{error}"
+    );
+    project.idle_groups[1].states = vec![TimerPhase::Focus, TimerPhase::Focus];
+    assert!(validate_parts(project.clone(), character.clone())
+        .unwrap_err()
+        .to_string()
+        .contains("$.idleGroups[1].states"));
+    project.idle_groups[1].states.clear();
+    assert!(validate_parts(project.clone(), character.clone())
+        .unwrap_err()
+        .to_string()
+        .contains("$.idleGroups[1].states"));
+    project.idle_groups[1].states.push(TimerPhase::Focus);
+    project.idle_groups[0].animation = Some("click".into());
+    assert!(validate_parts(project, character)
+        .unwrap_err()
+        .to_string()
+        .contains("$.idleGroups[0].animation"));
+}
+
+#[test]
+fn motion_candidates_must_be_distinct_existing_one_shots() {
+    let (mut project, character) = parts();
+    project.bindings.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "multi",
+            "trigger": {"type": "buddyClick"},
+            "effect": {
+                "type": "playAnimation", "animation": "click",
+                "variation": {"mode": "cycle", "alternatives": ["click", "walk", "missing"]}
+            }
+        }))
+        .unwrap(),
+    );
+    let error = validate_parts(project, character).unwrap_err().to_string();
+    for index in 0..3 {
+        assert!(
+            error.contains(&format!("variation.alternatives[{index}]")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn overlapping_ranges_and_duplicate_compiled_sequences_fail() {
     let (mut project, character) = parts();
     if let Trigger::TypingRate { min_kps, .. } = &mut project.bindings[1].trigger {

@@ -5,16 +5,16 @@ pub struct EditSession {
     pub id: String,
     pub origin: Point,
     pub monitor: String,
-    pub grab: Point,
+    pub grab_fraction: Point,
     pub scale: f64,
 }
 impl EditSession {
-    pub fn new(origin: Point, monitor: String, grab: Point, scale: f64) -> Self {
+    pub fn new(origin: Point, monitor: String, grab_fraction: Point, scale: f64) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             origin,
             monitor,
-            grab,
+            grab_fraction,
             scale,
         }
     }

@@ -6,7 +6,7 @@
     "x86_64-pc-windows-msvc"
   ],
   "inputHashes": {
-    "Cargo.lock": "2d1ae5876a956e5f83c71402c2d69f91cc22407e63dcd73b49e91299e6c77ad5",
+    "Cargo.lock": "68b0df2ca0b84fdc5a7c2f69179ec634af6b6caa38bc8a7b438a58d2e834c2f3",
     "package-lock.json": "3aa48e5d08d3cae5c73c963d86fd69888604c4cdc9b437c8d6a29157ec2c83bd",
     "LICENSE": "f2f22882db3877a6550bff01df6d2825adcb40f783bbed30ffe40674b8dab7f1",
     "packaging/licenses/about.toml": "42780ae77c59b231b9326ac2d35a795a53c90073bb905fa716bfaae54fa7c802",

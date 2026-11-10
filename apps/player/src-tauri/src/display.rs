@@ -71,6 +71,32 @@ impl Display {
             }
         }
     }
+    pub fn physical_position(&self, point: Point) -> tauri::PhysicalPosition<i32> {
+        tauri::PhysicalPosition::new(
+            (self.origin.x + point.x * self.scale).round() as i32,
+            (self.origin.y + point.y * self.scale).round() as i32,
+        )
+    }
+    pub fn window_size(&self, size: Point, windows: bool) -> tauri::Size {
+        let logical = tauri::LogicalSize::new(size.x, size.y);
+        if windows {
+            logical.to_physical::<u32>(self.scale).into()
+        } else {
+            logical.into()
+        }
+    }
+    pub fn sync_window_size(
+        &self,
+        window: &tauri::WebviewWindow,
+        size: Point,
+    ) -> tauri::Result<()> {
+        let size = self.window_size(size, cfg!(target_os = "windows"));
+        if matches!(size, tauri::Size::Physical(expected) if window.inner_size().ok() == Some(expected))
+        {
+            return Ok(());
+        }
+        window.set_size(size)
+    }
     pub fn position_window(
         &self,
         window: &tauri::WebviewWindow,
@@ -82,10 +108,7 @@ impl Display {
                 self.origin.y / self.scale + point.y,
             ))
         } else {
-            window.set_position(tauri::PhysicalPosition::new(
-                (self.origin.x + point.x * self.scale).round() as i32,
-                (self.origin.y + point.y * self.scale).round() as i32,
-            ))
+            window.set_position(self.physical_position(point))
         }
     }
 }
@@ -240,6 +263,22 @@ mod tests {
             secondary.local_cursor(-900.0, 150.0, true),
             Point { x: 100.0, y: 100.0 }
         );
+    }
+    #[test]
+    fn windows_overlay_size_uses_the_target_dpi_even_when_logical_size_is_unchanged() {
+        let size = Point { x: 300.0, y: 256.0 };
+        for (scale, expected) in [(1.0, (300, 256)), (1.25, (375, 320)), (1.5, (450, 384))] {
+            let monitor = display("target", false, -2000.0, scale);
+            assert_eq!(monitor.fit_size(size), size);
+            assert_eq!(
+                monitor.window_size(size, true),
+                tauri::PhysicalSize::new(expected.0, expected.1).into()
+            );
+            assert_eq!(
+                monitor.window_size(size, false),
+                tauri::LogicalSize::new(300.0, 256.0).into()
+            );
+        }
     }
     #[test]
     fn drag_target_crosses_the_boundary_in_desktop_coordinates() {

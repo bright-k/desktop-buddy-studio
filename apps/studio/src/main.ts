@@ -4,6 +4,9 @@ import type {
   Binding,
   Animation,
   CursorDirection,
+  CursorPose,
+  IdleCursorMode,
+  IdleGroup,
   Effect,
   Interruption,
   FrameRegion,
@@ -17,8 +20,9 @@ import type {
   Resource,
   SoundResource,
   Target,
+  TimerPhase,
 } from "../../../packages/contracts/generated/index";
-import { animationScaleLimits, supportedPhysicalKeys } from "../../../packages/contracts/generated/index";
+import { animationScaleLimits, buddyHoldMs, defaultTimerPresets, supportedPhysicalKeys, timerPresetLimit } from "../../../packages/contracts/generated/index";
 import { CharacterRenderer, horizontalAnchorExtent } from "../../../packages/renderer/src/index";
 import { ReactionAudio } from "../../../packages/renderer/src/audio";
 import macDmgPreset from "../../../packaging/macos/defaults/layout.json";
@@ -45,6 +49,10 @@ type ResourceFile = {
   frames?: number;
   animated?: boolean;
 };
+type MotionPreview = { bindingId: string; revision: string; seed: number; starts: number };
+type TypingStoppedTrigger = Extract<Binding["trigger"], { type: "typingStopped" }>;
+type TypingPreview = { bindingId: string; startAtMs?: number; quietMessage?: string };
+type SimulationFrame = { atMs: number; state: CharacterState; bindingId?: string | null };
 type StudioCharacter = Omit<Character, "resources" | "sounds" | "animations"> & {
   resources: Record<string, Resource>;
   sounds: Record<string, SoundResource>;
@@ -82,9 +90,10 @@ type Job = {
   development: boolean;
   logs: string;
   error?: string;
+  remoteConclusion?: string;
   downloads?: { name: string; bytes?: number }[];
   result?: { directory: string };
-  github?: { repository: string; runUrl?: string };
+  github?: { repository: string; runId?: number; runUrl?: string };
   platforms?: Record<string, { status: string; conclusion?: string; imported?: boolean; importError?: string; steps?: {name: string; status: string; conclusion?: string}[] }>;
 };
 type GitHubState = { repository: string; connected: boolean; ready: boolean; private?: boolean; login?: string; defaultBranch?: string; workflowPresent?: boolean; credentialSource?: string; error?: string };
@@ -97,9 +106,13 @@ let projects: Meta[] = [],
   tab = "overview",
   selectedClip = "idle",
   selectedBinding = 0,
+  selectedIdleGroup = "",
   dirty = false,
   busy = false,
   archived = false;
+let idleGroupDraft: IdleGroup | undefined;
+let selectedIdleDirection: CursorDirection = "center";
+let selectedIdlePhase: TimerPhase | undefined;
 let renderer: CharacterRenderer | undefined,
   previewDocument: Document | undefined,
   previewClip = "",
@@ -123,6 +136,8 @@ let draftRevision: string | null = null,
   projectRequest = 0,
   simulationRequest = 0;
 let connectionIssue = "", polling = false, projectLoading = false;
+let motionPreviewRevision = "";
+const motionPreviews = new Map<string, MotionPreview>();
 let editorWork = "";
 const operationStatus = document.createElement("div");
 operationStatus.className = "operation-status";
@@ -349,8 +364,13 @@ function validationHint(message: string) {
     return "입력 속도·키 유지·드래그 동작은 반복 재생 애니메이션에 연결해주세요.";
   if (message.includes("INVALID_ICON"))
     return "아이콘은 512~1024px 정사각형 PNG여야 합니다.";
+  if (message.includes("resource names must contain"))
+    return "리소스 이름은 1~80자로 입력하세요. 이름을 지우면 원본 이름을 사용합니다.";
   if (message.includes("$.idle.directions") || message.includes("$.defaultAnimation"))
     return "대기 상태에는 반복 재생 동작이나 이미지·GIF 리소스를 연결하세요.";
+  if (message.includes("$.idleGroups"))
+    return message.split("\n").find(line => line.includes("$.idleGroups"))?.split("[INVALID_PROJECT] ").at(-1)
+      ?? "대기 모습 묶음의 적용 상태와 연결한 리소스를 확인하세요.";
   if (message.includes("$.cursorFollow"))
     return "멈춤 거리와 거리별 이동 속도를 확인하세요. 구간에는 반복 애니메이션을 연결할 수 있습니다.";
   if (message.includes("$.defaults.displayHeightDip"))
@@ -371,14 +391,18 @@ function validationPanel() {
 function showValidationError(message: string) {
   validationError = message;
   const binding = message.match(/\$\.bindings\[(\d+)\]/),
-    animation = message.match(/\$\.animations\.([a-zA-Z0-9_-]+)/);
+    animation = message.match(/\$\.animations\.([a-zA-Z0-9_-]+)/),
+    idleGroup = message.match(/\$\.idleGroups\[(\d+)\]/);
   if (binding) {
     tab = "events";
     selectedBinding = Number(binding[1]);
   } else if (animation) {
     tab = "animations";
     selectedClip = animation[1];
-  } else if (message.includes("$.idle") || message.includes("$.defaultAnimation")) tab = "idle";
+  } else if (message.includes("$.idle") || message.includes("$.defaultAnimation")) {
+    tab = "idle";
+    selectedIdleGroup = idleGroup ? doc?.project.idleGroups?.[Number(idleGroup[1])]?.id ?? "" : "";
+  }
   else if (message.includes("$.cursorFollow")) tab = "follow";
   else if (message.includes("$.defaults.timing")) tab = "timing";
   else if (message.includes("$.defaults.displayHeightDip")) tab = "overview";
@@ -407,6 +431,8 @@ const check = (label: string, path: string) =>
 const option = (value: string, label: string, current: string) =>
   `<option value="${esc(value)}" ${value === current ? "selected" : ""}>${esc(label)}</option>`;
 const clips = () => Object.keys(doc!.character.animations);
+const resourceCount = () => Object.keys(doc!.character.resources).length
+  + Object.keys(doc!.character.sounds).length + (doc!.character.image ? 1 : 0);
 const payload = () => ({
   revision: doc!.meta.revision,
   draftRevision,
@@ -445,7 +471,7 @@ function layout(push = false) {
       )
       .join("") ||
     '<p class="empty-small">아직 프로젝트가 없습니다.<br>새로운 버디를 만들어보세요.</p>'
-  }</div><button class="sidebar-new" data-action="new"><span>＋</span> 새 프로젝트</button><div class="sidebar-bottom"><button data-action="archive-list">${archived ? "← 작업 중인 프로젝트" : "▤ 보관한 프로젝트"}</button><span class="workspace-path" title="${esc(config.dataRoot)}">프로젝트는 이 컴퓨터에 저장됩니다.</span><span class="version">DESKTOP BUDDY STUDIO <span>v0.1</span></span></div></aside><div class="workspace">${doc ? editor() : welcome()}</div><div id="toast" class="toast" role="status"></div><dialog id="project-dialog"><form id="new-project-form"><span class="eyebrow">A NEW COMPANION</span><h2>새 버디 프로젝트</h2><p>이름과 고유한 패키지 ID를 정해주세요.</p><label class="field"><span>프로젝트 · 앱 이름</span><input name="name" required maxlength="80" value="My Buddy" autofocus></label><label class="field"><span>패키지 ID · 프로젝트 폴더와 URL</span><input name="packageId" required maxlength="128" value="io.desktopbuddy.app.mybuddy" placeholder="com.example.mybuddy" spellcheck="false" autocomplete="off"><small>예: com.example.typingcat · 생성 후 고정됩니다.</small></label><label class="field"><span>시작 템플릿</span><select name="template"><option value="typing-cat">Typing Cat · 키보드에 반응하는 고양이</option><option value="click-mascot">Click Mascot · 마우스에 반응하는 버디</option></select></label><p id="new-project-error" class="error-text" role="alert" hidden></p><footer><button type="button" data-action="close-dialog">취소</button><button class="primary" type="submit">프로젝트 만들기 ↗</button></footer></form></dialog>`;
+  }</div><button class="sidebar-new" data-action="new"><span>＋</span> 새 프로젝트</button><div class="sidebar-bottom"><button data-action="archive-list">${archived ? "← 작업 중인 프로젝트" : "▤ 보관한 프로젝트"}</button><span class="workspace-path" title="${esc(config.dataRoot)}">프로젝트는 이 컴퓨터에 저장됩니다.</span><span class="version">DESKTOP BUDDY STUDIO <span>v0.1</span></span></div></aside><div class="workspace">${doc ? editor() : welcome()}</div><div id="toast" class="toast" role="status"></div><dialog id="project-dialog"><form id="new-project-form"><span class="eyebrow">A NEW COMPANION</span><h2>새 버디 프로젝트</h2><p>이름과 고유한 패키지 ID를 정해주세요.</p><label class="field"><span>프로젝트 · 앱 이름</span><input name="name" required maxlength="80" value="My Buddy" autofocus></label><label class="field"><span>패키지 ID · 프로젝트 폴더와 URL</span><input name="packageId" required maxlength="128" value="io.desktopbuddy.app.mybuddy" placeholder="com.example.mybuddy" spellcheck="false" autocomplete="off"><small>예: com.example.typingcat · 생성 후 고정됩니다.</small></label><label class="field"><span>시작 템플릿</span><select name="template"><option value="empty">빈 프로젝트 · 직접 리소스 가져오기</option><option value="typing-cat">Typing Cat · 키보드에 반응하는 고양이</option><option value="click-mascot">Click Mascot · 마우스에 반응하는 버디</option></select></label><p id="new-project-error" class="error-text" role="alert" hidden></p><footer><button type="button" data-action="close-dialog">취소</button><button class="primary" type="submit">프로젝트 만들기 ↗</button></footer></form></dialog>`;
   updateEditingStatus();
   setConnection(connectionIssue);
   if (projectLoading) setProjectLoading(true);
@@ -497,7 +523,7 @@ function editor() {
   ]
     .map(
       ([id, label]) =>
-        `<button data-action="tab" data-id="${id}" class="${tab === id ? "active" : ""}">${label}${id === "resources" ? ` <span>${Object.keys(doc!.character.resources ?? {}).length + Object.keys(doc!.character.sounds).length + 1}</span>` : ""}</button>`,
+        `<button data-action="tab" data-id="${id}" class="${tab === id ? "active" : ""}">${label}${id === "resources" ? ` <span>${resourceCount()}</span>` : ""}</button>`,
     )
     .join(
       "",
@@ -506,6 +532,9 @@ function editor() {
 function title(kicker: string, name: string, description: string) {
   return `<div class="section-title"><span class="eyebrow">${kicker}</span><h2>${name}</h2><p>${description}</p></div>`;
 }
+function firstSpriteCard() {
+  return '<div class="card"><h3>첫 스프라이트를 추가하세요</h3><p class="hint">리소스에서 이미지나 GIF를 가져오면 기본 대기 동작을 만들 수 있습니다.</p><button class="small" data-action="tab" data-id="resources">리소스로 이동 →</button></div>';
+}
 function defaultSizeFields() {
   const defaults = doc!.project.defaults;
   const absolute = defaults.displayHeightDip != null;
@@ -513,8 +542,60 @@ function defaultSizeFields() {
     ? field("기본 대기 높이 (DIP)", "project.defaults.displayHeightDip", "number", 'min="16" max="1024" step="any"')
     : field("기본 크기 배율", "project.defaults.scale", "number", 'min="0.25" max="3" step="0.05"')}`;
 }
+function setTimerEnabled(enabled: boolean) {
+  if (!doc || doc.meta.archived) return;
+  doc.project.timer ??= { enabled: false, mode: "countdown", countdownSeconds: 600,
+    pomodoro: { focusMinutes: 25, shortBreakMinutes: 5, longBreakMinutes: 15, rounds: 4 } };
+  doc.project.timer.enabled = enabled;
+  markDirty();
+  layout();
+}
+function timerDurationFields(seconds: number, attribute: "data-timer-time" | "data-timer-preset-unit") {
+  const fields = [
+    ["시간", Math.floor(seconds / 3600), 3],
+    ["분", Math.floor(seconds / 60) % 60, 59],
+    ["초", seconds % 60, 59],
+  ] as const;
+  return `<div class="form-grid timer-duration-fields">${fields.map(([label, value, max]) =>
+    `<label class="field"><span>${label}</span><input ${attribute} type="number" inputmode="numeric" min="0" max="${max}" step="1" value="${value}"></label>`).join("")}</div>`;
+}
+function readTimerDuration(fields: HTMLInputElement[]) {
+  const seconds = fields.reduce((sum, field, index) => sum + Number(field.value) * [3600, 60, 1][index], 0);
+  return fields.every(field => field.validity.valid) && seconds >= 1 && seconds <= 10800 ? seconds : 0;
+}
+function timerPresetWarning(presets: readonly number[]) {
+  if (presets.some(seconds => !seconds)) return "바로가기 시간은 1초부터 3시간 사이로 입력하세요.";
+  return new Set(presets).size === presets.length ? "" : "같은 시간의 바로가기는 하나만 등록할 수 있습니다.";
+}
+function timerSettings() {
+  const timer = doc!.project.timer;
+  const toggle = `<label class="toggle"><input type="checkbox" id="timer-enabled" ${timer?.enabled ? "checked" : ""}><span>타이머 사용</span></label>`;
+  if (!timer?.enabled) return `<div class="card"><h3>타이머</h3>${toggle}</div>`;
+  const presets = timer.countdownPresets ?? defaultTimerPresets;
+  return `<div class="card"><h3>타이머</h3>${toggle}
+    <label class="field"><span>처음 열 모드</span><select data-path="project.timer.mode">${option("countdown", "일반 타이머", timer.mode)}${option("pomodoro", "뽀모도로", timer.mode)}</select></label>
+    <fieldset><legend>일반 타이머 기본 시간</legend>${timerDurationFields(timer.countdownSeconds, "data-timer-time")}
+    <p class="hint" id="timer-time-hint">처음 직접 입력할 때 채워지는 값입니다. 1초부터 3시간까지 설정할 수 있습니다.</p></fieldset>
+    <div class="card-heading"><h3>일반 타이머 바로가기</h3><button type="button" class="small" data-action="timer-preset-add" ${presets.length >= timerPresetLimit ? "disabled" : ""}>＋ 바로가기</button></div>
+    <p class="hint">Player에 배포할 바로가기입니다. 표시 순서대로 누르면 바로 시작하며, Player에서 개인 목록을 저장하거나 이 목록으로 복원할 수 있습니다.</p>
+    ${presets.map((seconds, index) => `<fieldset data-timer-preset="${index}"><legend>바로가기 ${index + 1}</legend>
+      ${timerDurationFields(seconds, "data-timer-preset-unit")}
+      <div class="row-actions">
+        <button type="button" class="small" data-action="timer-preset-move" data-id="${index}:-1" ${index === 0 ? "disabled" : ""}>위로</button>
+        <button type="button" class="small" data-action="timer-preset-move" data-id="${index}:1" ${index === presets.length - 1 ? "disabled" : ""}>아래로</button>
+        <button type="button" class="text-button danger" data-action="timer-preset-remove" data-id="${index}">삭제</button>
+      </div></fieldset>`).join("")}
+    <p class="error-text" id="timer-preset-warning">${timerPresetWarning(presets)}</p>
+    <div class="form-grid">
+      ${field("집중 (분)", "project.timer.pomodoro.focusMinutes", "number", 'min="1" max="120" step="1"')}
+      ${field("짧은 휴식 (분)", "project.timer.pomodoro.shortBreakMinutes", "number", 'min="1" max="60" step="1"')}
+      ${field("긴 휴식 (분)", "project.timer.pomodoro.longBreakMinutes", "number", 'min="1" max="60" step="1"')}
+      ${field("긴 휴식까지 집중 완료 (회)", "project.timer.pomodoro.rounds", "number", 'min="2" max="8" step="1"')}
+    </div><p class="hint">Player에서 자주 쓰는 시간과 개인 뽀모도로 설정을 저장할 수 있습니다.</p>
+    <button class="small" data-action="tab" data-id="events">완료 반응 설정 →</button></div>`;
+}
 function overview() {
-  return `${title("PROJECT DETAILS", "프로젝트 설정", "앱 이름, 표시 크기와 기본 동작을 설정합니다.")}<div class="card"><div class="form-grid">${field("앱 이름", "project.product.name")}${field("실행 파일 이름 (slug)", "project.product.slug", "text", (doc!.meta.builtSlug || jobs.some((j) => (!j.productIdentifier || j.productIdentifier === doc!.meta.identifier) && (j.status === "succeeded" || j.status === "partial"))) ? "readonly" : "")}${field("버전", "project.product.version")}${field("캐릭터 이름", "character.name")}</div><label class="field"><span>패키지 ID <small>프로젝트 폴더·URL·앱 식별자로 사용합니다.</small></span><input value="${esc(doc!.project.product.identifier)}" readonly></label></div><div class="card"><h3>데스크톱에서의 모습</h3><div class="form-grid">${defaultSizeFields()}${field("처음 배치 여백 (DIP)", "project.defaults.position.marginDip", "number", 'min="0" max="256"')}${field("기준 프레임 너비 (px)", "character.sheet.frameWidth", "number", 'min="16" max="512"')}${field("기준 프레임 높이 (px)", "character.sheet.frameHeight", "number", 'min="16" max="512"')}</div><p class="hint">표시 높이는 투명 여백을 제외한 기본 대기 애니메이션의 높이입니다. 화면에 맞춰 줄어들 수 있으며, 화면 가장자리에서는 모든 동작에 여백을 둡니다.</p>${check("항상 위에 표시", "project.defaults.alwaysOnTop")}${check("키보드 감지", "project.defaults.input.keyboard")}${check("마우스 감지", "project.defaults.input.mouse")}${check("키를 누른 채 이동", "project.defaults.movementEnabled")}</div><div class="card"><h3>앱 아이콘 · 리소스 이용 조건</h3><div class="icon-upload"><img src="/api/projects/${doc!.meta.id}/source/assets/app-icon.png" alt="앱 아이콘"><div><strong>앱 아이콘</strong><p>512~1024px 정사각형 PNG</p><label class="button small">아이콘 교체<input type="file" id="icon-upload" accept="image/png" hidden></label></div></div><label class="field"><span>프로젝트 리소스 라이선스</span><textarea data-path="license" rows="5">${esc(doc!.license)}</textarea></label><p class="hint">가져온 리소스의 이용 조건과 출처를 여기에 모아두세요. 빌드 패키지에 함께 포함됩니다.</p></div>`;
+  return `${title("PROJECT DETAILS", "프로젝트 설정", "앱 이름, 표시 크기와 기본 동작을 설정합니다.")}<div class="card"><div class="form-grid">${field("앱 이름", "project.product.name")}${field("실행 파일 이름 (slug)", "project.product.slug", "text", (doc!.meta.builtSlug || jobs.some((j) => (!j.productIdentifier || j.productIdentifier === doc!.meta.identifier) && (j.status === "succeeded" || j.status === "partial"))) ? "readonly" : "")}${field("버전", "project.product.version")}${field("캐릭터 이름", "character.name")}</div><label class="field"><span>패키지 ID <small>프로젝트 폴더·URL·앱 식별자로 사용합니다.</small></span><input value="${esc(doc!.project.product.identifier)}" readonly></label></div><div class="card"><h3>데스크톱에서의 모습</h3><div class="form-grid">${defaultSizeFields()}${field("처음 배치 여백 (DIP)", "project.defaults.position.marginDip", "number", 'min="0" max="256"')}${field("기준 프레임 너비 (px)", "character.sheet.frameWidth", "number", 'min="16" max="512"')}${field("기준 프레임 높이 (px)", "character.sheet.frameHeight", "number", 'min="16" max="512"')}</div><p class="hint">표시 높이는 투명 여백을 제외한 기본 대기 애니메이션의 높이입니다. 화면에 맞춰 줄어들 수 있으며, 화면 가장자리에서는 모든 동작에 여백을 둡니다.</p>${check("항상 위에 표시", "project.defaults.alwaysOnTop")}${check("키보드 감지", "project.defaults.input.keyboard")}${check("마우스 감지", "project.defaults.input.mouse")}${check("키를 누른 채 이동", "project.defaults.movementEnabled")}</div>${timerSettings()}<div class="card"><h3>앱 아이콘 · 리소스 이용 조건</h3><div class="icon-upload"><img src="/api/projects/${doc!.meta.id}/source/assets/app-icon.png" alt="앱 아이콘"><div><strong>앱 아이콘</strong><p>512~1024px 정사각형 PNG</p><label class="button small">아이콘 교체<input type="file" id="icon-upload" accept="image/png" hidden></label></div></div><label class="field"><span>프로젝트 리소스 라이선스</span><textarea data-path="license" rows="5">${esc(doc!.license)}</textarea></label><p class="hint">가져온 리소스의 이용 조건과 출처를 여기에 모아두세요. 빌드 패키지에 함께 포함됩니다.</p></div>`;
 }
 function resourceReferences(id: string) {
   const used = Object.entries(doc!.character.animations).filter(([, a]) => (a.resource ?? "sheet") === id);
@@ -523,11 +604,13 @@ function resourceReferences(id: string) {
 function usesAnimation(effect: Effect, name: string) {
   return effect.type === "faceCursor"
     ? Object.values(effect.directions ?? {}).some((pose) => pose.animation === name)
-    : effect.animation === name;
+    : effect.animation === name || (effect.type === "playAnimation" && effect.variation?.alternatives.includes(name));
 }
 function usedByIdle(name: string) {
   return doc!.character.defaultAnimation === name
-    || Object.values(doc!.project.idle?.directions ?? {}).some((pose) => pose.animation === name);
+    || Object.values(doc!.project.idle?.directions ?? {}).some((pose) => pose.animation === name)
+    || [...(doc!.project.idleGroups ?? []), ...(idleGroupDraft ? [idleGroupDraft] : [])].some(group =>
+      group.animation === name || Object.values(group.directions ?? {}).some(pose => pose.animation === name));
 }
 function animationReferences(name: string) {
   const used = doc!.project.bindings.map((b, i) => ({ b, i })).filter(({ b }) => usesAnimation(b.effect, name));
@@ -535,27 +618,36 @@ function animationReferences(name: string) {
 }
 const isAudio = (filename: string) => /\.(mp3|wav)$/i.test(filename);
 const isImage = (filename: string) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(filename);
-function soundName(id: string, file: string) {
-  return doc!.library[file]?.originalName ?? id;
+function originalResourceName(id: string, resource: Resource | SoundResource) {
+  const path = "image" in resource ? resource.image : resource.audio;
+  return doc!.library[path.slice("resources/".length)]?.originalName ?? id;
+}
+function resourceName(id: string, resource: Resource | SoundResource) {
+  return resource.name ?? originalResourceName(id, resource);
 }
 function soundCards() {
   const sounds = Object.entries(doc!.character.sounds);
   if (!sounds.length) return "";
   return `<div class="card"><h3>사운드 <span class="count">${sounds.length}</span></h3>${sounds.map(([id, sound]) => {
     const file = sound.audio.slice(10);
+    const name = resourceName(id, sound);
     const bindings = doc!.project.bindings.map((binding, index) => ({ binding, index }))
       .filter(({ binding }) => binding.sound?.resource === id);
-    return `<div class="sound-resource"><div class="card-heading"><strong>${esc(soundName(id, file))}</strong><button class="text-button danger" data-action="remove-sound" data-id="${esc(id)}">제외</button></div><audio controls preload="none" aria-label="${esc(soundName(id, file))} 들어보기" src="${resourceUrl(file)}"></audio><div class="usage-links">${bindings.map(({ binding, index }) => `<button class="chip" data-action="reference-binding" data-id="${index}">${esc(binding.id)} →</button>`).join("")}</div></div>`;
+    return `<div class="sound-resource"><div class="card-heading"><strong title="${esc(originalResourceName(id, sound))}">${esc(name)}</strong><div class="row-actions"><button class="text-button" data-action="rename-sound" data-id="${esc(id)}" aria-label="${esc(name)} 이름 수정">이름 수정</button><button class="text-button danger" data-action="remove-sound" data-id="${esc(id)}">제외</button></div></div><audio controls preload="none" aria-label="${esc(name)} 들어보기" src="${resourceUrl(file)}"></audio><div class="usage-links">${bindings.map(({ binding, index }) => `<button class="chip" data-action="reference-binding" data-id="${index}">${esc(binding.id)} →</button>`).join("")}</div></div>`;
   }).join("")}</div>`;
 }
 function resources() {
   const entries = Object.entries(doc!.character.resources ?? {});
   const library = Object.values(doc!.library).filter(file => isImage(file.name) || isAudio(file.name));
-  return `${title("RESOURCE LIBRARY", "이미지와 사운드", "이미지와 사운드를 가져와 애니메이션이나 이벤트에 연결하세요.")}<label class="dropzone" id="dropzone"><input type="file" id="resource-upload" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.wav,.mp3" multiple hidden><span class="upload-symbol">↥</span><strong>이미지나 사운드를 놓거나 클릭해서 가져오기</strong><span>PNG · JPG · GIF · WebP · BMP · WAV · MP3 / 파일당 최대 16 MiB</span></label><p class="hint">이미지와 GIF는 표시할 때 기준 프레임에 자동으로 맞춥니다. <button class="text-button" data-action="tab" data-id="overview">크기 기준 ${doc!.character.sheet.frameWidth} × ${doc!.character.sheet.frameHeight} px</button></p><div class="resource-grid"><article class="resource-card"><div class="resource-art checker"><img src="${sourceUrl(doc!.character.image)}" alt="기본 스프라이트"></div><div><strong>기본 스프라이트</strong><span>PNG · ${doc!.character.sheet.width} × ${doc!.character.sheet.height}</span></div><small class="resource-id">sheet · 기본 제공</small>${resourceReferences("sheet")}</article>${entries
+  const image = doc!.character.image;
+  const sheetInUse = Object.values(doc!.character.animations).some(animation => !animation.resource);
+  const baseSprite = image ? `<article class="resource-card"><div class="resource-art checker"><img src="${sourceUrl(image)}" alt="기본 스프라이트"></div><div><strong>기본 스프라이트</strong><span>PNG · ${doc!.character.sheet.width} × ${doc!.character.sheet.height}</span></div><div class="resource-bottom"><small class="resource-id">sheet · 기본 제공</small><button class="text-button danger" data-action="remove-base-sprite" ${sheetInUse ? 'disabled title="이 스프라이트를 사용하는 동작을 먼저 변경하세요."' : ""}>제외</button></div>${resourceReferences("sheet")}</article>` : "";
+  return `${title("RESOURCE LIBRARY", "이미지와 사운드", "이미지와 사운드를 가져와 애니메이션이나 이벤트에 연결하세요.")}<label class="dropzone" id="dropzone"><input type="file" id="resource-upload" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.wav,.mp3" multiple hidden><span class="upload-symbol">↥</span><strong>${doc!.character.defaultAnimation ? "이미지나 사운드를 놓거나 클릭해서 가져오기" : "첫 스프라이트를 놓거나 클릭해서 가져오기"}</strong><span>PNG · JPG · GIF · WebP · BMP · WAV · MP3 / 파일당 최대 16 MiB</span></label><p class="hint">이미지와 GIF는 표시할 때 기준 프레임에 자동으로 맞춥니다. <button class="text-button" data-action="tab" data-id="overview">크기 기준 ${doc!.character.sheet.frameWidth} × ${doc!.character.sheet.frameHeight} px</button></p><div class="resource-grid">${baseSprite}${entries
     .map(([id, r]) => {
       const f = r.image.slice(10),
-        file = doc!.library[f];
-      return `<article class="resource-card"><div class="resource-art checker"><img src="${resourceUrl(f)}" alt="${esc(id)}" loading="lazy" decoding="async"></div><div><strong title="${esc(file?.originalName)}">${esc(file?.originalName ?? id)}</strong><span>${esc(f.split(".").at(-1)?.toUpperCase())} · ${file ? prettySize(file.bytes) : ""}</span></div><div class="resource-bottom"><small class="resource-id">${esc(id)}</small><button class="text-button danger" data-action="remove-resource" data-id="${esc(id)}">제외</button></div>${resourceReferences(id)}</article>`;
+        file = doc!.library[f],
+        name = resourceName(id, r);
+      return `<article class="resource-card"><div class="resource-art checker"><img src="${resourceUrl(f)}" alt="${esc(name)}" loading="lazy" decoding="async"></div><div><strong title="${esc(originalResourceName(id, r))}">${esc(name)}</strong><span>${esc(f.split(".").at(-1)?.toUpperCase())} · ${file ? prettySize(file.bytes) : ""}</span></div><div class="resource-bottom"><small class="resource-id">${esc(id)}</small><div class="row-actions"><button class="text-button" data-action="rename-resource" data-id="${esc(id)}" aria-label="${esc(name)} 이름 수정">이름 수정</button><button class="text-button danger" data-action="remove-resource" data-id="${esc(id)}">제외</button></div></div>${resourceReferences(id)}</article>`;
     })
     .join(
       "",
@@ -563,28 +655,29 @@ function resources() {
     library
       .map((f) => {
         const used = isAudio(f.name)
-          ? Object.values(doc!.character.sounds).some((sound) => sound.audio === `resources/${f.name}`)
-          : Object.values(doc!.character.resources).some((resource) => resource.image === `resources/${f.name}`);
-        return `<div class="library-row"><span>${esc(f.originalName)} <small>${prettySize(f.bytes)}</small></span><button class="text-button" data-action="reuse-resource" data-id="${f.name}" ${used ? "disabled" : ""}>${used ? "사용 중" : "구성에 추가"}</button></div>`;
+          ? Object.values(doc!.character.sounds).find((sound) => sound.audio === `resources/${f.name}`)
+          : entries.find(([, resource]) => resource.image === `resources/${f.name}`)?.[1];
+        return `<div class="library-row"><span title="${esc(f.originalName)}">${esc(used?.name ?? f.originalName)} <small>${prettySize(f.bytes)}</small></span><button class="text-button" data-action="reuse-resource" data-id="${f.name}" ${used ? "disabled" : ""}>${used ? "사용 중" : "구성에 추가"}</button></div>`;
       })
       .join("") || '<p class="hint">아직 가져온 원본 파일이 없습니다.</p>'
   }</div>`;
 }
 function animations() {
   const names = clips();
+  if (!names.length) return firstSpriteCard();
   if (!names.includes(selectedClip)) selectedClip = names[0];
   const a = doc!.character.animations[selectedClip],
     p = `character.animations.${selectedClip}`;
   const isGif =
     !!a.resource &&
     doc!.character.resources[a.resource]?.image.toLowerCase().endsWith(".gif");
-  return `${title("ANIMATION CLIPS", "애니메이션 편집", "한 장의 이미지, GIF 전체 또는 스프라이트의 특정 영역을 하나의 동작으로 정의합니다.")}<div class="subheading"><div class="clip-chips">${names.map((n) => `<button class="chip ${n === selectedClip ? "active" : ""}" data-action="clip" data-id="${esc(n)}">${esc(n)} <small>${doc!.character.animations[n].loop ? "↻" : "→"}</small></button>`).join("")}</div><button class="small" data-action="add-clip">＋ 동작</button></div><div class="card"><div class="card-heading"><h3>${esc(selectedClip)}</h3>${selectedClip !== doc!.character.defaultAnimation ? '<button class="text-button danger" data-action="remove-clip">동작 삭제</button>' : '<span class="pill">기본 대기 동작</span>'}</div><label class="field"><span>표시할 리소스</span><select id="clip-resource">${option("sheet", "기본 PNG 스프라이트", a.resource ?? "sheet")}${Object.entries(
+  return `${title("ANIMATION CLIPS", "애니메이션 편집", "한 장의 이미지, GIF 전체 또는 스프라이트의 특정 영역을 하나의 동작으로 정의합니다.")}<div class="subheading"><div class="clip-chips">${names.map((n) => `<button class="chip ${n === selectedClip ? "active" : ""}" data-action="clip" data-id="${esc(n)}">${esc(n)} <small>${doc!.character.animations[n].loop ? "↻" : "→"}</small></button>`).join("")}</div><button class="small" data-action="add-clip">＋ 동작</button></div><div class="card"><div class="card-heading"><h3>${esc(selectedClip)}</h3>${selectedClip !== doc!.character.defaultAnimation ? '<button class="text-button danger" data-action="remove-clip">동작 삭제</button>' : '<span class="pill">기본 대기 동작</span>'}</div><label class="field"><span>표시할 리소스</span><select id="clip-resource">${doc!.character.image ? option("sheet", "기본 PNG 스프라이트", a.resource ?? "sheet") : ""}${Object.entries(
     doc!.character.resources ?? {},
   )
     .map(([id, r]) =>
       option(
         id,
-        `${doc!.library[r.image.slice(10)]?.originalName ?? id} · ${id}`,
+        `${resourceName(id, r)} · ${id}`,
         a.resource ?? "sheet",
       ),
     )
@@ -678,16 +771,32 @@ const triggerNames: Record<string, string> = {
   keySequence: "키워드 입력",
   mouseInput: "마우스·트랙패드",
   drag: "버디 드래그",
+  dragDropped: "드래그 후 놓기",
+  firstShown: "첫 표시",
+  shownAgain: "다시 표시",
+  idleFor: "버디 대기 상태 지속",
+  typingStopped: "타이핑 후 멈춤",
+  buddyLongPress: "버디 길게 누르기",
+  timerStarted: "타이머 시작",
+  timerCompleted: "타이머 완료",
 };
+const timerPhaseLabels: Record<TimerPhase, string> = {
+  countdown: "일반 타이머", focus: "집중", shortBreak: "짧은 휴식", longBreak: "긴 휴식",
+};
+const timerPhases = Object.keys(timerPhaseLabels) as TimerPhase[];
+function automaticTrigger(type: string) {
+  return type === "firstShown" || type === "shownAgain" || type === "idleFor" || type === "typingStopped" || type === "timerCompleted" || type === "timerStarted";
+}
 function triggerCategory(trigger: Binding["trigger"]) {
   return pointerInputs(trigger) ? "mouseInput" : trigger.type;
 }
 function events() {
+  if (!doc!.character.defaultAnimation) return firstSpriteCard();
   const bindings = doc!.project.bindings;
   if (selectedBinding >= bindings.length)
     selectedBinding = Math.max(0, bindings.length - 1);
   const b = bindings[selectedBinding];
-  return `${title("EVENT MAPPINGS", "이벤트 편집", "다른 앱에서 작업하는 동안의 입력과 버디를 직접 클릭하거나 드래그했을 때의 동작을 설정합니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 우선순위가 높을수록 먼저 표시됩니다. 같으면 보조 키 조건을 지정한 이벤트, 그다음 목록에서 위에 있는 이벤트가 우선합니다. 버디를 드래그하는 동안에는 드래그 동작이 가장 먼저 표시됩니다.</span><div class="row-actions"><button class="small" data-action="tab" data-id="idle">대기 상태 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[triggerCategory(b.trigger)]} ${esc(inputChoices(b.trigger).filter(Boolean).join(" / "))}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc((b.effect as any).animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
+  return `${title("EVENT MAPPINGS", "이벤트 편집", "입력, 버디 조작, 표시와 대기 상태에 연결할 동작을 설정합니다.")}<div class="subheading"><span class="hint">${bindings.length}개의 이벤트 · 우선순위가 높을수록 먼저 표시됩니다. 같으면 보조 키 조건을 지정한 이벤트, 그다음 목록에서 위에 있는 이벤트가 우선합니다. 드래그 중에는 드래그 동작이 먼저 표시됩니다. 자동 동작보다 입력과 이동이 우선합니다.</span><div class="row-actions"><button class="small" data-action="tab" data-id="idle">대기 상태 설정</button><button class="small" data-action="add-binding">＋ 이벤트</button></div></div><div class="binding-list">${bindings.map((b, i) => `<button class="binding-row ${i === selectedBinding ? "active" : ""}" data-action="binding" data-id="${i}"><span class="binding-icon">${b.trigger.type === "typingRate" ? "↯" : b.trigger.type === "drag" ? "✥" : "⌘"}</span><span><strong>${esc(b.id)}</strong><small>${triggerNames[triggerCategory(b.trigger)]} ${esc(b.trigger.type === "idleFor" ? `${b.trigger.seconds}초` : inputChoices(b.trigger).filter(Boolean).join(" / "))}</small></span><span class="binding-arrow">→</span><span class="binding-animation">${esc(b.effect.type === "faceCursor" ? "방향 전환" : b.effect.type === "playAnimation" && b.effect.variation ? `${1 + b.effect.variation.alternatives.length}개 모션` : b.effect.animation ?? "방향 전환")}</span></button>`).join("")}</div>${b ? bindingEditor(b) : '<div class="card empty-small">이벤트를 추가해서 동작과 연결하세요.</div>'}`;
 }
 function followSettings() {
   const heading = title("CURSOR FOLLOW", "마우스 따라오기", "마우스까지의 거리에 따라 이동 속도와 애니메이션을 바꿉니다.");
@@ -716,11 +825,8 @@ const cursorDirections: [CursorDirection, string][] = [
 ];
 function idleAppearanceOptions(current: string | undefined, inherited = false) {
   const resources = doc!.character.resources;
-  const imageName = (id: string) => {
-    const path = resources[id].image;
-    return doc!.library[path.slice(10)]?.originalName ?? path.split("/").at(-1) ?? id;
-  };
-  const selected = current ? `clip:${current}` : "";
+  const imageName = (id: string) => resourceName(id, resources[id]);
+  const selected = current?.startsWith("resource:") ? current : current ? `clip:${current}` : "";
   const loops = clips().filter((name) => doc!.character.animations[name].loop);
   return (inherited ? option("", "기본 대기 모습 사용", selected) : "")
     + `<optgroup label="반복 애니메이션">${loops.map((name) => {
@@ -735,6 +841,7 @@ function idleAppearanceOptions(current: string | undefined, inherited = false) {
 function selectIdleAppearance(value: string) {
   if (value.startsWith("clip:")) return value.slice(5);
   const resource = value.slice("resource:".length);
+  if (!Object.hasOwn(doc!.character.resources, resource)) throw new Error("프로젝트에 있는 이미지나 GIF를 선택하세요.");
   const animations = doc!.character.animations;
   const reusable = Object.entries(animations).find(([, animation]) =>
     animation.resource === resource && animation.loop && animation.fps === 12
@@ -749,30 +856,75 @@ function selectIdleAppearance(value: string) {
   animations[name] = { resource, frames: [], regions: [], fps: 12, loop: true, useSourceTiming: true };
   return name;
 }
-function idleSettings() {
+function idleGroupName(group: IdleGroup) {
+  return group.name?.trim() || group.states.map(phase => timerPhaseLabels[phase]).join(" · ") || "새 대기 모습";
+}
+function currentIdleGroup() {
+  return idleGroupDraft?.id === selectedIdleGroup ? idleGroupDraft
+    : doc?.project.idleGroups?.find(group => group.id === selectedIdleGroup);
+}
+function idleStateOwner(phase: TimerPhase) {
+  return doc!.project.idleGroups?.find(group => group.states.includes(phase))
+    ?? (idleGroupDraft?.states.includes(phase) ? idleGroupDraft : undefined);
+}
+function idleDirectionsEditor(group: IdleGroup | undefined) {
   const idle = doc!.project.idle;
-  const enabled = idle?.cursorEnabled ?? false;
-  return `${title("IDLE STATE", "대기 상태", "다른 동작이 재생되지 않을 때 표시할 기본 모습을 정하세요.")}<div class="card">
-    <h3>기본 대기 모습</h3>
-    <label class="field"><span>애니메이션 또는 리소스</span><select id="idle-appearance">${idleAppearanceOptions(doc!.character.defaultAnimation)}</select></label>
-    <p class="hint">이미지나 GIF를 바로 선택하면 전체 리소스를 사용하는 반복 동작이 만들어집니다.</p>
-    <button class="small" data-action="test-idle">기본 대기 미리보기</button></div>
-    <div class="card"><h3>커서 방향별 모습</h3>
-    <label class="toggle"><input type="checkbox" id="idle-cursor-enabled" ${enabled ? "checked" : ""}><span>커서 위치에 따라 모습 바꾸기</span></label>
-    <p class="hint">버디 앱에서 마우스 감지를 켜면 대기 중에만 적용합니다. 비워 둔 칸은 기본 대기 모습을 사용합니다.</p>
-    ${enabled ? `<div class="cursor-directions">${cursorDirections.map(([direction, label]) => {
-      const pose = idle?.directions?.[direction];
-      const mirror = pose?.mirror == null ? "" : String(pose.mirror);
-      return `<fieldset class="cursor-direction"><legend>${label}</legend>
-        <label class="field"><span>애니메이션 또는 리소스</span><select data-cursor-direction="${direction}" data-pose-field="animation">${idleAppearanceOptions(pose?.animation ?? undefined, true)}</select></label>
-        <label class="field"><span>좌우 방향</span><select data-cursor-direction="${direction}" data-pose-field="mirror">${option("", "자동 (커서 방향)", mirror)}${option("false", "원본", mirror)}${option("true", "좌우 반전", mirror)}</select></label>
-        <button class="small" data-action="test-cursor" data-id="${direction}" aria-label="${label} 미리보기">미리보기</button></fieldset>`;
-    }).join("")}</div>` : ""}</div>`;
+  const custom = group?.cursorMode === "custom";
+  const directions = custom ? group.directions : idle?.directions;
+  const enabled = custom || (group?.cursorMode !== "off" && idle?.cursorEnabled);
+  const pose = directions?.[selectedIdleDirection];
+  const mirror = pose?.mirror == null ? "" : String(pose.mirror);
+  const readonly = group && !custom ? "disabled" : "";
+  const activeDirection = cursorDirections.find(([direction]) => direction === selectedIdleDirection)![1];
+  return `<div class="card"><h3>커서 방향별 모습</h3>
+    ${group ? `<label class="field"><span>방향 설정</span><select id="idle-group-cursor-mode">${option("inherit", "기본 대기 방향 설정 사용", group.cursorMode)}${option("custom", "방향별로 직접 설정", group.cursorMode)}${option("off", "사용 안 함", group.cursorMode)}</select></label>`
+      : `<label class="toggle"><input type="checkbox" id="idle-cursor-enabled" ${idle?.cursorEnabled ? "checked" : ""}><span>커서 위치에 따라 모습 바꾸기</span></label>`}
+    <p class="hint">${group?.cursorMode === "off" ? "커서 위치와 관계없이 묶음의 기본 모습을 사용합니다."
+      : group?.cursorMode === "inherit" && !enabled ? "기본 대기에서 커서 방향 설정이 꺼져 있습니다."
+      : "Player에서 마우스 감지가 켜져 있을 때 적용합니다. 리소스가 비어 있는 방향은 편집 중인 기본 모습을 사용합니다."}</p>
+    ${enabled ? `<div class="cursor-directions idle-direction-picker" role="group" aria-label="커서 방향 선택">${cursorDirections.map(([direction, label]) =>
+      `<button class="small" data-action="idle-direction" data-id="${direction}" aria-pressed="${direction === selectedIdleDirection}">${label}${directions?.[direction] ? " · 설정됨" : ""}</button>`).join("")}</div>
+      <fieldset class="cursor-direction"><legend>${activeDirection}</legend><div class="form-grid">
+      <label class="field"><span>애니메이션 또는 리소스</span><select data-idle-pose-field="animation" ${readonly}>${idleAppearanceOptions(pose?.animation ?? undefined, true)}</select></label>
+      <label class="field"><span>좌우 방향</span><select data-idle-pose-field="mirror" ${readonly}>${option("", "자동 (커서 방향)", mirror)}${option("false", "원본", mirror)}${option("true", "좌우 반전", mirror)}</select></label></div>
+      <button class="small" data-action="test-cursor" data-id="${selectedIdleDirection}" ${(group && group === idleGroupDraft) || !doc!.project.defaults.input.mouse ? "disabled" : ""}>이 방향 미리보기</button></fieldset>` : ""}</div>`;
+}
+function idleSettings() {
+  if (!doc!.character.defaultAnimation) return firstSpriteCard();
+  const group = currentIdleGroup();
+  const isDraft = !!group && group === idleGroupDraft;
+  const groups = doc!.project.idleGroups ?? [];
+  const items = [...groups, ...(idleGroupDraft ? [idleGroupDraft] : [])];
+  const unassigned = timerPhases.filter(phase => !groups.some(group => group.states.includes(phase)));
+  const phase = selectedIdlePhase && group?.states.includes(selectedIdlePhase) ? selectedIdlePhase : group?.states[0];
+  return `${title("IDLE STATE", "대기 상태", "같은 모습을 사용할 상태를 하나로 묶을 수 있습니다.")}
+    <div class="card"><div class="card-heading"><h3>대기 모습</h3><button class="small" data-action="add-idle-group" ${unassigned.length || idleGroupDraft ? "" : "disabled"}>＋ 대기 모습 추가</button></div>
+    <div class="binding-list idle-group-list">
+      <button class="binding-row ${!group ? "active" : ""}" data-action="select-idle-group" aria-pressed="${!group}"><span><strong>기본 대기</strong></span><small>필수</small></button>
+      ${items.map(item => `<button class="binding-row ${item === group ? "active" : ""}" data-action="select-idle-group" data-id="${esc(item.id)}" aria-pressed="${item === group}"><span><strong>${esc(idleGroupName(item))}</strong></span><small>${item === idleGroupDraft ? "추가 중" : item.states.map(state => timerPhaseLabels[state]).join(" · ")}</small></button>`).join("")}
+    </div><p class="hint">${unassigned.length ? "기본 대기 적용 · " + unassigned.map(state => timerPhaseLabels[state]).join(", ") : "모든 상태에 대기 모습이 지정되어 있습니다."}</p></div>
+    <div class="card"><div class="card-heading"><h3 id="idle-group-heading">${group ? esc(idleGroupName(group)) : "기본 대기"}</h3>
+    ${group && !isDraft ? '<button class="text-button danger" data-action="remove-idle-group">묶음 삭제</button>' : ""}</div>
+    ${group ? `<label class="field"><span>묶음 이름 (선택)</span><input id="idle-group-name" maxlength="40" value="${esc(group.name)}" placeholder="예: 휴식 포즈"></label>
+    <fieldset><legend>적용할 상태</legend><div class="form-grid">${timerPhases.map(state => {
+      const owner = idleStateOwner(state);
+      const checked = group.states.includes(state);
+      const other = owner && owner !== group;
+      const disabled = other || (!isDraft && checked && group.states.length === 1);
+      return `<div><label class="toggle"><input type="checkbox" data-idle-state="${state}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} ${other ? `aria-describedby="idle-owner-${state}"` : ""}><span>${timerPhaseLabels[state]}</span></label>${other ? `<small id="idle-owner-${state}" class="idle-state-owner">${esc(idleGroupName(owner))}${owner === idleGroupDraft ? "에서 추가 중" : "에서 사용 중"}</small>` : ""}</div>`;
+    }).join("")}</div><p class="hint">${!isDraft && group.states.length === 1 ? "마지막 상태를 해제하려면 묶음을 삭제하세요." : "상태마다 대기 모습을 하나만 연결할 수 있습니다."}</p></fieldset>` : ""}
+    <label class="field"><span>기본 모습</span><select id="idle-appearance">${idleAppearanceOptions(group ? group.animation ?? undefined : doc!.character.defaultAnimation, !!group)}</select></label>
+    <p class="hint">${group?.states.includes("countdown") ? "일반 타이머 모습은 바로가기와 사용자 지정 타이머에 공통으로 적용됩니다." : group ? "" : "묶음이 없는 상태와 타이머를 일시정지하거나 종료했을 때 이 모습을 사용합니다."}</p>
+    ${isDraft ? `<div class="row-actions"><button class="small primary" data-action="commit-idle-group" ${group.states.length ? "" : "disabled"}>묶음 추가</button><button class="small" data-action="discard-idle-group">취소</button></div>`
+      : `${group && group.states.length > 1 ? `<label class="field"><span>미리 볼 상태</span><select id="idle-preview-phase">${group.states.map(state => option(state, timerPhaseLabels[state], phase ?? "")).join("")}</select></label>` : ""}
+      <button class="small" data-action="test-idle">${group ? "묶음 미리보기" : "기본 대기 미리보기"}</button>`}
+    ${group && !doc!.project.timer?.enabled ? '<p class="hint">타이머 상태를 미리 보고 Player에 적용하려면 프로젝트에서 타이머를 켜세요. <button class="small" data-action="enable-project-timer">타이머 켜기</button></p>' : ""}</div>
+    ${idleDirectionsEditor(group)}`;
 }
 function soundSettings(binding: Binding) {
   const sounds = Object.entries(doc!.character.sounds);
   const volume = Math.round((binding.sound?.volume ?? 0.7) * 100);
-  return `<div class="form-grid"><label class="field"><span>이벤트 사운드</span><select id="event-sound">${option("", "재생 안 함", binding.sound?.resource ?? "")}${sounds.map(([id, sound]) => option(id, soundName(id, sound.audio.slice(10)), binding.sound?.resource ?? "")).join("")}</select></label>
+  return `<div class="form-grid"><label class="field"><span>이벤트 사운드</span><select id="event-sound">${option("", "재생 안 함", binding.sound?.resource ?? "")}${sounds.map(([id, sound]) => option(id, resourceName(id, sound), binding.sound?.resource ?? "")).join("")}</select></label>
     ${binding.sound ? `<label class="field"><span>볼륨 (%)</span><input id="event-volume" type="number" min="0" max="100" step="1" value="${volume}"></label>` : ""}</div>
     <p class="hint">${sounds.length ? "이 동작이 시작될 때 사운드를 한 번 재생합니다. 다른 동작으로 바뀌면 소리도 멈춥니다." : "리소스에서 WAV 또는 MP3를 가져오면 이벤트에 연결할 수 있습니다."}</p>`;
 }
@@ -784,6 +936,10 @@ function reactionSettings(binding: Binding, path: string) {
   const sound = soundSettings(binding);
   if (effect.type !== "playAnimation") {
     return `${cursor}${sound}${binding.trigger.type === "drag" ? "" : `<label class="field"><span>우선순위 (0~100, 비우면 기본 순서)</span><input id="continuous-priority" type="number" min="0" max="100" value="${effect.priority ?? ""}"></label>`}`;
+  }
+  if (automaticTrigger(binding.trigger.type)) {
+    const cooldown = binding.trigger.type === "typingStopped" ? "" : field("재반응 대기 (ms)", `${path}.effect.cooldownMs`, "number", 'min="0" max="10000"');
+    return `${cursor}${sound}<div class="form-grid">${field("자동 이벤트 우선순위 (0~100)", `${path}.effect.priority`, "number", 'min="0" max="100"')}${cooldown}<label class="field"><span>표시 시간 (ms, 비우면 동작 길이)</span><input id="duration-ms" type="number" min="1" max="60000" value="${effect.durationMs ?? ""}"></label></div><p class="hint">입력 반응이나 이동이 시작되면 자동 동작을 끝냅니다.</p>`;
   }
   const policy = effect.interruption ?? "byPriority";
   const finish = policy === "finish";
@@ -868,7 +1024,24 @@ function pointerTriggerEditor(inputs: PointerInput[]) {
   </div>`;
 }
 
+type TimerTrigger = Extract<Binding["trigger"], { type: "timerCompleted" | "timerStarted" }>;
+function timerTriggerPhases(trigger: TimerTrigger): TimerPhase[] {
+  return timerPhases.filter(phase => [trigger.phase, ...(trigger.alternatives ?? [])].some(selected =>
+    selected === phase || (selected === "break" && (phase === "shortBreak" || phase === "longBreak"))));
+}
+
+function timerTriggerEditor(trigger: TimerTrigger) {
+  const selected = timerTriggerPhases(trigger);
+  const start = trigger.type === "timerStarted";
+  const enable = doc!.project.timer?.enabled ? "" : `<p class="hint">Player에서 타이머 반응을 사용하려면 프로젝트 타이머를 켜고 빌드하세요. <button type="button" class="small" data-action="enable-project-timer">타이머 켜기</button></p>`;
+  return `<fieldset><legend>${start ? "시작할 단계" : "완료할 단계"}</legend><div class="form-grid">${timerPhases.map(phase => {
+    const checked = selected.includes(phase);
+    return `<label class="toggle"><input type="checkbox" data-timer-phase="${phase}" ${checked ? "checked" : ""} ${checked && selected.length === 1 ? "disabled" : ""}><span>${timerPhaseLabels[phase]}</span></label>`;
+  }).join("")}</div><p class="hint">${start ? "선택한 단계가 새로 실행될 때 반응합니다. 재개하면 남은 시간을 이어서 셉니다." : "선택한 단계의 시간이 다 되면 반응합니다."} 오른쪽 미리보기에서 단계별로 시험할 수 있습니다.</p>${enable}</fieldset>`;
+}
+
 function inputChoices(trigger: Binding["trigger"]): string[] {
+  if (trigger.type === "timerCompleted" || trigger.type === "timerStarted") return timerTriggerPhases(trigger).map(phase => timerPhaseLabels[phase]);
   if ("code" in trigger) return [trigger, ...(trigger.alternatives ?? [])].map(keyCombinationLabel);
   if (trigger.type === "keySequence") return [
     trigger.keyword || (trigger.steps?.length ? "직접 지정한 키 순서" : ""),
@@ -877,6 +1050,32 @@ function inputChoices(trigger: Binding["trigger"]): string[] {
   return pointerInputs(trigger)?.map((input) =>
     pointerOptions.find((choice) => pointerInputKey(choice.input) === pointerInputKey(input))!.label,
   ) ?? [];
+}
+
+function typingStoppedFields(path: string) {
+  return `<div class="form-grid">
+    ${field("최소 입력 구간 (초)", `${path}.minTypingSeconds`, "number", 'min="2" max="60" step="1"')}
+    ${field("최소 키 입력 수", `${path}.minKeys`, "number", 'min="2" max="100" step="1"')}
+    ${field("멈춤 판정 (ms)", `${path}.pauseMs`, "number", 'min="500" max="5000" step="1"')}
+    ${field("최소 재반응 간격 (초)", `${path}.minIntervalSeconds`, "number", 'min="10" max="600" step="1"')}
+  </div><p class="hint">최소 입력 구간과 키 수를 모두 채운 뒤, 지정한 시간만큼 타이핑이 끊기면 반응합니다. 키보드 감지가 필요하며 프로젝트당 하나를 설정할 수 있습니다.</p>`;
+}
+
+function typingRepeatFits(trigger: TypingStoppedTrigger) {
+  return trigger.minTypingSeconds * 1000 + trigger.pauseMs + 1 < trigger.minIntervalSeconds * 1000;
+}
+
+const typingTestLabels = ["기준 충족 후 멈춤", "짧게 입력 후 멈춤", "멈춤 판정 시 입력 재개", "재반응 간격 안에 다시 멈춤"];
+function testInputSelector(trigger: Binding["trigger"] | undefined) {
+  if (!trigger) return "";
+  if (trigger.type === "typingStopped") {
+    const fits = typingRepeatFits(trigger);
+    return `<label class="field"><span>테스트 상황</span><select id="test-variant">${typingTestLabels.map((label, index) =>
+      `<option value="${index}" ${index === 3 && !fits ? "disabled" : ""}>${label}</option>`,
+    ).join("")}</select></label>${fits ? "" : '<p class="hint">현재 설정에서는 두 번째 입력 구간을 채우는 동안 재반응 간격이 지납니다.</p>'}`;
+  }
+  const choices = inputChoices(trigger);
+  return choices.length > 1 ? `<label class="field"><span>${trigger.type === "timerCompleted" || trigger.type === "timerStarted" ? "테스트할 단계" : "테스트할 입력"}</span><select id="test-variant">${choices.map((label, index) => option(String(index), label || `입력 ${index + 1}`, "0")).join("")}</select></label>` : "";
 }
 
 function keyboardTriggerEditor(trigger: KeyboardTrigger, path: string) {
@@ -949,9 +1148,63 @@ function saveCapturedKey(button: HTMLButtonElement, code: string, modifiers: Key
   captureButton(index)?.focus();
 }
 
+type OneShotEffect = Extract<Effect, { type: "playAnimation" }>;
+type MotionCandidate = { animation: string; weight: number };
+function motionClips(effect: OneShotEffect) {
+  return [effect.animation, ...(effect.variation?.alternatives ?? [])];
+}
+function motionCandidates(effect: OneShotEffect): MotionCandidate[] {
+  return motionClips(effect).map((animation, index) => ({
+    animation, weight: effect.variation?.weights?.[index] ?? 1,
+  }));
+}
+function setMotionCandidates(effect: OneShotEffect, candidates: MotionCandidate[]) {
+  const [first, ...alternatives] = candidates;
+  effect.animation = first.animation;
+  if (alternatives.length) {
+    const previous = effect.variation;
+    effect.variation = {
+      mode: previous?.mode ?? "cycle",
+      alternatives: alternatives.map(candidate => candidate.animation),
+      ...(previous?.weights || previous?.mode === "weighted"
+        ? { weights: candidates.map(candidate => candidate.weight) } : {}),
+    };
+  }
+  else delete effect.variation;
+  markDirty();
+  layout();
+}
+function motionWeightTotal(weights: number[]) {
+  return weights.every(weight => Number.isInteger(weight) && weight >= 0 && weight <= 10_000)
+    ? weights.reduce((sum, weight) => sum + weight, 0) : 0;
+}
+function motionProbability(weight: number, total: number) {
+  if (!total) return "—";
+  const percentage = weight / total * 100;
+  return percentage > 0 && percentage < 0.01 ? "0.01% 미만"
+    : percentage.toLocaleString("ko-KR", { maximumFractionDigits: 2 }) + "%";
+}
+const motionWeightWarning = "비중은 0~10,000의 정수로 입력하고, 최소 한 모션에 1 이상을 지정하세요.";
+function motionEditor(effect: OneShotEffect, names: string[]) {
+  const motions = motionClips(effect);
+  const weighted = effect.variation?.mode === "weighted";
+  const weights = motionCandidates(effect).map(candidate => candidate.weight);
+  const total = motionWeightTotal(weights);
+  const canAdd = motions.length < 8 && names.includes(effect.animation) && names.some(name => !motions.includes(name));
+  const fields = effect.variation ? `<label class="field"><span>재생 방식</span><select id="motion-mode">${option("cycle", "발동할 때마다 순서대로", effect.variation.mode)}${option("shuffle", "섞어서 한 번씩", effect.variation.mode)}${option("weighted", "가중치 랜덤", effect.variation.mode)}</select></label>
+  ${weighted ? `<p class="hint">매번 비중에 따라 후보를 하나 뽑습니다. 0은 선택하지 않으며, 같은 모션이 연속으로 나올 수 있습니다.</p><p class="hint" id="motion-weight-warning" ${total ? "hidden" : ""}>${motionWeightWarning}</p>` : ""}
+  ${motions.map((current, index) => {
+    const choices = names.filter(name => name === current || !motions.includes(name));
+    const weight = weighted ? `<label class="field"><span>비중 · <output data-motion-probability>${motionProbability(weights[index], total)}</output></span><input type="number" min="0" max="10000" step="1" value="${weights[index]}" data-motion-weight="${index}" aria-label="모션 ${index + 1} 비중"></label>` : "";
+    return `<div class="form-grid"><label class="field"><span>모션 ${index + 1}</span><select data-motion-index="${index}">${choices.includes(current) ? "" : '<option value="" selected disabled>애니메이션 선택</option>'}${choices.map(name => option(name, name, current)).join("")}</select></label>${weight}<div class="row-actions"><button class="small" data-action="move-motion" data-id="${index}:-1" ${index === 0 ? "disabled" : ""}>↑ 위로</button><button class="small" data-action="move-motion" data-id="${index}:1" ${index === motions.length - 1 ? "disabled" : ""}>↓ 아래로</button><button class="text-button danger" data-action="remove-motion" data-id="${index}">빼기</button></div></div>`;
+  }).join("")}<p class="hint">이벤트가 실행될 때 후보 하나를 재생합니다. 후보들은 우선순위, 재반응 대기와 사운드를 공유합니다.</p>` : "";
+  return fields + `<button class="small" data-action="add-motion" ${canAdd ? "" : "disabled"}>＋ 모션</button>${!canAdd && motions.length < 8 ? '<p class="hint">다른 일회성 애니메이션이 있으면 후보를 추가할 수 있습니다.</p>' : ""}`;
+}
+
 function bindingAnimationEditor(effect: Exclude<Effect, { type: "faceCursor" }>, path: string) {
   const once = effect.type === "playAnimation";
   const names = clips().filter(name => doc!.character.animations[name].loop !== once);
+  if (once && effect.variation) return motionEditor(effect, names);
   const current = effect.animation ?? "";
   const valid = names.includes(current);
   const canUseIdle = effect.type === "move";
@@ -961,20 +1214,23 @@ function bindingAnimationEditor(effect: Exclude<Effect, { type: "faceCursor" }>,
   const hint = !canUseIdle && !names.length
     ? `<p class="hint">${once ? "반복 재생이 꺼진" : "반복 재생이 켜진"} 애니메이션이 필요합니다. <button class="text-button" data-action="tab" data-id="animations">애니메이션 편집</button></p>`
     : "";
-  return `<label class="field"><span>표시할 애니메이션</span><select data-path="${path}.effect.animation">${placeholder}${names.map(name => option(name, name, current)).join("")}</select></label>${hint}`;
+  return `<label class="field"><span>표시할 애니메이션</span><select data-path="${path}.effect.animation">${placeholder}${names.map(name => option(name, name, current)).join("")}</select></label>${hint}${once ? motionEditor(effect, names) : ""}`;
 }
 function bindingEditor(b: Binding) {
   const pointer = pointerInputs(b.trigger);
   const t: any = b.trigger,
     e: any = b.effect,
     p = `project.bindings.${selectedBinding}`;
-  return `<div class="card"><div class="card-heading"><h3>이벤트 편집</h3><div class="row-actions"><button class="small" data-action="reorder-binding" data-id="-1" ${selectedBinding === 0 ? "disabled" : ""}>↑ 위로</button><button class="small" data-action="reorder-binding" data-id="1" ${selectedBinding === doc!.project.bindings.length - 1 ? "disabled" : ""}>↓ 아래로</button><button class="text-button danger" data-action="remove-binding">삭제</button></div></div><div class="form-grid">${field("이벤트 ID", `${p}.id`)}<label class="field"><span>발생 조건</span><select id="trigger-type">${Object.entries(
-    triggerNames,
-  )
-    .map(([k, v]) => option(k, v, triggerCategory(b.trigger)))
-    .join(
-      "",
-    )}</select></label></div>${"code" in b.trigger ? keyboardTriggerEditor(b.trigger, `${p}.trigger`) : ""}${t.type === "typingRate" ? `<div class="form-grid">${field("최소 입력 속도 (키/초)", `${p}.trigger.minKps`, "number", 'min="0.5" max="1000" step="any"')}<label class="field"><span>최대 입력 속도 (비우면 제한 없음)</span><input id="max-kps" type="number" min="0.5" max="1000" step="any" value="${t.maxKps ?? ""}"></label></div><p class="hint">최소값 이상, 최대값 미만에 적용합니다. 속도 구간은 서로 겹칠 수 없습니다.</p>` : ""}${b.trigger.type === "keySequence" ? keywordTriggerEditor(b.trigger, `${p}.trigger`) : ""}${pointer ? pointerTriggerEditor(pointer) : ""}${t.type === "whileKeyDown" ? `<label class="field"><span>동작 종류</span><select id="held-effect">${option("sustainAnimation", "키를 누르는 동안 애니메이션", e.type)}${option("move", "키를 누르는 동안 이동", e.type)}</select></label>` : ""}${
+  const choices = Object.entries(triggerNames);
+  const group = (label: string, automatic: boolean) => `<optgroup label="${label}">${choices.filter(([type]) => automaticTrigger(type) === automatic).map(([type, name]) => option(type, name, triggerCategory(b.trigger))).join("")}</optgroup>`;
+  const idleDuration = b.trigger.type === "idleFor"
+    ? `${field("대기 시간 (초)", `${p}.trigger.seconds`, "number", 'min="1" max="3600" step="1"')}<p class="hint">시선이나 대기 이미지가 바뀌어도 계속 셉니다. 실제 이동이나 입력 반응 뒤에는 처음부터 셉니다.</p>`
+    : "";
+  const typingFields = b.trigger.type === "typingStopped" ? typingStoppedFields(`${p}.trigger`) : "";
+  const timerFields = b.trigger.type === "timerCompleted" || b.trigger.type === "timerStarted" ? timerTriggerEditor(b.trigger) : "";
+  const holdFields = b.trigger.type === "buddyLongPress"
+    ? `<label class="field"><span>최소 누르기 시간 (초)</span><input id="buddy-hold-seconds" type="number" min="${buddyHoldMs.min / 1000}" max="${buddyHoldMs.max / 1000}" step="0.001" value="${b.trigger.holdMs / 1000}"></label><p class="hint">버디 위에서 기본 버튼을 제자리에서 길게 누르고 놓으면 반응합니다.</p>` : "";
+  return `<div class="card"><div class="card-heading"><h3>이벤트 편집</h3><div class="row-actions"><button class="small" data-action="reorder-binding" data-id="-1" ${selectedBinding === 0 ? "disabled" : ""}>↑ 위로</button><button class="small" data-action="reorder-binding" data-id="1" ${selectedBinding === doc!.project.bindings.length - 1 ? "disabled" : ""}>↓ 아래로</button><button class="text-button danger" data-action="remove-binding">삭제</button></div></div><div class="form-grid">${field("이벤트 ID", `${p}.id`)}<label class="field"><span>발생 조건</span><select id="trigger-type">${group("입력과 버디 조작", false)}${group("자동 반응", true)}</select></label></div>${idleDuration}${typingFields}${timerFields}${holdFields}${"code" in b.trigger ? keyboardTriggerEditor(b.trigger, `${p}.trigger`) : ""}${t.type === "typingRate" ? `<div class="form-grid">${field("최소 입력 속도 (키/초)", `${p}.trigger.minKps`, "number", 'min="0.5" max="1000" step="any"')}<label class="field"><span>최대 입력 속도 (비우면 제한 없음)</span><input id="max-kps" type="number" min="0.5" max="1000" step="any" value="${t.maxKps ?? ""}"></label></div><p class="hint">최소값 이상, 최대값 미만에 적용합니다. 속도 구간은 서로 겹칠 수 없습니다.</p>` : ""}${b.trigger.type === "keySequence" ? keywordTriggerEditor(b.trigger, `${p}.trigger`) : ""}${pointer ? pointerTriggerEditor(pointer) : ""}${t.type === "whileKeyDown" ? `<label class="field"><span>동작 종류</span><select id="held-effect">${option("sustainAnimation", "키를 누르는 동안 애니메이션", e.type)}${option("move", "키를 누르는 동안 이동", e.type)}</select></label>` : ""}${
     b.effect.type !== "faceCursor"
       ? bindingAnimationEditor(b.effect, p)
       : ""
@@ -1036,23 +1292,24 @@ function hasBothBuildTargets(targets: Target[]) {
   return targets.includes("macos-arm64") && targets.includes("windows-x64");
 }
 function builds() {
+  const ready = !!doc!.character.defaultAnimation;
   const platform = config.target === "macos-arm64" ? "macOS" : "Windows";
   const targets = doc!.project.build.targets;
-  const canBuildLocally = targets.includes(config.target);
+  const canBuildLocally = ready && targets.includes(config.target);
   const canBuildBoth = hasBothBuildTargets(targets);
-  return `${title("BUILD & HISTORY", "빌드와 설치 파일", "설치 파일을 만들고 이전 빌드 결과를 확인하세요.")}<div class="platform-grid">${[
+  return `${title("BUILD & HISTORY", "빌드와 설치 파일", "설치 파일을 만들고 이전 빌드 결과를 확인하세요.")}${ready ? "" : firstSpriteCard()}<div class="platform-grid">${[
     ["macos-arm64", "macOS · Apple Silicon", "DMG 설치 파일"],
     ["windows-x64", "Windows · x64", "설치 파일과 가이드가 담긴 ZIP"],
   ].map(([target, label, format]) => {
     const enabled = targets.includes(target as Target);
     const local = enabled && config.target === target;
-    return `<div class="platform-card ${local ? "current" : ""}"><span class="pill">${!enabled ? "구성에서 제외됨" : local ? "이 컴퓨터에서 빌드 가능" : github.ready && canBuildBoth ? "Actions에서 빌드 가능" : canBuildBoth ? "GitHub 연결 필요" : "다른 운영체제에서 빌드"}</span><h3>${label}</h3><p>${format}</p></div>`;
-  }).join("")}</div>${installerSettings()}<section id="github-panel">${githubPanel()}</section><div class="build-banner"><div><h3>macOS + Windows 함께 빌드</h3><p>${!canBuildBoth ? "두 플랫폼이 모두 빌드 대상인 프로젝트에서 사용할 수 있습니다." : github.connected ? `저장한 구성, 사용한 리소스와 빌드 엔진을 ${esc(github.repository)}에 업로드합니다. ${github.private ? "비공개 저장소입니다." : "공개 저장소에 업로드한 파일은 누구나 볼 수 있습니다."} 진행 상황과 결과는 아래 빌드 기록에서 확인할 수 있습니다.` : "GitHub 저장소를 연결하면 두 플랫폼용 설치 파일을 한 번에 만들 수 있습니다."}</p></div><button class="primary" data-action="build-remote" ${github.connected && github.ready && canBuildBoth && !doc!.meta.archived ? "" : "disabled"}>업로드하고 두 플랫폼 빌드 ↗</button></div><p class="hint">Actions 개발용 패키지 · 공개 배포 서명·공증과 실제 입력·설치 검증은 별도입니다. 비공개 저장소의 Actions 사용은 GitHub 요금제 한도를 따릅니다.</p><details class="card cross-platform"><summary>이 컴퓨터에서 빌드 · 프로젝트 내보내기</summary><p>${canBuildLocally ? `이 컴퓨터에서 ${platform}용 패키지를 만듭니다. 프로젝트를 GitHub에 업로드하지 않습니다.` : `이 프로젝트는 ${platform}을 빌드 대상으로 지정하지 않았습니다.`}</p><div class="row-actions"><button class="small" data-action="build" ${canBuildLocally ? "" : "disabled"}>${platform}용 빌드 ↗</button><button class="small" data-action="export-project">저장한 프로젝트 내보내기 ↓</button></div></details><div id="build-history">${buildHistory()}</div><details class="card"><summary>프로젝트 저장 기록</summary><p class="hint">저장할 때마다 구성을 기록합니다. 이전 구성과 리소스를 함께 복원할 수 있습니다.</p><button class="small" data-action="load-revisions">저장 기록 보기</button><div id="revision-history"></div></details>`;
+    return `<div class="platform-card ${local ? "current" : ""}"><span class="pill">${!enabled ? "구성에서 제외됨" : !ready ? "스프라이트 필요" : local ? "이 컴퓨터에서 빌드 가능" : github.ready && canBuildBoth ? "Actions에서 빌드 가능" : canBuildBoth ? "GitHub 연결 필요" : "다른 운영체제에서 빌드"}</span><h3>${label}</h3><p>${format}</p></div>`;
+  }).join("")}</div>${installerSettings()}<section id="github-panel">${githubPanel()}</section><div class="build-banner"><div><h3>macOS + Windows 함께 빌드</h3><p>${!canBuildBoth ? "두 플랫폼이 모두 빌드 대상인 프로젝트에서 사용할 수 있습니다." : github.connected ? `저장한 구성, 사용한 리소스와 빌드 엔진을 ${esc(github.repository)}에 업로드합니다. ${github.private ? "비공개 저장소입니다." : "공개 저장소에 업로드한 파일은 누구나 볼 수 있습니다."} 진행 상황과 결과는 아래 빌드 기록에서 확인할 수 있습니다.` : "GitHub 저장소를 연결하면 두 플랫폼용 설치 파일을 한 번에 만들 수 있습니다."}</p></div><button class="primary" data-action="build-remote" ${ready && github.connected && github.ready && canBuildBoth && !doc!.meta.archived ? "" : "disabled"}>업로드하고 두 플랫폼 빌드 ↗</button></div><p class="hint">Actions 개발용 패키지 · 공개 배포 서명·공증과 실제 입력·설치 검증은 별도입니다. 비공개 저장소의 Actions 사용은 GitHub 요금제 한도를 따릅니다.</p><details class="card cross-platform"><summary>이 컴퓨터에서 빌드 · 프로젝트 내보내기</summary><p>${!ready ? "첫 스프라이트를 추가한 뒤 빌드하거나 내보낼 수 있습니다." : canBuildLocally ? `이 컴퓨터에서 ${platform}용 패키지를 만듭니다. 프로젝트를 GitHub에 업로드하지 않습니다.` : `이 프로젝트는 ${platform}을 빌드 대상으로 지정하지 않았습니다.`}</p><div class="row-actions"><button class="small" data-action="build" ${canBuildLocally ? "" : "disabled"}>${platform}용 빌드 ↗</button><button class="small" data-action="export-project" ${ready ? "" : "disabled"}>저장한 프로젝트 내보내기 ↓</button></div></details><div id="build-history">${buildHistory()}</div><details class="card"><summary>프로젝트 저장 기록</summary><p class="hint">저장할 때마다 구성을 기록합니다. 이전 구성과 리소스를 함께 복원할 수 있습니다.</p><button class="small" data-action="load-revisions">저장 기록 보기</button><div id="revision-history"></div></details>`;
 }
 function githubPanel() {
   return `<div class="card github-connection"><div class="card-heading"><h3>GitHub Actions</h3><span class="pill">${github.connected ? github.ready ? "빌드 준비 완료" : "워크플로 준비 필요" : "연결 안 됨"}</span></div>${github.connected ? `<p><strong>${esc(github.repository)}</strong> · ${github.private ? "비공개" : "공개"} · ${esc(github.login)}</p>${github.ready ? "" : `<p>기본 브랜치 ${esc(github.defaultBranch)}에 Studio 전용 워크플로 파일 하나를 ${github.workflowPresent ? "업데이트" : "추가"}합니다. 프로젝트는 빌드할 때 별도 브랜치에 업로드합니다.</p><button class="small" data-action="github-setup">워크플로 ${github.workflowPresent ? "업데이트" : "준비"}</button>`}` : `<p>Git 인증 또는 환경 변수의 GitHub 토큰으로 연결합니다. GitHub의 macOS와 Windows 빌드 환경을 사용합니다.</p>`}<p id="github-error" class="error-text" role="alert" ${githubError || github.error ? "" : "hidden"}>${esc(githubError || github.error)}</p><details ${github.connected ? "" : "open"}><summary>${github.connected ? "연결 변경" : "저장소와 인증"}</summary><label class="field"><span>GitHub 저장소</span><input id="github-repository" value="${esc(github.repository)}" placeholder="owner/repository" spellcheck="false" autocomplete="off"></label><label class="field"><span>토큰 (선택 · 기존 Git 인증을 쓰면 비워두세요)</span><input id="github-token" type="password" autocomplete="off" placeholder="이 Studio 실행 중에만 보관"></label><p class="hint">선택한 저장소의 Contents·Actions·Workflows 읽기/쓰기 권한이 필요합니다. 직접 입력한 토큰은 디스크·프로젝트·URL에 저장하지 않습니다. 연결 해제는 원격 빌드를 취소하지 않습니다.</p><div class="row-actions"><button class="small" data-action="github-connect">저장소 연결</button>${github.connected ? '<button class="small quiet" data-action="github-disconnect">연결 해제</button>' : ""}</div></details></div>`;
 }
-const removableBuild = new Set(["succeeded", "failed", "cancelled", "interrupted", "partial", "import_failed"]);
+const removableBuild = new Set(["succeeded", "failed", "cancelled", "interrupted", "partial", "import_failed", "sync_failed"]);
 const remoteActive = ["preparing", "queued", "running", "downloading", "awaiting_auth", "dispatch_unknown", "cancelling"];
 const buildSteps: Record<string, string> = {
   "Set up job": "빌드 환경 준비",
@@ -1071,7 +1328,10 @@ function remoteJob(j: Job) {
     return `<div><strong>${target === "macos-arm64" ? "macOS · Apple Silicon" : "Windows · x64"}</strong><span class="pill">${esc(status)}</span>${step ? `<p class="hint">${esc(buildSteps[step.name] ?? step.name)}</p>` : ""}${p.importError ? `<p class="error-text">${esc(p.importError)}</p>` : ""}</div>`;
   }).join("");
   const run = j.github?.runUrl ? `<a class="button small" target="_blank" rel="noreferrer" href="${esc(j.github.runUrl)}">Actions에서 상세 로그 ↗</a>` : "";
-  const retry = !remoteActive.includes(j.status) && (["partial", "import_failed"].includes(j.status) || Object.values(j.platforms ?? {}).some(p => p.importError)) ? `<button class="small" data-action="sync-build" data-id="${j.id}">결과 다시 가져오기</button>` : "";
+  const needsSync = j.status === "sync_failed" || (j.status === "failed" && !!j.github?.runId && !j.remoteConclusion);
+  const needsImport = ["partial", "import_failed"].includes(j.status) || Object.values(j.platforms ?? {}).some(p => p.importError);
+  const retry = !remoteActive.includes(j.status) && (needsSync || needsImport)
+    ? `<button class="small" data-action="sync-build" data-id="${j.id}">${needsSync ? "Actions 다시 동기화" : "결과 다시 가져오기"}</button>` : "";
   return `<div class="remote-platforms">${platforms}</div>${run || retry ? `<div class="row-actions">${run}${retry}</div>` : ""}`;
 }
 function buildFiles(j: Job) {
@@ -1104,7 +1364,7 @@ function buildHistory() {
     failed: "실패",
     interrupted: "중단됨",
     preparing: "업로드 준비 중", downloading: "결과 가져오는 중", awaiting_auth: "GitHub 재연결 필요",
-    dispatch_unknown: "Actions 실행 확인 중", partial: "일부 결과 완료", import_failed: "가져오기 재시도 필요",
+    dispatch_unknown: "Actions 실행 확인 중", sync_failed: "Actions 조회 재시도 필요", partial: "일부 결과 완료", import_failed: "가져오기 재시도 필요",
   };
   return (
     jobs
@@ -1117,13 +1377,18 @@ function buildHistory() {
   );
 }
 function previewPanel() {
+  if (!saved?.character.defaultAnimation) {
+    const hasFirstSprite = !!doc!.character.defaultAnimation;
+    return `<aside class="preview-panel"><div class="preview-heading"><h2>미리보기</h2></div><div class="preview-controls"><p class="hint">${hasFirstSprite ? "구성을 저장하면 가져온 스프라이트를 미리 볼 수 있습니다." : "첫 이미지나 GIF를 가져오면 여기에 버디가 표시됩니다."}</p>${hasFirstSprite ? '<button id="preview-save" class="primary small full-width" data-action="save">저장하고 미리보기</button>' : ""}</div></aside>`;
+  }
   const selected = doc!.project.bindings[selectedBinding];
-  const choices = selected ? inputChoices(selected.trigger) : [];
+  const hasVariation = selected?.effect.type === "playAnimation" && selected.effect.variation;
+  const variationControls = hasVariation ? '<p class="hint">이벤트를 다시 실행하면 다음 후보를 미리 봅니다.</p><button class="small" data-action="reset-motion-preview">모션 테스트 순서 초기화</button>' : "";
   return `<aside class="preview-panel"><div class="preview-heading"><h2>미리보기</h2><span class="preview-live"><i></i> PREVIEW</span></div><div class="preview-stage checker"><div class="preview-caption">YOUR LITTLE COMPANION</div><canvas id="preview-canvas" aria-label="버디 애니메이션 미리보기"></canvas><div class="preview-shadow"></div><span id="preview-state">idle</span></div><div class="preview-controls"><p id="preview-notice" class="hint"></p><button id="preview-save" class="primary small full-width" data-action="save" hidden>저장하고 미리보기</button><label class="field"><span>저장된 구성 · 애니메이션 재생</span><select id="preview-clip">${clips()
     .map((n) => option(n, n, selectedClip))
     .join(
       "",
-    )}</select></label><button class="small full-width" data-action="replay">↻ 처음부터 재생</button><div class="preview-divider"></div><h3>이벤트 테스트</h3><p class="hint">저장된 구성으로 실제 동작 엔진을 실행합니다.</p><label class="field"><span>테스트할 이벤트</span><select id="test-binding">${doc!.project.bindings.map((b, i) => option(String(i), `${triggerNames[triggerCategory(b.trigger)]} · ${b.id}`, String(selectedBinding))).join("")}</select></label>${choices.length > 1 ? `<label class="field"><span>테스트할 입력</span><select id="test-variant">${choices.map((label, index) => option(String(index), label || `입력 ${index + 1}`, "0")).join("")}</select></label>` : ""}<button class="small full-width" data-action="test-event" ${doc!.project.bindings.length ? "" : "disabled"}>이벤트 실행 →</button><div class="speed-test"><span>타이핑 속도</span><div><button data-action="test-speed" data-id="2">2 키/초</button><button data-action="test-speed" data-id="8">8 키/초</button></div><small>프로젝트의 측정 구간과 반응 타이밍으로 테스트합니다.</small></div><p class="preview-note">웹 미리보기는 선택한 테스트 입력만 사용합니다. 완성된 앱은 다른 앱에서 작업할 때도 반응합니다.</p><div class="preview-divider"></div><div class="project-facts"><span>리소스<strong>${Object.keys(doc!.character.resources ?? {}).length + Object.keys(doc!.character.sounds).length + 1}</strong></span><span>동작<strong>${clips().length}</strong></span><span>이벤트<strong>${doc!.project.bindings.length}</strong></span></div></div></aside>`;
+    )}</select></label><button class="small full-width" data-action="replay">↻ 처음부터 재생</button><div class="preview-divider"></div><h3>이벤트 테스트</h3><p class="hint">저장된 구성으로 실제 동작 엔진을 실행합니다.</p><label class="field"><span>테스트할 이벤트</span><select id="test-binding">${doc!.project.bindings.map((b, i) => option(String(i), `${triggerNames[triggerCategory(b.trigger)]} · ${b.id}`, String(selectedBinding))).join("")}</select></label>${testInputSelector(selected?.trigger)}<button class="small full-width" data-action="test-event" ${doc!.project.bindings.length ? "" : "disabled"}>이벤트 실행 →</button>${variationControls}<div class="speed-test"><span>타이핑 속도</span><div><button data-action="test-speed" data-id="2">2 키/초</button><button data-action="test-speed" data-id="8">8 키/초</button></div><small>프로젝트의 측정 구간과 반응 타이밍으로 테스트합니다.</small></div><p class="preview-note">웹 미리보기는 선택한 테스트 입력만 사용합니다. 완성된 앱은 다른 앱에서 작업할 때도 반응합니다.</p><div class="preview-divider"></div><div class="project-facts"><span>리소스<strong>${resourceCount()}</strong></span><span>동작<strong>${clips().length}</strong></span><span>이벤트<strong>${doc!.project.bindings.length}</strong></span></div></div></aside>`;
 }
 function setPreviewWork(message = "") {
   previewWork = message;
@@ -1139,11 +1404,11 @@ function setPreviewWork(message = "") {
   }
   status.textContent = message;
   status.hidden = !message;
-  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action="test-event"],[data-action="test-speed"],[data-action="test-idle"],[data-action="test-cursor"]')) {
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action="test-event"],[data-action="reset-motion-preview"],[data-action="test-speed"],[data-action="test-idle"],[data-action="test-cursor"]')) {
     if (doc?.meta.archived && button.closest(".editor-content")) continue;
     button.disabled = !!message
       || (button.dataset.action === "test-event" && !doc?.project.bindings.length)
-      || (button.dataset.action === "test-cursor" && !doc?.project.defaults.input.mouse);
+      || (button.dataset.action === "test-cursor" && (!doc?.project.defaults.input.mouse || (!!idleGroupDraft && currentIdleGroup() === idleGroupDraft)));
   }
 }
 async function prepareSimulation(play: (request: number) => Promise<void>) {
@@ -1324,6 +1589,10 @@ async function openProject(id: string, route?: StudioRoute, push = !route) {
     saved = structuredClone(value);
     doc = value;
     jobs = nextJobs;
+    selectedIdleGroup = "";
+    selectedIdleDirection = "center";
+    selectedIdlePhase = undefined;
+    idleGroupDraft = undefined;
     dirty = false;
     restoredDraft = false;
     draftRevision = null;
@@ -1381,6 +1650,7 @@ async function upload(files: FileList | File[], icon = false) {
   if (doc.meta.archived)
     throw new Error("보관된 프로젝트는 복원 후 수정하세요.");
   setEditorBusy("리소스 가져오기를 준비하는 중…");
+  const hadIdle = !!doc.character.defaultAnimation;
   const errors: string[] = [],
     list = Array.from(files);
   let imported = 0,
@@ -1416,7 +1686,9 @@ async function upload(files: FileList | File[], icon = false) {
       true,
     );
   else if (!icon)
-    toast(`${imported}개 리소스를 가져왔습니다. 동작에 연결한 뒤 저장하세요.`);
+    toast(!hadIdle && doc.character.defaultAnimation
+      ? "첫 이미지를 기본 대기 동작에 연결했습니다. 애니메이션에서 프레임을 고르거나 저장해 미리 보세요."
+      : `${imported}개 리소스를 가져왔습니다. 동작에 연결한 뒤 저장하세요.`);
 }
 function addResource(filename: string) {
   if (isAudio(filename)) {
@@ -1437,9 +1709,15 @@ function addResource(filename: string) {
     return;
   let n = 1;
   while (doc!.character.resources[`resource-${n}`]) n++;
-  doc!.character.resources[`resource-${n}`] = {
+  const id = `resource-${n}`;
+  doc!.character.resources[id] = {
     image: `resources/${filename}`,
   };
+  if (!doc!.character.defaultAnimation) {
+    const animation = selectIdleAppearance(`resource:${id}`);
+    doc!.character.defaultAnimation = animation;
+    selectedClip = animation;
+  }
   markDirty();
 }
 function chooseDefaultAnimation(loop: boolean) {
@@ -1450,6 +1728,11 @@ function chooseDefaultAnimation(loop: boolean) {
 function changeTrigger(type: string) {
   const b = doc!.project.bindings[selectedBinding],
     t: any = { type };
+  if ((type === "typingStopped" || type === "buddyLongPress") && doc!.project.bindings.some(other => other !== b && other.trigger.type === type)) {
+    layout();
+    toast(`${triggerNames[type]} 이벤트는 프로젝트당 하나만 설정할 수 있습니다.`, true);
+    return;
+  }
   if (["keyDown", "keyUp", "whileKeyDown"].includes(type)) {
     const previous = b.trigger;
     t.code = "code" in previous ? previous.code : "Space";
@@ -1472,6 +1755,12 @@ function changeTrigger(type: string) {
     t.layout = "ko-KR-2set";
     t.timeoutMs = 5000;
   }
+  if (type === "idleFor") t.seconds = 300;
+  if (type === "timerCompleted" || type === "timerStarted") t.phase = "countdown";
+  if (type === "buddyLongPress") t.holdMs = buddyHoldMs.default;
+  if (type === "typingStopped") {
+    Object.assign(t, { minTypingSeconds: 8, minKeys: 12, pauseMs: 1500, minIntervalSeconds: 45 });
+  }
   b.trigger = type === "mouseInput" ? { type: "mouseDown", button: "primary" } : t;
   b.effect =
     ["typingRate", "whileKeyDown", "drag"].includes(type)
@@ -1485,14 +1774,16 @@ function changeTrigger(type: string) {
                 : "typing"
               : chooseDefaultAnimation(true),
           }
-        : {
-            type: "playAnimation",
-            animation: chooseDefaultAnimation(false),
-            priority: 50,
-            cooldownMs: 0,
-            retrigger: "restart",
-            stopOnRelease: false,
-          };
+        : b.effect.type === "playAnimation" && b.effect.variation
+          ? { ...b.effect, stopOnRelease: supportsStopOnRelease(b.trigger) && b.effect.stopOnRelease }
+          : {
+              type: "playAnimation",
+              animation: chooseDefaultAnimation(false),
+              priority: 50,
+              cooldownMs: 0,
+              retrigger: "restart",
+              stopOnRelease: false,
+            };
   markDirty();
   layout();
 }
@@ -1501,6 +1792,8 @@ function setupCrop() {
   if (!canvas) return;
   const a = doc!.character.animations[selectedClip],
     resource = a.resource ? doc!.character.resources[a.resource] : undefined;
+  const sheet = doc!.character.image;
+  if (!resource && !sheet) return;
   const image = new Image();
   cropImage = image;
   image.onload = () => {
@@ -1511,7 +1804,7 @@ function setupCrop() {
   };
   cropImage.src = resource
     ? resourceUrl(resource.image.slice(10))
-    : sourceUrl(doc!.character.image);
+    : sourceUrl(sheet!);
   let start: { x: number; y: number } | null = null;
   const point = (e: PointerEvent) => {
     const box = canvas.getBoundingClientRect();
@@ -1573,12 +1866,17 @@ async function simulate(
   events: { atMs: number; event: any }[],
   untilMs: number,
   request: number,
-  expectedBand?: string,
+  { expectedBand, fromMs = 0, motionPreview, typingPreview }: {
+    expectedBand?: string;
+    fromMs?: number;
+    motionPreview?: MotionPreview;
+    typingPreview?: TypingPreview;
+  } = {},
 ) {
   const projectId = doc!.meta.id;
-  const timeline = await projectApi<{ atMs: number; state: CharacterState }[]>(
+  let timeline = await projectApi<SimulationFrame[]>(
     "simulate",
-    post({ events, untilMs }),
+    post({ events, untilMs, fromMs, motionPreview, includeBindingIds: !!typingPreview }),
   );
   if (doc?.meta.id !== projectId || request !== simulationRequest) return;
   if (expectedBand && !timeline.some(({ state }) => state.typingBandId === expectedBand && state.source === "typingRate")) {
@@ -1587,9 +1885,31 @@ async function simulate(
       ? "선택한 속도 구간에 도달했지만 다른 동작이 먼저 표시됩니다. 이벤트 우선순위를 확인하세요."
       : "테스트 입력이 선택한 속도 구간에 머물지 못했습니다. 입력 중단·속도 구간 안정 시간과 측정 구간을 확인하세요.");
   }
+  if (typingPreview) {
+    const started = timeline.find(frame => reactionStart(frame, typingPreview.bindingId));
+    if (started?.atMs !== typingPreview.startAtMs)
+      throw new Error(started ? "예상과 다른 시점에 타이핑 종료 반응이 시작됐습니다." : "예상 시각에 타이핑 종료 반응이 표시되지 않았습니다. 동시에 표시되는 동작을 확인하세요.");
+  }
+  const previewLimit = untilMs - fromMs;
+  let previewEnd = previewLimit;
+  if (motionPreview) {
+    const matches = (frame: (typeof timeline)[number]) =>
+      frame.bindingId === motionPreview.bindingId && frame.state.source === "oneShot";
+    const first = timeline.findIndex(matches);
+    if (first === -1) throw new Error("선택한 이벤트가 실행되지 않았습니다. 발생 조건과 우선순위를 확인하세요.");
+    const instance = timeline[first].state.actionInstanceId;
+    const second = timeline.findIndex((frame, index) => index > first && matches(frame) && frame.state.actionInstanceId !== instance);
+    if (second !== -1) {
+      previewEnd = timeline[second].atMs;
+      timeline = timeline.slice(0, second);
+    }
+    motionPreview.starts++;
+  }
   simulationTimers.forEach(clearTimeout);
   simulationTimers = [];
   const epoch = currentEpoch++;
+  const last = timeline.at(-1);
+  const restoreIdle = last?.state.source === "oneShot";
   let previous = "";
   for (const frame of timeline) {
     const key = `${frame.state.actionInstanceId}:${frame.state.animation}:${frame.state.facingLeft}`;
@@ -1605,20 +1925,69 @@ async function simulate(
       }, frame.atMs),
     );
   }
-  toast("실제 동작 엔진으로 이벤트를 재생합니다.");
+  if (restoreIdle) {
+    simulationTimers.push(window.setTimeout(() => {
+      const idle = saved!.character.defaultAnimation;
+      previewAudio.stop();
+      renderer?.update(clipPreviewState(idle), previewEnd);
+      document.querySelector("#preview-state")!.textContent = idle + " · 미리보기 종료";
+    }, previewEnd));
+  }
+  toast(typingPreview?.quietMessage ?? (restoreIdle && previewEnd === previewLimit
+    ? "미리보기 제한까지 재생한 뒤 대기 상태로 돌아갑니다."
+    : "실제 동작 엔진으로 이벤트를 재생합니다."));
+}
+
+function reactionStart(frame: SimulationFrame, bindingId: string) {
+  return frame.bindingId === bindingId && frame.state.source === "oneShot" && frame.state.animationElapsedMs === 0;
+}
+function motionPreviewFor(binding: Binding): MotionPreview | undefined {
+  if (binding.effect.type !== "playAnimation" || !binding.effect.variation || !saved) return;
+  const { id, revision } = saved.meta;
+  const key = `${id}:${revision}`;
+  if (motionPreviewRevision !== key) {
+    motionPreviewRevision = key;
+    motionPreviews.clear();
+  }
+  let preview = motionPreviews.get(binding.id);
+  if (!preview || preview.starts >= 10_000) {
+    preview = { bindingId: binding.id, revision, seed: crypto.getRandomValues(new Uint32Array(1))[0], starts: 0 };
+    motionPreviews.set(binding.id, preview);
+  }
+  return preview;
 }
 async function testBinding(index: number, variant: number, request: number) {
   const b = doc!.project.bindings[index];
   if (!b) return;
+  const motionPreview = motionPreviewFor(b);
+  const effect = b.effect;
+  let previewTail = 2000;
+  if (effect.type === "playAnimation") {
+    const duration = effect.durationMs ?? Math.max(...motionClips(effect).map(name =>
+      saved!.renderPlan.animations[name]?.frames.reduce((sum, frame) => sum + frame.durationMs, 0) ?? 0
+    ));
+    previewTail = Math.max(previewTail, Math.min(13000, 250 + Math.ceil(duration)));
+  }
   if (b.effect.type === "move" && !doc!.project.defaults.movementEnabled)
     throw new Error("프로젝트 탭에서 키를 누른 채 이동을 먼저 켜세요.");
   if (
-    ["keyDown", "keyUp", "whileKeyDown", "typingRate", "keySequence"].includes(
+    ["keyDown", "keyUp", "whileKeyDown", "typingRate", "typingStopped", "keySequence"].includes(
       b.trigger.type,
     ) &&
     !doc!.project.defaults.input.keyboard
   )
     throw new Error("프로젝트 탭에서 키보드 감지를 먼저 켜주세요.");
+  if (b.trigger.type === "timerCompleted" || b.trigger.type === "timerStarted") {
+    if (!doc!.project.timer?.enabled) throw new Error("프로젝트 탭에서 타이머 사용을 먼저 켜세요.");
+    const phase = timerTriggerPhases(b.trigger)[variant];
+    if (!phase) throw new Error("테스트할 단계를 선택하세요.");
+    return simulate([
+      ...(b.trigger.type === "timerStarted" ? [{ atMs: 0, event: { type: "timerPhaseChanged", phase } }] : []),
+      { atMs: 100, event: { type: b.trigger.type, phase } },
+    ], 100 + previewTail, request, { motionPreview });
+  }
+  if (b.trigger.type === "buddyLongPress")
+    return simulate([{ atMs: 100, event: { type: "buddyLongPress" } }], 100 + previewTail, request, { motionPreview });
   const pointer = pointerInputs(b.trigger);
   if (pointer) {
     const input = pointer[variant];
@@ -1631,11 +2000,11 @@ async function testBinding(index: number, variant: number, request: number) {
           { atMs: 800, event: { type: "mouseUp", button: input.button } },
         ]
       : [{ atMs: 100, event: input }];
-    return simulate(events, 2000, request);
+    return simulate(events, previewTail + 100, request, { motionPreview });
   }
   const t: any = b.trigger,
     events: { atMs: number; event: any }[] = [];
-  let end = 2000;
+  let end = previewTail, from = 0;
   const key = (code: string, atMs: number) => {
     events.push(
       { atMs, event: { type: "keyDown", code, repeat: false } },
@@ -1672,14 +2041,35 @@ async function testBinding(index: number, variant: number, request: number) {
           events.push({ atMs: 810, event: { type: "keyUp", code: modifier.key + "Left" } });
         }
       }
+      if (effect.type === "playAnimation") end += t.type === "keyUp" ? 800 : 100;
       break;
     }
     case "drag":
+    case "dragDropped":
       events.push(
         { atMs: 100, event: { type: "dragStart" } },
         { atMs: 1200, event: { type: "dragEnd" } },
       );
+      if (t.type === "dragDropped")
+        events.push({ atMs: 1200, event: { type: "dragDropped" } });
+      if (effect.type === "playAnimation") end += 1200;
       break;
+    case "firstShown":
+    case "shownAgain":
+      if (t.type === "shownAgain")
+        events.push({ atMs: 0, event: { type: "overlayVisibility", visible: true } });
+      events.push(
+        { atMs: 0, event: { type: "overlayVisibility", visible: false } },
+        { atMs: 100, event: { type: "overlayVisibility", visible: true } },
+      );
+      end += 100;
+      break;
+    case "idleFor":
+      from = t.seconds * 1000 - 100;
+      end = from + 100 + previewTail;
+      break;
+    case "typingStopped":
+      return testTypingStopped(b.id, b.trigger as TypingStoppedTrigger, variant, request, previewTail, motionPreview);
     case "typingRate": {
       const { minKps, maxKps } = b.trigger as Extract<Binding["trigger"], { type: "typingRate" }>;
       const windowMs = doc!.project.defaults.timing.rateWindowMs;
@@ -1715,11 +2105,61 @@ async function testBinding(index: number, variant: number, request: number) {
         at += 80;
       }
       events.sort((a, b) => a.atMs - b.atMs);
-      end = at + 2500;
+      end = Math.min(15000, at + Math.max(2500, previewTail));
       break;
     }
   }
-  await simulate(events, end, request);
+  await simulate(events, end, request, { fromMs: from, motionPreview });
+}
+
+async function testTypingStopped(
+  bindingId: string, trigger: TypingStoppedTrigger, variant: number, request: number,
+  previewTail: number, motionPreview?: MotionPreview,
+) {
+  const { minTypingSeconds, minKeys, pauseMs } = trigger;
+  const events: { atMs: number; event: { type: "keyDown" | "keyUp"; code: string } }[] = [];
+  const tap = (atMs: number, index = 0) => {
+    const code = ["KeyJ", "KeyK", "KeyL"][index % 3];
+    events.push({ atMs, event: { type: "keyDown", code } }, { atMs: atMs + 5, event: { type: "keyUp", code } });
+  };
+  const burst = (start: number) => {
+    const span = minTypingSeconds * 1000;
+    const count = Math.max(minKeys, Math.ceil(span / (pauseMs - 10)) + 1);
+    for (let index = 0; index < count; index++) tap(start + Math.round(index * span / (count - 1)), index);
+    return start + span + pauseMs;
+  };
+  if (variant === 1) {
+    tap(100);
+    const from = pauseMs;
+    return simulate(events, from + 400, request, {
+      fromMs: from,
+      typingPreview: { bindingId, quietMessage: "짧은 입력에서는 타이핑 종료 반응이 시작되지 않았습니다." },
+    });
+  }
+  const first = burst(100);
+  if (variant === 3) {
+    if (!typingRepeatFits(trigger)) throw new Error("두 번째 입력 구간이 끝나면 재반응 간격이 이미 지납니다.");
+    const projectId = doc!.meta.id;
+    const initial = await projectApi<SimulationFrame[]>(
+      "simulate", post({ events, fromMs: first, untilMs: first, includeBindingIds: true }),
+    );
+    if (doc?.meta.id !== projectId || request !== simulationRequest) return;
+    if (!initial.some(frame => reactionStart(frame, bindingId)))
+      throw new Error("첫 번째 입력 구간에서 반응이 시작되지 않았습니다. 동시에 표시되는 동작을 확인하세요.");
+    const second = burst(first + 1);
+    const from = second - 100;
+    return simulate(events, second + 300, request, {
+      fromMs: from,
+      typingPreview: { bindingId, quietMessage: "최소 재반응 간격 안에는 두 번째 반응이 시작되지 않았습니다." },
+    });
+  }
+  if (variant === 2) tap(first);
+  const expected = variant === 2 ? first + pauseMs : first;
+  const from = first - 100;
+  return simulate(events, Math.min(from + 15000, expected + previewTail), request, {
+    fromMs: from, motionPreview,
+    typingPreview: { bindingId, startAtMs: expected - from },
+  });
 }
 async function testSpeed(rate: number, request: number, expectedBand?: string) {
   if (!doc!.project.defaults.input.keyboard)
@@ -1736,7 +2176,7 @@ async function testSpeed(rate: number, request: number, expectedBand?: string) {
       { atMs: last + Math.min(20, Math.floor(interval / 2)), event: { type: "keyUp", code: "KeyA" } },
     );
   }
-  await simulate(events, Math.min(15000, last + timing.idleTimeoutMs + 250), request, expectedBand);
+  await simulate(events, Math.min(15000, last + timing.idleTimeoutMs + 250), request, { expectedBand });
 }
 function confirmDraftChange(title: string, message: string, label: string) {
   const dialog = document.createElement("dialog");
@@ -1753,6 +2193,38 @@ function confirmDraftChange(title: string, message: string, label: string) {
     }, { once: true });
     dialog.showModal();
   });
+}
+async function renameResource(action: "rename-resource" | "rename-sound", id: string) {
+  const project = doc;
+  if (!project || project.meta.archived) return;
+  const resource = action === "rename-resource"
+    ? project.character.resources[id] : project.character.sounds[id];
+  if (!resource) return;
+  const original = originalResourceName(id, resource);
+  const dialog = document.createElement("dialog");
+  dialog.setAttribute("aria-labelledby", "resource-name-title");
+  dialog.innerHTML = `<form method="dialog"><h2 id="resource-name-title">리소스 이름 수정</h2>
+    <p>원본 파일 · ${esc(original)}</p>
+    <label class="field"><span>표시 이름</span><input name="resourceName" maxlength="80" value="${esc(resource.name)}" placeholder="${esc(original)}" autofocus></label>
+    <p class="hint">비워 두면 원본 이름을 사용합니다.</p>
+    <footer><button type="button">취소</button><button class="primary" value="save">적용</button></footer></form>`;
+  const input = dialog.querySelector("input")!;
+  dialog.querySelector<HTMLButtonElement>('button[type="button"]')!.onclick = () => dialog.close();
+  document.body.append(dialog);
+  const name = await new Promise<string | null>((resolve) => {
+    dialog.addEventListener("close", () => {
+      dialog.remove();
+      resolve(dialog.returnValue === "save" ? input.value.trim() : null);
+    }, { once: true });
+    dialog.showModal();
+    input.select();
+  });
+  if (name === null || doc !== project || name === (resource.name ?? "")) return;
+  if (name) resource.name = name;
+  else delete resource.name;
+  markDirty();
+  layout();
+  app.querySelector<HTMLElement>(`[data-action="${action}"][data-id="${CSS.escape(id)}"]`)?.focus();
 }
 function chooseBuildRemoval(job: Job) {
   const dialog = document.createElement("dialog");
@@ -1825,7 +2297,7 @@ async function performAction(name: string, id?: string) {
     case "sync-build":
       await projectApi(`builds/${id}/sync`, post({}));
       jobs = await projectApi("builds"); layout();
-      toast("Actions의 결과물을 다시 확인합니다. 새 빌드는 시작하지 않습니다.");
+      toast("기존 Actions 실행의 상태와 결과를 다시 확인합니다.");
       break;
     case "build-remote": {
       await ensureSaved();
@@ -1929,7 +2401,9 @@ async function performAction(name: string, id?: string) {
       } finally {
         setEditorBusy();
       }
-      toast("구성, 리소스와 이벤트 연결을 검증했습니다.");
+      toast(doc!.character.defaultAnimation
+        ? "구성, 리소스와 이벤트 연결을 검증했습니다."
+        : "프로젝트 설정을 검증했습니다. 첫 스프라이트를 추가하면 미리 보고 빌드할 수 있습니다.");
       break;
     case "configure-follow":
       doc!.project.cursorFollow = { enabled: false, stopDistanceDip: 48, bands: [{ minDistanceDip: 0, speedDipPerSecond: 120 }] };
@@ -2020,11 +2494,15 @@ async function performAction(name: string, id?: string) {
       if (!n) return;
       if (!/^[a-zA-Z0-9_-]{1,64}$/.test(n) || doc!.character.animations[n])
         throw new Error("겹치지 않는 영문 동작 이름을 입력하세요.");
-      doc!.character.animations[n] = {
-        frames: [0],
+      const character = doc!.character;
+      const resource = character.image ? null
+        : character.animations[selectedClip]?.resource ?? Object.keys(character.resources)[0];
+      if (!character.image && !resource) throw new Error("리소스에서 이미지를 먼저 가져오세요.");
+      character.animations[n] = {
+        frames: resource ? [] : [0],
         fps: 12,
         loop: false,
-        resource: null,
+        resource,
         regions: [],
         useSourceTiming: true,
       };
@@ -2049,10 +2527,21 @@ async function performAction(name: string, id?: string) {
       markDirty();
       layout();
       break;
+    case "rename-resource":
+    case "rename-sound":
+      if (id) await renameResource(name, id);
+      break;
     case "remove-sound":
       if (doc!.project.bindings.some((binding) => binding.sound?.resource === id))
         throw new Error("이 사운드를 사용하는 이벤트를 먼저 수정하세요.");
       delete doc!.character.sounds[id!];
+      markDirty();
+      layout();
+      break;
+    case "remove-base-sprite":
+      if (Object.values(doc!.character.animations).some(animation => !animation.resource))
+        throw new Error("기본 스프라이트를 사용하는 동작을 먼저 변경하세요.");
+      delete doc!.character.image;
       markDirty();
       layout();
       break;
@@ -2162,6 +2651,63 @@ async function performAction(name: string, id?: string) {
       layout();
       break;
     }
+    case "add-motion":
+    case "remove-motion":
+    case "move-motion": {
+      const effect = doc!.project.bindings[selectedBinding]?.effect;
+      if (effect?.type !== "playAnimation") break;
+      const candidates = motionCandidates(effect);
+      if (name === "add-motion") {
+        const next = clips().find(clip => !doc!.character.animations[clip].loop && !candidates.some(candidate => candidate.animation === clip));
+        if (!next || candidates.length >= 8) break;
+        candidates.push({ animation: next, weight: 1 });
+      } else {
+        const [index, direction] = (id ?? "").split(":").map(Number);
+        if (!Number.isInteger(index) || index < 0 || index >= candidates.length || candidates.length < 2) break;
+        if (name === "remove-motion") candidates.splice(index, 1);
+        else {
+          const other = index + direction;
+          if ((direction !== -1 && direction !== 1) || other < 0 || other >= candidates.length) break;
+          [candidates[index], candidates[other]] = [candidates[other], candidates[index]];
+        }
+      }
+      setMotionCandidates(effect, candidates);
+      break;
+    }
+    case "timer-preset-add":
+    case "timer-preset-move":
+    case "timer-preset-remove": {
+      const timer = doc!.project.timer;
+      if (!timer?.enabled) break;
+      const presets = [...(timer.countdownPresets ?? defaultTimerPresets)];
+      if (name === "timer-preset-add") {
+        if (presets.length >= timerPresetLimit) break;
+        const seconds = [timer.countdownSeconds, ...Array.from({ length: timerPresetLimit }, (_, i) => (i + 1) * 60)]
+          .find(seconds => seconds > 0 && !presets.includes(seconds));
+        if (seconds === undefined) break;
+        presets.push(seconds);
+      } else {
+        const [index, direction] = (id ?? "").split(":").map(Number);
+        if (!Number.isInteger(index) || index < 0 || index >= presets.length) break;
+        if (name === "timer-preset-remove") presets.splice(index, 1);
+        else {
+          const other = index + direction;
+          if ((direction !== -1 && direction !== 1) || other < 0 || other >= presets.length) break;
+          [presets[index], presets[other]] = [presets[other], presets[index]];
+        }
+      }
+      timer.countdownPresets = presets;
+      markDirty();
+      layout();
+      break;
+    }
+    case "enable-project-timer":
+      setTimerEnabled(true);
+      break;
+    case "reset-motion-preview":
+      motionPreviews.delete(doc!.project.bindings[selectedBinding].id);
+      toast("모션 테스트 순서를 초기화했습니다.");
+      break;
     case "capture-key": {
       const button = captureButton(Number(id));
       if (button) setKeyCapture(button, button.getAttribute("aria-pressed") !== "true");
@@ -2242,19 +2788,81 @@ async function performAction(name: string, id?: string) {
       layout();
       break;
     }
-    case "test-idle":
-      await ensureSaved();
-      await prepareSimulation((request) => simulate([], 0, request));
+    case "select-idle-group":
+      selectedIdleGroup = id ?? "";
+      selectedIdlePhase = undefined;
+      layout();
+      app.querySelector<HTMLElement>('.idle-group-list [aria-pressed="true"]')?.focus();
       break;
+    case "add-idle-group": {
+      if (!idleGroupDraft) {
+        if (timerPhases.every(phase => idleStateOwner(phase))) break;
+        const groups = doc!.project.idleGroups ?? [];
+        let index = 1;
+        while (groups.some(group => group.id === `idle-group-${index}`)) index++;
+        idleGroupDraft = { id: `idle-group-${index}`, states: [], cursorMode: "inherit" };
+      }
+      selectedIdleGroup = idleGroupDraft.id;
+      selectedIdlePhase = undefined;
+      layout();
+      app.querySelector<HTMLElement>("[data-idle-state]:enabled")?.focus();
+      break;
+    }
+    case "commit-idle-group": {
+      const group = idleGroupDraft;
+      if (!group?.states.length || group.states.some(state => idleStateOwner(state) !== group)) break;
+      const next = structuredClone(group);
+      const original = doc!.character.animations;
+      doc!.character.animations = { ...original };
+      try {
+        const resolve = (animation: string | null | undefined) => animation?.startsWith("resource:") ? selectIdleAppearance(animation) : animation;
+        next.animation = resolve(next.animation);
+        for (const pose of Object.values(next.directions ?? {})) pose.animation = resolve(pose.animation);
+      } catch (error) {
+        doc!.character.animations = original;
+        throw error;
+      }
+      (doc!.project.idleGroups ??= []).push(next);
+      idleGroupDraft = undefined;
+      markDirty();
+      layout();
+      app.querySelector<HTMLElement>('.idle-group-list [aria-pressed="true"]')?.focus();
+      break;
+    }
+    case "discard-idle-group":
+      idleGroupDraft = undefined;
+      selectedIdleGroup = "";
+      layout();
+      app.querySelector<HTMLElement>('[data-action="add-idle-group"]')?.focus();
+      break;
+    case "remove-idle-group":
+      doc!.project.idleGroups = doc!.project.idleGroups?.filter(group => group.id !== selectedIdleGroup);
+      selectedIdleGroup = "";
+      markDirty();
+      layout();
+      break;
+    case "idle-direction":
+      if (cursorDirections.some(([direction]) => direction === id)) {
+        selectedIdleDirection = id as CursorDirection;
+        layout();
+        app.querySelector<HTMLElement>('.idle-direction-picker [aria-pressed="true"]')?.focus();
+      }
+      break;
+    case "test-idle":
     case "test-cursor": {
-      const index = cursorDirections.findIndex(([direction]) => direction === id);
-      if (index < 0) return;
-      if (!doc!.project.defaults.input.mouse)
+      const group = currentIdleGroup();
+      if (group && group === idleGroupDraft) return;
+      const phase = selectedIdlePhase && group?.states.includes(selectedIdlePhase) ? selectedIdlePhase : group?.states[0];
+      if (phase && !doc!.project.timer?.enabled) throw new Error("프로젝트 탭에서 타이머 사용을 먼저 켜세요.");
+      if (name === "test-cursor" && !doc!.project.defaults.input.mouse)
         throw new Error("프로젝트 탭에서 마우스 감지를 먼저 켜주세요.");
       await ensureSaved();
+      const events = phase ? [{ atMs: 0, event: { type: "timerPhaseChanged", phase } }] : [];
+      const index = cursorDirections.findIndex(([direction]) => direction === id);
       const positions = [120, 228, 330];
-      const event = { type: "cursorMove", x: positions[index % 3], y: positions[Math.floor(index / 3)] };
-      await prepareSimulation((request) => simulate([{ atMs: 100, event }], 1500, request));
+      await prepareSimulation((request) => simulate(index < 0 ? events : [...events,
+        { atMs: 100, event: { type: "cursorMove", x: positions[index % 3], y: positions[Math.floor(index / 3)] } },
+      ], index < 0 ? 0 : 1500, request));
       break;
     }
     case "reorder-binding": {
@@ -2443,6 +3051,38 @@ window.addEventListener("blur", () => {
 });
 app.addEventListener("input", (event) => {
   const input = event.target as HTMLInputElement;
+  if (input.dataset.motionWeight !== undefined) {
+    const effect = doc?.project.bindings[selectedBinding]?.effect;
+    if (doc?.meta.archived || effect?.type !== "playAnimation" || effect.variation?.mode !== "weighted") return;
+    const weights = motionCandidates(effect).map(candidate => candidate.weight);
+    const index = Number(input.dataset.motionWeight);
+    if (!Number.isInteger(index) || index < 0 || index >= weights.length) return;
+    weights[index] = input.validity.badInput ? -1 : Number(input.value);
+    effect.variation.weights = weights;
+    markDirty();
+    const total = motionWeightTotal(weights);
+    app.querySelectorAll("[data-motion-probability]").forEach((label, index) => {
+      label.textContent = motionProbability(weights[index], total);
+    });
+    app.querySelector<HTMLElement>("#motion-weight-warning")!.hidden = total > 0;
+    return;
+  }
+  if (input.hasAttribute("data-timer-time") && doc?.project.timer) {
+    const seconds = readTimerDuration([...app.querySelectorAll<HTMLInputElement>("[data-timer-time]")]);
+    setPath("project.timer.countdownSeconds", seconds);
+    document.querySelector("#timer-time-hint")!.textContent = seconds
+      ? "처음 직접 입력할 때 채워지는 값입니다. 1초부터 3시간까지 설정할 수 있습니다."
+      : "시간·분·초를 확인하세요. 합계는 1초부터 3시간까지입니다.";
+    return;
+  }
+  if (input.hasAttribute("data-timer-preset-unit") && doc?.project.timer) {
+    const row = input.closest<HTMLElement>("[data-timer-preset]")!;
+    const presets = [...(doc.project.timer.countdownPresets ?? defaultTimerPresets)];
+    presets[Number(row.dataset.timerPreset)] = readTimerDuration([...row.querySelectorAll<HTMLInputElement>("[data-timer-preset-unit]")]);
+    setPath("project.timer.countdownPresets", presets);
+    document.querySelector("#timer-preset-warning")!.textContent = timerPresetWarning(presets);
+    return;
+  }
   if (input.id === "clip-scale-number" || input.id === "clip-scale-range") {
     if (input.validity.valid) setClipScale(input.valueAsNumber);
     return;
@@ -2530,6 +3170,92 @@ app.addEventListener("input", (event) => {
 });
 app.addEventListener("change", (event) => {
   const input = event.target as HTMLInputElement;
+  if (input.dataset.timerPhase !== undefined) {
+    const trigger = doc?.project.bindings[selectedBinding]?.trigger;
+    const phase = input.dataset.timerPhase as TimerPhase;
+    if (doc?.meta.archived || (trigger?.type !== "timerCompleted" && trigger?.type !== "timerStarted") || !Object.hasOwn(timerPhaseLabels, phase)) return;
+    const previous = timerTriggerPhases(trigger);
+    const selected = previous.filter(candidate => candidate !== phase);
+    if (input.checked) selected.push(phase);
+    if (!selected.length) return;
+    const [first, ...alternatives] = selected;
+    trigger.phase = first;
+    trigger.alternatives = alternatives;
+    markDirty();
+    layout();
+    app.querySelector<HTMLElement>(`[data-timer-phase="${phase}"]:enabled`)?.focus();
+    return;
+  }
+  if (input.id === "buddy-hold-seconds") {
+    const trigger = doc?.project.bindings[selectedBinding]?.trigger;
+    if (trigger?.type !== "buddyLongPress" || doc?.meta.archived) return;
+    if (!input.validity.valid || !Number.isFinite(input.valueAsNumber)) {
+      input.value = String(trigger.holdMs / 1000);
+      toast("누르기 시간을 0.3~2초로 입력하세요.", true);
+      return;
+    }
+    trigger.holdMs = Math.round(input.valueAsNumber * 1000);
+    markDirty();
+    return;
+  }
+  if (input.id === "idle-preview-phase") {
+    selectedIdlePhase = input.value as TimerPhase;
+    return;
+  }
+  if (input.dataset.idleState || input.id === "idle-group-name" || input.id === "idle-group-cursor-mode") {
+    const group = currentIdleGroup();
+    if (!group || doc?.meta.archived) return;
+    if (input.dataset.idleState) {
+      const phase = input.dataset.idleState as TimerPhase;
+      const owner = idleStateOwner(phase);
+      if (!timerPhases.includes(phase) || (owner && owner !== group)) return;
+      const next = timerPhases.filter(state => state === phase ? input.checked : group.states.includes(state));
+      if (!next.length && group !== idleGroupDraft) return;
+      group.states = next;
+    } else if (input.id === "idle-group-name") {
+      group.name = input.value.trim() || undefined;
+      const name = idleGroupName(group);
+      app.querySelector("#idle-group-heading")!.textContent = name;
+      app.querySelector('.idle-group-list [aria-pressed="true"] strong')!.textContent = name;
+      if (group !== idleGroupDraft) markDirty();
+      return;
+    } else {
+      group.cursorMode = input.value as IdleCursorMode;
+    }
+    if (group !== idleGroupDraft) markDirty();
+    layout();
+    if (input.dataset.idleState)
+      app.querySelector<HTMLElement>(`[data-idle-state="${input.dataset.idleState}"]:enabled`)?.focus();
+    return;
+  }
+  if (input.id === "timer-enabled" && doc && !doc.meta.archived) {
+    setTimerEnabled(input.checked);
+    return;
+  }
+  if (input.dataset.path?.endsWith(".effect.animation") && app.querySelector('[data-action="add-motion"]:disabled')) {
+    layout();
+  }
+  if (input.id === "motion-mode" || input.dataset.motionIndex !== undefined) {
+    const effect = doc?.project.bindings[selectedBinding]?.effect;
+    if (doc?.meta.archived || effect?.type !== "playAnimation" || !effect.variation) return;
+    if (input.id === "motion-mode") {
+      if (input.value === "weighted") {
+        effect.variation.weights = motionCandidates(effect).map(candidate => candidate.weight);
+      }
+      effect.variation.mode = input.value === "weighted" || input.value === "shuffle" ? input.value : "cycle";
+      markDirty();
+      layout();
+      app.querySelector<HTMLElement>("#motion-mode")?.focus();
+    } else {
+      const candidates = motionCandidates(effect);
+      const index = Number(input.dataset.motionIndex);
+      if (Number.isInteger(index) && index >= 0 && index < candidates.length) {
+        candidates[index].animation = input.value;
+        setMotionCandidates(effect, candidates);
+      }
+    }
+    return;
+  }
   if (input.id === "clip-source-facing") {
     const animation = doc?.character.animations[selectedClip];
     if (!animation || doc?.meta.archived) return;
@@ -2652,23 +3378,29 @@ app.addEventListener("change", (event) => {
     markDirty();
     layout();
   }
-  if (input.id === "idle-appearance" || input.dataset.cursorDirection) {
+  if (input.id === "idle-appearance" || input.dataset.idlePoseField) {
     try {
+      const group = currentIdleGroup();
+      const appearance = input.value
+        ? (group && group === idleGroupDraft && input.value.startsWith("resource:") ? input.value : undefined)
+        : null;
       if (input.id === "idle-appearance") {
-        doc!.character.defaultAnimation = selectIdleAppearance(input.value);
+        if (group) group.animation = appearance === undefined ? selectIdleAppearance(input.value) : appearance;
+        else doc!.character.defaultAnimation = selectIdleAppearance(input.value);
       } else {
-        const direction = input.dataset.cursorDirection as CursorDirection;
-        const directions = doc!.project.idle!.directions ??= {};
+        const direction = selectedIdleDirection;
+        const directions = group ? group.directions ??= {} : doc!.project.idle!.directions;
+        if (group && group.cursorMode !== "custom") return;
         const pose = { ...directions[direction] };
-        if (input.dataset.poseField === "animation") {
-          pose.animation = input.value ? selectIdleAppearance(input.value) : null;
+        if (input.dataset.idlePoseField === "animation") {
+          pose.animation = appearance === undefined ? selectIdleAppearance(input.value) : appearance;
         } else {
           pose.mirror = input.value === "" ? null : input.value === "true";
         }
         if (pose.animation == null && pose.mirror == null) delete directions[direction];
         else directions[direction] = pose;
       }
-      markDirty();
+      if (!group || group !== idleGroupDraft) markDirty();
       layout();
     } catch (error) {
       layout();
@@ -2738,7 +3470,7 @@ app.addEventListener("submit", (event) => {
       );
       projects = await api("projects");
       archived = false;
-      tab = "overview";
+      tab = value.character.defaultAnimation ? "overview" : "resources";
       await openProject(value.meta.id);
       toast("새 프로젝트를 만들었습니다.");
     } catch (cause) {
@@ -2787,7 +3519,7 @@ async function poll() {
       const panel = document.querySelector("#github-panel");
       if (panel) panel.innerHTML = githubPanel();
       for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action="build-remote"]'))
-        button.disabled = !doc || doc.meta.archived || !hasBothBuildTargets(doc.project.build.targets) || !(github.connected && github.ready);
+        button.disabled = !doc?.character.defaultAnimation || doc.meta.archived || !hasBothBuildTargets(doc.project.build.targets) || !(github.connected && github.ready);
     }
     if (doc) {
       const id = doc.meta.id,

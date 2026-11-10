@@ -288,6 +288,7 @@ export class ProjectStore {
       await run(this.cli, [
         "inspect",
         path,
+        "--allow-empty",
         ...(output ? ["--output", output] : []),
       ]),
     );
@@ -431,7 +432,7 @@ export class ProjectStore {
         "같은 패키지 ID의 프로젝트가 있습니다. 다른 패키지 ID를 입력하세요.",
         409,
       );
-    if (!["typing-cat", "click-mascot"].includes(template))
+    if (!["empty", "typing-cat", "click-mascot"].includes(template))
       throw new StudioError("지원하지 않는 템플릿입니다.");
     const revision = randomUUID(),
       staging = join(this.root, ".staging", randomUUID()),
@@ -478,7 +479,10 @@ export class ProjectStore {
       revision = randomUUID();
     const path = join(this.root, ".staging", revision);
     const { project, character, license } = payload;
-    const current = JSON.parse(await fs.readFile(join(source, "buddy.project.json"), "utf8"));
+    const [current, currentCharacter] = await Promise.all([
+      fs.readFile(join(source, "buddy.project.json"), "utf8").then(JSON.parse),
+      fs.readFile(join(source, "character", "manifest.json"), "utf8").then(JSON.parse),
+    ]);
     if (
       project.projectId !== current.projectId ||
       project.product.identifier !== current.product.identifier
@@ -489,7 +493,7 @@ export class ProjectStore {
     if (
       project.character !== "character/manifest.json" ||
       project.product.icon !== "assets/app-icon.png" ||
-      character.image !== "sprite.png" ||
+      (character.image != null && (character.image !== "sprite.png" || character.image !== currentCharacter.image)) ||
       character.license !== "LICENSE.txt"
     )
       throw new StudioError(
@@ -497,6 +501,8 @@ export class ProjectStore {
       );
     try {
       await fs.cp(source, path, { recursive: true, dereference: false });
+      if (currentCharacter.image === "sprite.png" && character.image == null)
+        await fs.rm(join(path, "character", "sprite.png"), { force: true });
       await fs.rm(join(path, "character", "resources"), {
         recursive: true,
         force: true,
@@ -644,6 +650,7 @@ export class ProjectStore {
       const fresh = await this.create({
         name: `${original.project.product.name.slice(0, 65)} Copy`,
         packageId,
+        template: original.character.image ? "typing-cat" : "empty",
       });
       const target = this.path(fresh.meta.id);
       const library = join(this.path(id), "resources");
@@ -665,10 +672,11 @@ export class ProjectStore {
       // Preserve the source sheet and icon before saving the copied definitions.
       const current = await this.currentPath(fresh.meta.id),
         source = await this.currentPath(id);
-      await fs.copyFile(
-        join(source, "character", "sprite.png"),
-        join(current, "character", "sprite.png"),
-      );
+      if (original.character.image)
+        await fs.copyFile(
+          join(source, "character", "sprite.png"),
+          join(current, "character", "sprite.png"),
+        );
       await fs.copyFile(
         join(source, "assets", "app-icon.png"),
         join(current, "assets", "app-icon.png"),

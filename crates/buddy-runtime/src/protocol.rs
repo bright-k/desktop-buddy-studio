@@ -57,6 +57,7 @@ impl InputStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerBootstrap {
+    pub sound_enabled: bool,
     pub character: Character,
     pub product: Product,
     pub image_paths: std::collections::BTreeMap<String, String>,
@@ -72,6 +73,7 @@ pub struct WireState {
     pub state: CharacterState,
     pub editing: bool,
     pub visible: bool,
+    pub sound_enabled: bool,
     pub edit_session_id: Option<String>,
     pub width: f64,
     pub height: f64,
@@ -84,6 +86,7 @@ pub struct PreferenceUpdate {
     pub timing: Option<buddy_project::Timing>,
     pub keyboard: Option<bool>,
     pub mouse: Option<bool>,
+    pub sound_enabled: Option<bool>,
     pub movement_enabled: Option<bool>,
     #[serde(default)]
     pub cursor_follow: Option<bool>,
@@ -112,6 +115,7 @@ pub struct RuntimeStatus {
     pub timing: buddy_project::Timing,
     pub keyboard: bool,
     pub mouse: bool,
+    pub sound_enabled: bool,
     pub movement_enabled: bool,
     pub cursor_follow: bool,
     pub always_on_top: bool,
@@ -153,6 +157,8 @@ pub struct PreferenceOverrides {
     pub keyboard: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mouse: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sound_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub movement_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

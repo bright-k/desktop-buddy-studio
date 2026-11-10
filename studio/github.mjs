@@ -10,6 +10,7 @@ const workflowPath = ".github/workflows/studio-build.yml";
 const workflowName = "studio-build.yml";
 const targets = ["macos-arm64", "windows-x64"];
 const ongoing = new Set(["preparing", "queued", "running", "downloading", "awaiting_auth", "dispatch_unknown", "cancelling"]);
+const syncRetryMs = 120_000;
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const gitHash = (bytes) => createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 const now = () => new Date().toISOString();
@@ -97,7 +98,7 @@ export class ActionsBuilds {
       if (targets.some((t) => !info.project.build.targets.includes(t))) throw new StudioError("프로젝트의 빌드 대상에 macOS arm64와 Windows x64가 모두 필요합니다.");
       const engineHash = hash(await fs.readFile(join(this.templatePack, "pack-manifest.json")));
       if (api !== this.api || destination !== this.profile.repository) throw new StudioError("연결한 저장소가 변경됐습니다. 다시 빌드하세요.", 409);
-      const previous = (await this.jobs.list(projectId)).find((j) => j.provider === "github" && j.revision === revision && j.github.engineHash === engineHash && j.github.repository === destination && ongoing.has(j.status));
+      const previous = (await this.jobs.list(projectId)).find((j) => j.provider === "github" && j.revision === revision && j.github.engineHash === engineHash && j.github.repository === destination && (ongoing.has(j.status) || j.status === "sync_failed"));
       if (previous) return previous;
       const job = { id: randomUUID(), provider: "github", target: "macos-arm64+windows-x64", projectId, revision, contentHash: info.contentHash,
         status: "preparing", createdAt: now(), development: true, logs: "저장된 프로젝트와 고정 엔진을 준비합니다.\n",
@@ -238,16 +239,23 @@ export class ActionsBuilds {
       const list = await api.request(`${base}/workflows/${workflowName}/runs?event=workflow_dispatch&branch=${encodeURIComponent(job.github.branch)}&per_page=20`);
       const runs = list.workflow_runs.filter((r) => r.head_sha === job.github.headSha);
       if (runs.length > 1) throw new StudioError("동일 요청에 여러 Actions 실행이 있습니다. GitHub에서 실행을 확인하세요.");
-      if (!runs.length) return;
+      if (!runs.length) {
+        if (job.github.syncUnavailableSince) {
+          delete job.github.syncUnavailableSince;
+          delete job.error;
+          await this.persist(job);
+        }
+        return;
+      }
       job.github.runId = runs[0].id;
     }
+    job.github.runUrl = `https://github.com/${job.github.repository}/actions/runs/${job.github.runId}`;
     const remote = await api.request(`${base}/runs/${job.github.runId}`);
     if (remote.head_sha !== job.github.headSha || remote.head_branch !== job.github.branch || remote.event !== "workflow_dispatch")
       throw new StudioError("Actions 실행과 업로드한 저장 버전이 일치하지 않습니다.");
     const attempt = remote.run_attempt || 1;
     if (job.github.runAttempt && job.github.runAttempt !== attempt) throw new StudioError("GitHub에서 재실행된 빌드입니다. 새 Studio 빌드를 시작하세요.");
     job.github.runAttempt = attempt;
-    job.github.runUrl = `https://github.com/${job.github.repository}/actions/runs/${job.github.runId}`;
     if (this.cancelRequests.has(job.id)) job.cancelRequested = true;
     if (job.cancelRequested && remote.status !== "completed") {
       if (!job.github.cancelSent) { await api.request(`${base}/runs/${job.github.runId}/cancel`, { method: "POST" }); job.github.cancelSent = true; }
@@ -299,6 +307,7 @@ export class ActionsBuilds {
       else job.status = "import_failed";
       job.finishedAt = now();
     }
+    delete job.github.syncUnavailableSince;
     delete job.error;
     await this.persist(job);
   }
@@ -321,8 +330,12 @@ export class ActionsBuilds {
   async retryImport(projectId, id) {
     return this.store.exclusive("@github-poll", async () => {
       const job = (await this.jobs.list(projectId)).find((j) => j.id === id && j.provider === "github");
-      if (!job?.github.runId) throw new StudioError("가져올 Actions 실행이 없습니다.");
-      job.status = "downloading"; delete job.finishedAt;
+      if (!job?.github.dispatchAttemptedAt || !job.github.headSha)
+        throw new StudioError("다시 확인할 Actions 실행 요청이 없습니다.");
+      job.status = job.github.runId ? "downloading" : "dispatch_unknown";
+      delete job.github.syncUnavailableSince;
+      delete job.finishedAt;
+      delete job.error;
       for (const platform of Object.values(job.platforms)) delete platform.importError;
       await this.persist(job); this.wake(); return job;
     });
@@ -335,9 +348,11 @@ export class ActionsBuilds {
         if (!this.api || this.profile.repository !== job.github.repository) {
           job.status = "awaiting_auth"; await this.persist(job); continue;
         }
+        let syncing = false;
         try {
           if (!job.github.headSha) await this.prepare(job);
           if (!job.github.dispatchAttemptedAt) await this.dispatch(job);
+          syncing = true;
           await this.sync(job);
         } catch (e) {
           job.error = e.message;
@@ -349,8 +364,17 @@ export class ActionsBuilds {
               this.api.close(); this.api = null;
               this.profile = { ...this.profile, connected: false, ready: false, error: e.message };
             }
-          }
-          else if (e instanceof StudioError && (e.status === 400 || [404, 409, 422].includes(e.githubStatus))) {
+          } else if (syncing && e.githubStatus === 404) {
+            // GitHub can return a run ID before the run is visible to its read APIs.
+            const since = job.github.syncUnavailableSince ??= Date.now();
+            if (Date.now() - since >= syncRetryMs) {
+              job.status = "sync_failed"; job.finishedAt = now();
+              job.error = "Actions 실행 정보를 조회할 수 없습니다. GitHub에서 실행과 접근 권한을 확인한 뒤 다시 동기화하세요.";
+            } else {
+              if (job.status === "awaiting_auth") job.status = job.github.runId ? "queued" : "dispatch_unknown";
+              job.error = "Actions 실행 정보가 아직 표시되지 않습니다. 같은 실행을 다시 확인합니다.";
+            }
+          } else if (e instanceof StudioError && (e.status === 400 || [404, 409, 422].includes(e.githubStatus))) {
             job.status = "failed"; job.finishedAt = now();
           }
           else if (job.github.dispatchAttemptedAt) job.status = job.cancelRequested ? "cancelling" : "dispatch_unknown";

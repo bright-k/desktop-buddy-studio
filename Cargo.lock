@@ -307,6 +307,7 @@ name = "buddy-runtime"
 version = "0.1.0"
 dependencies = [
  "buddy-project",
+ "fastrand",
  "schemars 1.2.3",
  "serde",
  "serde_json",

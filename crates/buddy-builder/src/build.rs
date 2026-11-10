@@ -2,7 +2,7 @@ use crate::{
     default_template_pack, materialize_template, process, template_hash, write_project_snapshot,
     CancellationToken,
 };
-use buddy_project::{LoadedProject, MacSigning, Target, WindowsSigning};
+use buddy_project::{LoadedProject, MacSigning, Product, Target, WindowsSigning};
 use fs2::FileExt;
 use serde::Serialize;
 use serde_json::json;
@@ -155,7 +155,13 @@ pub fn build(
         let workspace = work.path().join("workspace");
         materialize_template(&pack, &workspace)?;
         start_stage("configure-product", started, &mut stages, &mut progress);
-        let notices = configure(&workspace, &snapshot, &options)?;
+        let runtime_snapshot = crate::snapshot::write_runtime_snapshot(
+            &snapshot,
+            &work.path().join("runtime-project"),
+        )?;
+        let notices = configure(&workspace, &runtime_snapshot, &options)?;
+        let runtime_project_hash = runtime_snapshot.content_hash.clone();
+        drop(runtime_snapshot);
         start_stage(
             "install-web-dependencies",
             started,
@@ -289,7 +295,10 @@ pub fn build(
                     return Err(format!("App metadata mismatch: {key}"));
                 }
             }
-            verify_bundled_project(&staged_app.join("Contents/Resources"), &snapshot)?;
+            verify_bundled_project(
+                &staged_app.join("Contents/Resources"),
+                &runtime_project_hash,
+            )?;
             let timestamp = Command::new("/bin/date")
                 .arg("+%Y-%m-%d_%H-%M-%S%z")
                 .env("LC_ALL", "C")
@@ -307,7 +316,7 @@ pub fn build(
                 let layout = dmg_layout;
                 let name = format!(
                     "{}_{}_aarch64_{}.dmg",
-                    product.name,
+                    product.slug,
                     product.version,
                     timestamp.trim()
                 );
@@ -342,20 +351,11 @@ pub fn build(
             )?;
             None
         } else {
-            let installers = copy_matching(
+            Some(stage_windows_installer(
                 &bundle.join("nsis"),
                 &staged,
-                "exe",
-                &format!(
-                    "{}_{}_",
-                    snapshot.data.project.product.name, snapshot.data.project.product.version
-                ),
-                "",
-            )?;
-            let [installer] = installers.as_slice() else {
-                return Err("Expected one Windows installer in the build".into());
-            };
-            Some(installer.clone())
+                &snapshot.data.project.product,
+            )?)
         };
         let sign = match options.target {
             Target::MacosArm64 => match snapshot.data.project.build.signing.macos {
@@ -419,7 +419,7 @@ pub fn build(
             &snapshot.data.project.project_id,
             options.development,
         );
-        let report = json!({"formatVersion":1,"jobId":job,"projectId":snapshot.data.project.project_id,"identifier":snapshot.data.project.product.identifier,"version":snapshot.data.project.product.version,"projectHash":snapshot.content_hash,"engineVersion":buddy_project::ENGINE_VERSION,"templateHash":template_hash(),"target":options.target,"host":host,"signing":sign,"notarized":false,"development":options.development,"artifacts":artifacts,"durationMs":started.elapsed().as_millis(),"staticInspection":"passed","toolchain":toolchain.tools,"toolchainPolicy":{"rustToolchain":toolchain.rust_toolchain,"automaticInstallation":toolchain.automatic_installation,"target":toolchain.target,"targetAvailable":toolchain.target_available,"ready":toolchain.ready,"problems":toolchain.problems},"lockHashes":{"cargo":buddy_project::sha256(&fs::read(workspace.join("Cargo.lock")).map_err(|e|e.to_string())?),"npm":buddy_project::sha256(&fs::read(workspace.join("package-lock.json")).map_err(|e|e.to_string())?)},"protocolVersion":buddy_runtime::PROTOCOL_VERSION,"projectSchemaVersion":1,"stages":stages,"log":"build.log","cache":{"kind":"cargo-dependencies","key":format!("{}-{:?}",template_hash(),options.target),"appArtifactCache":false},"platformIdentity":{"appIdentifier":snapshot.data.project.product.identifier,"binaryName":snapshot.data.project.product.slug,"dataIdentity":data_identity,"dataKey":buddy_project::sha256(data_identity.as_bytes()),"windows":crate::WindowsIdentity::new(&snapshot.data.project.product),"windowsInstallerIdentityValidation":"not-performed"},"thirdPartyNotices":notices,"externalDeviceValidation":"not-performed","platformRuntimeValidation":"not-performed"});
+        let report = json!({"formatVersion":1,"jobId":job,"projectId":snapshot.data.project.project_id,"identifier":snapshot.data.project.product.identifier,"version":snapshot.data.project.product.version,"projectHash":snapshot.content_hash,"runtimeProjectHash":runtime_project_hash,"engineVersion":buddy_project::ENGINE_VERSION,"templateHash":template_hash(),"target":options.target,"host":host,"signing":sign,"notarized":false,"development":options.development,"artifacts":artifacts,"durationMs":started.elapsed().as_millis(),"staticInspection":"passed","toolchain":toolchain.tools,"toolchainPolicy":{"rustToolchain":toolchain.rust_toolchain,"automaticInstallation":toolchain.automatic_installation,"target":toolchain.target,"targetAvailable":toolchain.target_available,"ready":toolchain.ready,"problems":toolchain.problems},"lockHashes":{"cargo":buddy_project::sha256(&fs::read(workspace.join("Cargo.lock")).map_err(|e|e.to_string())?),"npm":buddy_project::sha256(&fs::read(workspace.join("package-lock.json")).map_err(|e|e.to_string())?)},"protocolVersion":buddy_runtime::PROTOCOL_VERSION,"projectSchemaVersion":1,"stages":stages,"log":"build.log","cache":{"kind":"cargo-dependencies","key":format!("{}-{:?}",template_hash(),options.target),"appArtifactCache":false},"platformIdentity":{"appIdentifier":snapshot.data.project.product.identifier,"binaryName":snapshot.data.project.product.slug,"dataIdentity":data_identity,"dataKey":buddy_project::sha256(data_identity.as_bytes()),"windows":crate::WindowsIdentity::new(&snapshot.data.project.product),"windowsInstallerIdentityValidation":"not-performed"},"thirdPartyNotices":notices,"externalDeviceValidation":"not-performed","platformRuntimeValidation":"not-performed"});
         fs::write(
             staged.join("build-report.json"),
             serde_json::to_vec_pretty(&report).unwrap(),
@@ -535,13 +535,13 @@ fn build_cache_directory(output: &Path, target: Target) -> PathBuf {
     }
 }
 
-fn verify_bundled_project(resources: &Path, snapshot: &LoadedProject) -> Result<(), String> {
+fn verify_bundled_project(resources: &Path, expected_hash: &str) -> Result<(), String> {
     let entry =
         buddy_project::bundled_project_path(resources)?.ok_or("Bundled project is missing")?;
     let bundled =
         buddy_project::load_project_with_prepared(entry, &resources.join("prepared-render"))
             .map_err(|e| e.to_string())?;
-    if bundled.content_hash != snapshot.content_hash {
+    if bundled.content_hash != expected_hash {
         return Err("Bundled project differs from validated snapshot".into());
     }
     if bundled.prepared_render_paths.is_empty() {
@@ -659,31 +659,23 @@ fn configure(
     .map_err(|e| e.to_string())?;
     Ok(notices)
 }
-fn copy_matching(
+fn stage_windows_installer(
     source: &Path,
     destination: &Path,
-    extension: &str,
-    expected_prefix: &str,
-    suffix: &str,
-) -> Result<Vec<String>, String> {
-    let mut copied = Vec::new();
-    for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if path.extension().and_then(|s| s.to_str()) == Some(extension)
-            && stem.starts_with(expected_prefix)
-        {
-            let name = format!("{stem}{suffix}.{extension}");
-            fs::copy(&path, destination.join(&name)).map_err(|e| e.to_string())?;
-            copied.push(name);
-        }
-    }
-    if copied.is_empty() {
-        return Err(format!("Missing {extension} installer"));
-    }
-    Ok(copied)
+    product: &Product,
+) -> Result<String, String> {
+    let bundled = source.join(format!(
+        "{}_{}_x64-setup.exe",
+        product.name, product.version
+    ));
+    let name = format!("{}_{}_x64-setup.exe", product.slug, product.version);
+    fs::copy(&bundled, destination.join(&name)).map_err(|error| {
+        format!(
+            "Could not stage Windows installer {}: {error}",
+            bundled.display()
+        )
+    })?;
+    Ok(name)
 }
 
 fn write_windows_package(
@@ -830,47 +822,65 @@ mod tests {
         )
         .unwrap();
         let prepared = resources.join("prepared-render");
-        assert!(verify_bundled_project(&resources, &snapshot)
+        assert!(verify_bundled_project(&resources, &snapshot.content_hash)
             .unwrap_err()
             .contains("prepared rendering"));
         buddy_project::write_prepared_rendering(&snapshot, &prepared).unwrap();
-        verify_bundled_project(&resources, &snapshot).unwrap();
+        verify_bundled_project(&resources, &snapshot.content_hash).unwrap();
         fs::write(
             resources.join("project/character/LICENSE.txt"),
             "changed but valid UTF-8",
         )
         .unwrap();
-        assert!(verify_bundled_project(&resources, &snapshot)
+        assert!(verify_bundled_project(&resources, &snapshot.content_hash)
             .unwrap_err()
             .contains("differs from validated snapshot"));
     }
     #[test]
-    fn windows_package_keeps_unicode_installer_and_guide_at_the_zip_root() {
-        let source = tempfile::tempdir().unwrap();
+    fn windows_package_uses_ascii_installer_name_for_a_korean_product() {
+        let temp = tempfile::tempdir().unwrap();
         let extracted = tempfile::tempdir().unwrap();
-        let installer = "먼작버 치이카와_0.1.4_x64-setup.exe";
+        let bundle = temp.path().join("nsis");
+        let published = temp.path().join("result");
+        fs::create_dir(&bundle).unwrap();
+        fs::create_dir(&published).unwrap();
+        let product: Product = serde_json::from_value(json!({
+            "name": "먼작버 치이카와",
+            "slug": "chiikawa-buddy",
+            "version": "0.1.4",
+            "identifier": "com.example.chiikawa",
+            "icon": "assets/app-icon.png"
+        }))
+        .unwrap();
+        let original = "먼작버 치이카와_0.1.4_x64-setup.exe";
+        let installer = "chiikawa-buddy_0.1.4_x64-setup.exe";
         let guide = "Windows Installation Guide.pdf";
         let package = "chiikawa-buddy_0.1.4_windows-x64.zip";
-        fs::write(source.path().join(installer), b"installer").unwrap();
-        fs::write(source.path().join(guide), b"guide").unwrap();
-        fs::create_dir(source.path().join("LICENSES")).unwrap();
-        fs::write(source.path().join("LICENSES/character.txt"), b"license").unwrap();
+        fs::write(bundle.join(original), b"installer").unwrap();
+        fs::write(bundle.join("Other Buddy_0.1.4_x64-setup.exe"), b"old").unwrap();
+        assert_eq!(
+            stage_windows_installer(&bundle, &published, &product).unwrap(),
+            installer
+        );
+        assert_eq!(fs::read(published.join(installer)).unwrap(), b"installer");
+        assert!(!published.join(original).exists());
+        assert_eq!(fs::read_dir(&published).unwrap().count(), 1);
+        fs::write(published.join(guide), b"guide").unwrap();
+        fs::create_dir(published.join("LICENSES")).unwrap();
+        fs::write(published.join("LICENSES/character.txt"), b"license").unwrap();
         write_windows_package(
-            source.path(),
+            &published,
             package,
             Path::new(installer),
             Path::new(guide),
             &CancellationToken::default(),
         )
         .unwrap();
-        let bytes = fs::read(source.path().join(package)).unwrap();
-        // The first entry is the installer. Its local header must mark the name
-        // as UTF-8 so Windows and other extractors decode it the same way.
-        assert_ne!(u16::from_le_bytes([bytes[6], bytes[7]]) & (1 << 11), 0);
-        zip::ZipArchive::new(io::Cursor::new(bytes))
-            .unwrap()
-            .extract(extracted.path())
-            .unwrap();
+        let bytes = fs::read(published.join(package)).unwrap();
+        let mut zip = zip::ZipArchive::new(io::Cursor::new(bytes)).unwrap();
+        assert_eq!(zip.by_index(0).unwrap().name().unwrap(), installer);
+        assert!(zip.file_names().all(|name| name.unwrap().is_ascii()));
+        zip.extract(extracted.path()).unwrap();
         assert_eq!(
             fs::read(extracted.path().join(installer)).unwrap(),
             b"installer"
@@ -879,36 +889,6 @@ mod tests {
         assert_eq!(
             fs::read(extracted.path().join("LICENSES/character.txt")).unwrap(),
             b"license"
-        );
-    }
-    #[test]
-    fn previous_products_installers_are_not_published_from_shared_cache() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("cache");
-        let destination = temp.path().join("result");
-        fs::create_dir(&source).unwrap();
-        fs::create_dir(&destination).unwrap();
-        fs::write(source.join("Typing Cat_0.1.0_aarch64.dmg"), "old product").unwrap();
-        fs::write(
-            source.join("Click Mascot_0.1.0_aarch64.dmg"),
-            "current product",
-        )
-        .unwrap();
-        copy_matching(
-            &source,
-            &destination,
-            "dmg",
-            "Click Mascot_0.1.0_",
-            "_2026-11-08_02-15-00+0900",
-        )
-        .unwrap();
-        assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
-        assert_eq!(
-            fs::read_to_string(
-                destination.join("Click Mascot_0.1.0_aarch64_2026-11-08_02-15-00+0900.dmg"),
-            )
-            .unwrap(),
-            "current product"
         );
     }
     #[test]

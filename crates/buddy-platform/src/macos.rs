@@ -44,10 +44,20 @@ extern "C" {
     fn CGEventGetLocation(event: EventRef) -> CGPoint;
     fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
     fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+    fn CGSessionCopyCurrentDictionary() -> CFRef;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayIsAsleep(display: u32) -> u32;
 }
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     static kCFRunLoopDefaultMode: CFRef;
+    static kCFBooleanTrue: CFRef;
+    fn CFStringCreateWithCString(
+        allocator: CFRef,
+        string: *const std::ffi::c_char,
+        encoding: u32,
+    ) -> CFRef;
+    fn CFDictionaryGetValue(dictionary: CFRef, key: CFRef) -> CFRef;
     fn CFMachPortCreateRunLoopSource(allocator: CFRef, port: CFRef, order: isize) -> CFRef;
     fn CFRunLoopGetCurrent() -> CFRef;
     fn CFRunLoopAddSource(run_loop: CFRef, source: CFRef, mode: CFRef);
@@ -55,6 +65,29 @@ extern "C" {
     fn CFRunLoopRunInMode(mode: CFRef, seconds: f64, return_after_source: bool) -> i32;
     fn CFMachPortInvalidate(port: CFRef);
     fn CFRelease(object: CFRef);
+}
+
+pub(crate) fn desktop_available() -> bool {
+    unsafe {
+        let session = CGSessionCopyCurrentDictionary();
+        if session.is_null() {
+            return false;
+        }
+        // The lock screen may still have an awake display and an active console session.
+        let key = CFStringCreateWithCString(
+            ptr::null(),
+            c"CGSSessionScreenIsLocked".as_ptr(),
+            0x0800_0100,
+        );
+        let available = !key.is_null()
+            && CFDictionaryGetValue(session, key) != kCFBooleanTrue
+            && CGDisplayIsAsleep(CGMainDisplayID()) == 0;
+        if !key.is_null() {
+            CFRelease(key);
+        }
+        CFRelease(session);
+        available
+    }
 }
 #[link(name = "Carbon", kind = "framework")]
 extern "C" {
@@ -260,7 +293,7 @@ pub(crate) fn run(
     status: Arc<Mutex<InputStatus>>,
     stop: Arc<AtomicBool>,
     ready: SyncSender<()>,
-    overlay: Option<usize>,
+    targets: Vec<usize>,
 ) {
     if !options.keyboard && !options.mouse {
         let _ = ready.send(());
@@ -285,11 +318,12 @@ pub(crate) fn run(
     let mask = kinds
         .into_iter()
         .fold(0u64, |mask, kind| mask | (1 << kind));
+    let routed = !targets.is_empty();
     let mut context = Box::new(Context {
         sender,
         keys: BTreeSet::new(),
         buttons: BTreeSet::new(),
-        overlay_mouse: OverlayMouseRoute::new(overlay),
+        overlay_mouse: OverlayMouseRoute::new(targets),
         last_motion: Instant::now() - Duration::from_secs(1),
         tap: ptr::null(),
         interrupted: false,
@@ -297,7 +331,7 @@ pub(crate) fn run(
     });
     unsafe {
         let tap = CGEventTapCreate(
-            if overlay.is_some() && options.mouse {
+            if routed && options.mouse {
                 ANNOTATED_SESSION_EVENT_TAP
             } else {
                 SESSION_EVENT_TAP

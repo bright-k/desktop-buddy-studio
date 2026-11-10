@@ -1,7 +1,10 @@
-type HitMask = { columns: number; rows: number; bits: number[]; offsetX: number; offsetY: number };
+type HitMask = {
+  columns: number; rows: number; bits: number[];
+  offsetX: number; offsetY: number; fractionX: number; fractionY: number;
+};
 const MAX_EDGE = 192;
 const MIN_ALPHA = 16;
-const empty: HitMask = { columns: 0, rows: 0, bits: [], offsetX: 0, offsetY: 0 };
+const empty: HitMask = { columns: 0, rows: 0, bits: [], offsetX: 0, offsetY: 0, fractionX: 1, fractionY: 1 };
 
 export function trackCharacterPixels(
   canvas: HTMLCanvasElement,
@@ -34,6 +37,7 @@ export function trackCharacterPixels(
   function replace(mask: HitMask) {
     if (mask.columns !== current.columns || mask.rows !== current.rows ||
         mask.offsetX !== current.offsetX || mask.offsetY !== current.offsetY ||
+        mask.fractionX !== current.fractionX || mask.fractionY !== current.fractionY ||
         (mask.bits !== current.bits && mask.bits.some((word, index) => word !== current.bits[index]))) {
       current = mask;
     }
@@ -41,13 +45,12 @@ export function trackCharacterPixels(
   }
 
   return {
-    place(offsetX: number, offsetY: number) {
-      replace({ ...current, offsetX, offsetY });
+    place(offsetX: number, offsetY: number, fractionX: number, fractionY: number) {
+      replace({ ...current, offsetX, offsetY, fractionX, fractionY });
     },
     update(drawn: boolean) {
-      const { offsetX, offsetY } = current;
       if (!drawn) {
-        replace({ ...empty, offsetX, offsetY });
+        replace({ ...current, columns: 0, rows: 0, bits: [] });
         return;
       }
       const scale = Math.min(1 / (window.devicePixelRatio || 1), MAX_EDGE / Math.max(canvas.width, canvas.height));
@@ -66,9 +69,9 @@ export function trackCharacterPixels(
             bits[word] = (bits[word] | (1 << (pixel & 31))) >>> 0;
           }
         }
-        replace({ columns, rows, bits, offsetX, offsetY });
+        replace({ ...current, columns, rows, bits });
       } catch (error) {
-        replace({ ...empty, offsetX, offsetY });
+        replace({ ...current, columns: 0, rows: 0, bits: [] });
         onError(error);
       }
     },

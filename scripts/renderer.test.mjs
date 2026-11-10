@@ -24,6 +24,7 @@ async function transpileModule(name, directory = '../apps/player/src') {
 const { mergeSettings, settingsUpdate } = await transpileModule('settings-model');
 const { installCharacterDrag } = await transpileModule('drag');
 const { trackCharacterPixels } = await transpileModule('hit-mask');
+const { fitOverlayCanvas } = await transpileModule('overlay-layout');
 const { ReactionAudio } = await transpileModule('audio', '../packages/renderer/src');
 
 test('prepared event sounds start from a decoded buffer and do not reopen the file', async t => {
@@ -41,7 +42,7 @@ test('prepared event sounds start from a decoded buffer and do not reopen the fi
   const audio = new ReactionAudio(() => '/cue.wav', assert.fail, async () => new ArrayBuffer(128));
   await audio.preload(['cue']);
   assert.deepEqual(calls, [['decode', 128]]);
-  assert.equal(audio.waitForCue('cue'), undefined);
+  assert.equal(audio.prepare('cue'), undefined);
   const state = { epoch: 1, actionInstanceId: 2, sound: { resource: 'cue', volume: 0.7 } };
   audio.update(state);
   audio.update(state);
@@ -68,6 +69,7 @@ test('reaction audio plays once per action, stops on replacement or hiding, and 
   audio.update({ ...state, actionInstanceId: 2, sound: { resource: 'pop', volume: 1 } });
   audio.update({ ...state, actionInstanceId: 2 }, false);
   audio.update({ ...state, actionInstanceId: 2 }, true);
+  audio.update({ ...state, actionInstanceId: 3 }, false);
   audio.update({ ...state, actionInstanceId: 3 });
   assert.deepEqual(calls, [
     ['play', '/ping.wav', 0.65],
@@ -76,6 +78,184 @@ test('reaction audio plays once per action, stops on replacement or hiding, and 
     ['pause', '/pop.wav'],
     ['play', '/ping.wav', 0.65],
   ]);
+});
+
+test('muting stops playback and enabling sound waits for a fresh action', t => {
+  const previous = globalThis.Audio;
+  const calls = [];
+  globalThis.Audio = class {
+    async play() { calls.push('play'); }
+    pause() { calls.push('pause'); }
+  };
+  t.after(() => { if (previous) globalThis.Audio = previous; else delete globalThis.Audio; });
+  const sound = new ReactionAudio(() => '/cue.wav', assert.fail);
+  const cue = { epoch: 1, actionInstanceId: 1, sound: { resource: 'cue', volume: 1 } };
+  sound.update(cue);
+  sound.setEnabled(false);
+  sound.update({ ...cue, actionInstanceId: 2 });
+  sound.setEnabled(true);
+  sound.update({ ...cue, actionInstanceId: 2 });
+  assert.deepEqual(calls, ['play', 'pause']);
+  sound.update({ ...cue, actionInstanceId: 3 });
+  assert.deepEqual(calls, ['play', 'pause', 'play']);
+});
+
+test('large cues use file playback and only one sound is prepared at a time', async t => {
+  const originalContext = globalThis.AudioContext;
+  const originalAudio = globalThis.Audio;
+  const waiting = Promise.withResolvers();
+  const calls = [];
+  globalThis.AudioContext = class {
+    state = 'running';
+    sampleRate = 48_000;
+    async decodeAudioData(bytes) {
+      calls.push(['decode', bytes.byteLength]);
+      return { length: 256, numberOfChannels: 1 };
+    }
+  };
+  globalThis.Audio = class {
+    constructor(url) { this.url = url; }
+    async play() { calls.push(['file', this.url]); }
+    pause() {}
+  };
+  t.after(() => {
+    if (originalContext) globalThis.AudioContext = originalContext; else delete globalThis.AudioContext;
+    if (originalAudio) globalThis.Audio = originalAudio; else delete globalThis.Audio;
+  });
+  const budget = 8 * 1024 * 1024;
+  const audio = new ReactionAudio(id => `/${id}.wav`, assert.fail, async (id, sampleRate, maxDecodedBytes) => {
+    calls.push(['read', id, sampleRate, maxDecodedBytes]);
+    if (id === 'large') return new ArrayBuffer(0);
+    return waiting.promise;
+  });
+  await audio.preload(['large']);
+  assert.equal(audio.prepare('large'), undefined);
+  audio.update({ epoch: 1, actionInstanceId: 1, sound: { resource: 'large', volume: 1 } });
+  const pending = audio.prepare('small');
+  assert(pending);
+  assert.equal(audio.prepare('other'), undefined);
+  audio.update({ epoch: 1, actionInstanceId: 2, sound: { resource: 'other', volume: 1 } });
+  waiting.resolve(new ArrayBuffer(128));
+  await pending;
+  assert.deepEqual(calls, [
+    ['read', 'large', 48_000, budget], ['file', '/large.wav'],
+    ['read', 'small', 48_000, budget], ['file', '/other.wav'], ['decode', 128],
+  ]);
+});
+
+test('audio prewarms two cues, evicts old buffers and releases them when muted', async t => {
+  const previous = globalThis.AudioContext;
+  const reads = [];
+  let closes = 0;
+  globalThis.AudioContext = class {
+    state = 'running';
+    sampleRate = 48_000;
+    async decodeAudioData() { return { length: 2 * 1024 * 1024, numberOfChannels: 1 }; }
+    async close() { closes++; }
+  };
+  t.after(() => { if (previous) globalThis.AudioContext = previous; else delete globalThis.AudioContext; });
+  const audio = new ReactionAudio(id => `/${id}.wav`, assert.fail, async id => {
+    reads.push(id);
+    return new ArrayBuffer(128);
+  });
+  await audio.preload(['a', 'b', 'c', 'd']);
+  assert.deepEqual(reads, ['a', 'b']);
+  await audio.prepare('c');
+  assert.equal(audio.prepare('b'), undefined);
+  await audio.prepare('a');
+  audio.setEnabled(false);
+  assert.equal(audio.prepare('a'), undefined);
+  assert.equal(closes, 1);
+  audio.setEnabled(true);
+  await audio.prepare('a');
+  assert.deepEqual(reads, ['a', 'b', 'c', 'a', 'a']);
+});
+
+test('a short cue plays immediately during audio recovery and is not replayed after resume', async t => {
+  const originalContext = globalThis.AudioContext;
+  const originalAudio = globalThis.Audio;
+  let context, finishResume;
+  const calls = [];
+  globalThis.Audio = class {
+    async play() { calls.push('file'); }
+    pause() { calls.push('pause'); }
+  };
+  globalThis.AudioContext = class {
+    constructor() { context = this; }
+    state = 'running';
+    currentTime = 0;
+    async decodeAudioData() { return { length: 256, numberOfChannels: 1 }; }
+    resume() {
+      return new Promise(resolve => {
+        finishResume = () => { this.state = 'running'; resolve(); };
+      });
+    }
+    createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; }
+    createBufferSource() {
+      return { connect: gain => gain, disconnect() {}, start() { calls.push('buffer'); }, stop() { calls.push('stop'); } };
+    }
+  };
+  t.after(() => {
+    if (originalContext) globalThis.AudioContext = originalContext; else delete globalThis.AudioContext;
+    if (originalAudio) globalThis.Audio = originalAudio; else delete globalThis.Audio;
+  });
+  const audio = new ReactionAudio(() => '/cue.wav', assert.fail, async () => new ArrayBuffer(128));
+  await audio.preload(['cue']);
+  const state = { epoch: 1, actionInstanceId: 1, sound: { resource: 'cue', volume: 1 } };
+  context.state = 'interrupted';
+  audio.update(state);
+  assert.deepEqual(calls, ['file']);
+  audio.update({ ...state, actionInstanceId: 2, sound: null });
+  assert.deepEqual(calls, ['file', 'pause']);
+  finishResume();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, ['file', 'pause']);
+  audio.update({ ...state, actionInstanceId: 3 });
+  audio.stop();
+  assert.deepEqual(calls, ['file', 'pause', 'buffer', 'stop']);
+});
+
+test('a stalled audio clock or resume falls back to a file once per action', async t => {
+  const originalContext = globalThis.AudioContext;
+  const originalAudio = globalThis.Audio;
+  const calls = [];
+  let context, filePlayed;
+  globalThis.AudioContext = class {
+    constructor() { context = this; }
+    state = 'running';
+    currentTime = 42;
+    resume() { return new Promise(() => {}); }
+    async decodeAudioData() { return { length: 256, numberOfChannels: 1 }; }
+    createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; }
+    createBufferSource() {
+      return { connect: gain => gain, disconnect() {}, start() { calls.push('start'); }, stop() { calls.push('stop'); } };
+    }
+  };
+  globalThis.Audio = class {
+    async play() { calls.push('file'); filePlayed(); }
+    pause() { calls.push('pause'); }
+  };
+  t.after(() => {
+    if (originalContext) globalThis.AudioContext = originalContext; else delete globalThis.AudioContext;
+    if (originalAudio) globalThis.Audio = originalAudio; else delete globalThis.Audio;
+  });
+  const audio = new ReactionAudio(() => '/cue.wav', assert.fail, async () => new ArrayBuffer(128));
+  await audio.preload(['cue']);
+  const state = { epoch: 1, actionInstanceId: 1, sound: { resource: 'cue', volume: 1 } };
+  const firstPlayback = new Promise(resolve => { filePlayed = resolve; });
+  audio.update(state);
+  await firstPlayback;
+  audio.update(state);
+  audio.stop();
+
+  context.state = 'interrupted';
+  const secondPlayback = new Promise(resolve => { filePlayed = resolve; });
+  const next = { ...state, actionInstanceId: 2 };
+  audio.update(next);
+  await secondPlayback;
+  audio.update(next);
+  audio.stop();
+  assert.deepEqual(calls, ['start', 'stop', 'file', 'pause', 'file', 'pause']);
 });
 
 function harness(t, options = {}) {
@@ -105,7 +285,7 @@ function harness(t, options = {}) {
   const canvas = { width: 0, height: 0, style: {}, getContext: () => context };
   const character = structuredClone(original);
   character.animations.idle = { frames: [0], fps: 30, loop: true };
-  const renderer = new CharacterRenderer(canvas, character, options.images ?? 'test.png', ack => acknowledgements.push(ack), options.plan, options.drawFirstFrameImmediately);
+  const renderer = new CharacterRenderer(canvas, character, options.images ?? 'test.png', ack => acknowledgements.push(ack), options.plan, options.drawFirstFrameImmediately, undefined, options.loadBitmap);
   renderer.resize(256, 256);
   const state = (actionInstanceId, epoch = 1) => ({ epoch, actionInstanceId, animation: 'idle', animationElapsedMs: 0, facingLeft: false });
   return { renderer, state, images, context, acknowledgements, canvas, drawCalls,
@@ -250,6 +430,62 @@ test('a failed intermediate frame does not stop later frames or cover the last g
   assert.ok(h.images.every(image => image.src !== 'unused.png'));
 });
 
+test('large clips evict old decoded images while keeping the idle pose warm', t => {
+  const ids = ['idle', 'one', 'two', 'three', 'four'];
+  const h = harness(t, {
+    images: Object.fromEntries(ids.map(id => [id, `${id}.png`])),
+    plan: { animations: Object.fromEntries(ids.map(image => [image, { looping: true,
+      frames: [{ image, region: { x: 0, y: 0, width: 1024, height: 2048 }, durationMs: 100 }],
+    }])) },
+  });
+  const show = (animation, time) => {
+    h.renderer.update({ ...h.state(time + 1), animation }, time + 1);
+    h.step(time);
+    const image = h.images.at(-1);
+    if (image.onload) image.onload();
+    h.step(time);
+  };
+  ids.forEach((id, index) => show(id, index * 40));
+  assert.equal(h.images[1].onload, null);
+  assert.equal(h.images[2].onload, null);
+  assert.equal(h.images.filter(image => image.onload).length, 3);
+  show('idle', 200);
+  assert.equal(h.drawCalls.at(-1)[0], h.images[0]);
+  show('one', 240);
+  assert.equal(h.images.length, 6);
+  assert.equal(h.drawCalls.at(-1)[0], h.images[5]);
+  assert.equal(h.acknowledgements.length, 7);
+});
+
+test('Player bitmaps close on eviction and when an outstanding read outlives disposal', async t => {
+  const ids = ['idle', 'one', 'two', 'three', 'four'];
+  const waiting = Promise.withResolvers();
+  const closed = [];
+  const bitmap = id => ({ width: 1024, height: 2048, close() { closed.push(id); } });
+  const h = harness(t, {
+    images: Object.fromEntries(ids.map(id => [id, `${id}.png`])),
+    plan: { animations: Object.fromEntries(ids.map(image => [image, { looping: false,
+      frames: [{ image, region: { x: 0, y: 0, width: 1024, height: 2048 }, durationMs: 100 }],
+    }])) },
+    loadBitmap: id => id === 'four' ? waiting.promise : Promise.resolve(bitmap(id)),
+  });
+  for (const [index, animation] of ids.entries()) {
+    const time = index * 40;
+    h.renderer.update({ ...h.state(index), animation }, index);
+    h.step(time);
+    await new Promise(setImmediate);
+    h.step(time);
+  }
+  assert.deepEqual(closed, ['one', 'two']);
+  assert.equal(h.draws, 4);
+  assert.equal(h.images.length, 0);
+  h.renderer.dispose();
+  waiting.resolve(bitmap('four'));
+  await new Promise(setImmediate);
+  assert.deepEqual(closed, ['one', 'two', 'idle', 'three', 'four']);
+  assert.equal(h.scheduled, 0);
+});
+
 test('prepared GIF timing, resource switching, crop coordinates and restart use the state clock', t => {
   const frame = (image, x, durationMs) => ({ image, region: { x, y: 3, width: 20, height: 30 }, durationMs });
   const h = harness(t, { images: { first: 'first.png', second: 'second.png' }, plan: { animations: { idle: { looping: true, frames: [frame('first', 10, 80), frame('second', 25, 240)] } } } });
@@ -263,6 +499,22 @@ test('prepared GIF timing, resource switching, crop coordinates and restart use 
   h.renderer.update(h.state(2), 2); h.step(354);
   assert.equal(h.drawCalls.at(-1)[0],h.images[0]);
   h.renderer.dispose(); assert.equal(h.scheduled,0);
+});
+
+test('a DPR change redraws the current long GIF frame without waiting for the next frame', t => {
+  const frames = [0, 32].map(x => ({ image: 'sheet', region: { x, y: 0, width: 32, height: 32 }, durationMs: 3000 }));
+  const h = harness(t, { plan: { animations: { idle: { looping: true, frames } } } });
+  h.renderer.update(h.state(1), 1); h.step(0);
+  h.images[0].onload(); h.step(1);
+  h.step(100);
+  window.devicePixelRatio = 1.25;
+  h.renderer.resize(256, 256);
+  h.step(120);
+  assert.equal(h.canvas.width, 320);
+  assert.equal(h.draws, 2);
+  assert.equal(h.drawCalls.at(-1)[1], 0);
+  h.step(2999); assert.equal(h.draws, 2);
+  h.step(3000); assert.equal(h.drawCalls.at(-1)[1], 32);
 });
 
 test('sprite regions of different sizes keep one scale and baseline throughout a clip', t => {
@@ -280,7 +532,7 @@ test('sprite regions of different sizes keep one scale and baseline throughout a
 });
 
 test('a tray toggle and completed drag merge into settings without losing edits or rewriting placement', () => {
-  const baseline = { keyboard: true, mouse: false, movement: false, top: true, scale: '100', monitor: 'primary',
+  const baseline = { keyboard: true, mouse: false, 'sound-enabled': true, movement: false, top: true, scale: '100', monitor: 'primary',
     'position-x': '0', 'position-y': '0', 'idle-timeout': '250', 'rate-evaluation': '50', 'rate-window': '2000', 'rate-stability': '100' };
   const latest = { ...baseline, mouse: true, 'position-x': '300', 'position-y': '110' };
   const edited = mergeSettings({ ...baseline, keyboard: false }, baseline, latest);
@@ -288,27 +540,38 @@ test('a tray toggle and completed drag merge into settings without losing edits 
   const update = settingsUpdate(edited, latest);
   assert.equal(update.keyboard, false);
   assert.equal(update.mouse, null);
+  assert.equal(update.soundEnabled, null);
+  assert.equal(settingsUpdate({ ...edited, 'sound-enabled': false }, latest).soundEnabled, false);
   assert.equal(update.basePlacement, null);
   assert.throws(() => settingsUpdate({ ...edited, 'idle-timeout': '' }, latest), /빈 값/);
   assert.throws(() => settingsUpdate({ ...edited, 'idle-timeout': '50', 'rate-evaluation': '60' }, latest), /평가 간격/);
 });
 
-test('a short tap clicks once while drag, capture loss and cancellation never click', async () => {
+test('release forwards hold time while drag, capture loss and cancellation never click', async () => {
   let captured = false;
+  let scale = 1;
   const canvas = { getBoundingClientRect: () => ({ left: -5, top: -10 }), setPointerCapture() { captured = true; }, hasPointerCapture() { return captured; }, releasePointerCapture() { captured = false; } };
   const calls = [], errors = [], gate = Promise.withResolvers(), sent = Promise.withResolvers();
-  installCharacterDrag(canvas, async (name, args) => {
+  const cancelGesture = installCharacterDrag(canvas, async (name, args) => {
     calls.push([name, args]);
     if (name === 'begin_character_drag') return 'session';
     if (name === 'update_character_edit' && calls.length === 2) { sent.resolve(); await gate.promise; }
-  }, error => errors.push(error), event => event.clientX > 0);
-  const event = (screenX) => ({ button: 0, pointerId: 1, screenX, screenY: 0, clientX: 12, clientY: 18 });
+  }, error => errors.push(error), event => event.clientX > 0, () => scale);
+  const event = (screenX, timeStamp = 100) => ({ button: 0, pointerId: 1, screenX, screenY: 0, clientX: 12, clientY: 18, timeStamp });
   canvas.onpointerdown({ ...event(0), clientX: 0 }); canvas.onpointerup(event(0));
   assert.equal(captured, false);
   canvas.onpointerdown(event(0)); canvas.onpointermove(event(2)); canvas.onpointerup(event(2));
   assert.equal(calls.length, 0);
   await new Promise(setImmediate);
-  assert.deepEqual(calls, [['character_click', undefined]]);
+  assert.deepEqual(calls, [['character_click', { heldMs: 0 }]]);
+  calls.length = 0;
+  canvas.onpointerdown(event(0)); canvas.onpointerup(event(2, 700));
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [['character_click', { heldMs: 600 }]]);
+  calls.length = 0;
+  canvas.onpointerdown(event(0)); cancelGesture(); canvas.onpointerup(event(0, 700));
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, []);
   calls.length = 0;
   canvas.onpointerdown(event(0)); canvas.onlostpointercapture(event(1)); canvas.onpointerup(event(1));
   await new Promise(setImmediate);
@@ -330,10 +593,27 @@ test('a short tap clicks once while drag, capture loss and cancellation never cl
   await new Promise(setImmediate);
   assert.deepEqual(calls.map(([name]) => name), ['begin_character_drag', 'cancel_character_edit']);
   calls.length = 0;
-  canvas.onpointerdown(event(0)); canvas.onpointerup(event(8));
+  canvas.onpointerdown(event(0)); canvas.onpointerup(event(8, 900));
   await new Promise(setImmediate);
   assert.deepEqual(calls.map(([name]) => name), ['begin_character_drag', 'update_character_edit', 'finish_character_edit']);
+  calls.length = 0;
+  scale = 0.5;
+  canvas.onpointerdown(event(0)); canvas.onpointerup(event(8));
+  await new Promise(setImmediate);
+  assert.deepEqual(calls[0], ['begin_character_drag', { grab: { x: 34, y: 56 } }]);
   assert.deepEqual(errors, []);
+});
+
+test('overlay fits a smaller viewport without changing aspect ratio and recovers its requested size', () => {
+  assert.deepEqual(fitOverlayCanvas(300, 240, 200, 160), {
+    scale: 2 / 3, width: 200, height: 160, fractionX: 1, fractionY: 1,
+  });
+  assert.deepEqual(fitOverlayCanvas(300, 240, 300, 120), {
+    scale: 0.5, width: 150, height: 120, fractionX: 0.5, fractionY: 1,
+  });
+  const fullSize = { scale: 1, width: 300, height: 240, fractionX: 1, fractionY: 1 };
+  assert.deepEqual(fitOverlayCanvas(300, 240, 300, 240), fullSize);
+  assert.deepEqual(fitOverlayCanvas(300, 240, 0, 0), fullSize);
 });
 
 test('the hit mask follows visible pixels, skips transparent holes and clears on resize', async t => {
@@ -354,8 +634,11 @@ test('the hit mask follows visible pixels, skips transparent holes and clears on
   assert.equal(tracker.contains({ clientX: 5, clientY: 5.5 }), false);
   tracker.update(true);
   await new Promise(setImmediate);
-  assert.deepEqual(masks, [{ columns: 3, rows: 3, bits: [259], offsetX: 0, offsetY: 0 }]);
+  assert.deepEqual(masks, [{ columns: 3, rows: 3, bits: [259], offsetX: 0, offsetY: 0, fractionX: 1, fractionY: 1 }]);
+  tracker.place(-1 / 6, 0, 0.5, 1);
+  await new Promise(setImmediate);
+  assert.deepEqual(masks.at(-1), { columns: 3, rows: 3, bits: [259], offsetX: -1 / 6, offsetY: 0, fractionX: 0.5, fractionY: 1 });
   tracker.update(false);
   assert.equal(tracker.contains({ clientX: 2.5, clientY: 3.5 }), false);
-  assert.deepEqual(masks.at(-1), { columns: 0, rows: 0, bits: [], offsetX: 0, offsetY: 0 });
+  assert.deepEqual(masks.at(-1), { columns: 0, rows: 0, bits: [], offsetX: -1 / 6, offsetY: 0, fractionX: 0.5, fractionY: 1 });
 });

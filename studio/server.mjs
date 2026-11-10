@@ -258,16 +258,29 @@ export async function createStudio(options) {
         }
         if (action === "simulate" && req.method === "POST") {
           const b = JSON.parse(await body(req));
+          const fromMs = b.fromMs ?? 0;
           if (
             !Array.isArray(b.events) ||
             b.events.length > 500 ||
+            !Number.isInteger(fromMs) ||
+            fromMs < 0 ||
+            fromMs > 3_600_000 ||
             !Number.isInteger(b.untilMs) ||
-            b.untilMs < 0 ||
-            b.untilMs > 15000
+            b.untilMs < fromMs ||
+            b.untilMs - fromMs > 15000
           )
             throw new StudioError("미리보기는 최대 15초, 500개 이벤트입니다.");
+          const motion = b.motionPreview;
+          if (motion != null && (
+            typeof motion.bindingId !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(motion.bindingId)
+            || !Number.isInteger(motion.seed) || motion.seed < 0 || motion.seed > 0xffffffff
+            || !Number.isInteger(motion.starts) || motion.starts < 0 || motion.starts > 10_000
+          )) throw new StudioError("모션 재생 순서의 미리보기 값이 올바르지 않습니다.");
           const current = await store.currentPath(id),
-            temp = await fs.mkdtemp(
+            revision = basename(current);
+          if (motion && motion.revision !== revision)
+            throw new StudioError("프로젝트가 다른 창에서 저장되었습니다. 다시 열고 테스트하세요.", 409);
+          const temp = await fs.mkdtemp(
               join(store.root, ".staging", "simulation-"),
             );
           try {
@@ -279,6 +292,9 @@ export async function createStudio(options) {
               "simulate",
               current,
               join(temp, "events.json"),
+              ...(fromMs ? ["--from-ms", String(fromMs)] : []),
+              ...(motion ? ["--motion-preview", JSON.stringify({ bindingId: motion.bindingId, seed: motion.seed, starts: motion.starts })] : []),
+              ...(b.includeBindingIds === true ? ["--include-binding-ids"] : []),
               "--until-ms",
               String(b.untilMs),
               "--timeline",

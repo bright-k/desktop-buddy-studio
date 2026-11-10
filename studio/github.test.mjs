@@ -23,6 +23,7 @@ class FakeGitHub {
   fetch = async (address, options) => {
     assert.equal(options.headers.Authorization, "Bearer test-session-token");
     const url = new URL(address), path = url.pathname.replace("/repos/owner/repo", ""), body = options.body && JSON.parse(options.body);
+    if (path === this.unavailablePath) return json({}, 404);
     if (this.denied && path.startsWith("/actions")) return json({}, 403);
     if (url.pathname === "/user") return json({ login: "owner" });
     if (!path) return json({ default_branch: "main", private: true, permissions: { push: true } });
@@ -160,6 +161,52 @@ test("cancelling while a project is uploading responds before the upload finishe
   assert.equal(fake.dispatches, 0);
   assert.equal(fake.refs.has(`refs/heads/studio-build/${job.id}`), false);
   assert.equal((await jobs.list(doc.meta.id))[0].status, "cancelled");
+});
+test("a run that briefly returns 404 can sync later without a duplicate dispatch", async (t) => {
+  const { doc, jobs, fake, remote } = await fixture(t);
+  await remote.connect({ repository: "owner/repo" }); await remote.setup();
+  const initial = await remote.enqueue(doc.meta.id, doc.meta.revision, { acknowledgeUpload: true });
+  const readJob = async () => (await jobs.list(doc.meta.id)).find(j => j.id === initial.id);
+
+  fake.unavailablePath = "/actions/runs/42";
+  await remote.tick();
+  let job = await readJob();
+  assert.equal(job.status, "queued");
+  assert.equal(job.finishedAt, undefined);
+  assert.match(job.github.runUrl, /\/actions\/runs\/42$/);
+  assert.match(job.error, /같은 실행을 다시 확인/);
+
+  fake.unavailablePath = "/actions/runs/42/jobs";
+  await remote.tick();
+  job = await readJob();
+  assert.equal(job.status, "running");
+  assert.equal(job.finishedAt, undefined);
+
+  job.github.syncUnavailableSince = Date.now() - 121_000;
+  await jobs.persist(job);
+  await remote.tick();
+  assert.equal((await readJob()).status, "sync_failed");
+  assert.equal((await remote.enqueue(doc.meta.id, doc.meta.revision, { acknowledgeUpload: true })).id, initial.id);
+
+  delete fake.unavailablePath;
+  await remote.retryImport(doc.meta.id, initial.id);
+  await remote.tick();
+  job = await readJob();
+  assert.equal(job.status, "running");
+  assert.equal(job.error, undefined);
+  assert.equal(job.github.syncUnavailableSince, undefined);
+  assert.equal(fake.dispatches, 1);
+});
+test("a 404 from the dispatch request remains a build failure", async (t) => {
+  const { doc, jobs, fake, remote } = await fixture(t);
+  await remote.connect({ repository: "owner/repo" }); await remote.setup();
+  await remote.enqueue(doc.meta.id, doc.meta.revision, { acknowledgeUpload: true });
+  fake.unavailablePath = "/actions/workflows/studio-build.yml/dispatches";
+  await remote.tick();
+  const [job] = await jobs.list(doc.meta.id);
+  assert.equal(job.status, "failed");
+  assert.equal(job.github.runId, undefined);
+  assert.equal(fake.dispatches, 0);
 });
 test("dispatch timeout recovers without duplicate runs; completed platform artifacts are verified and imported, partial success is preserved", async (t) => {
   const { root, store, doc, jobs, fake, remote } = await fixture(t);

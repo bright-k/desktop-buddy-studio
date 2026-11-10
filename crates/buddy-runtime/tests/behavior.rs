@@ -47,6 +47,217 @@ fn down(runtime: &mut Runtime, now: u64, code: &str) {
 }
 
 #[test]
+fn overlay_appearance_runs_once_per_show_and_yields_to_input() {
+    let mut buddy = runtime(json!([
+        {"id":"first","trigger":{"type":"firstShown"},"effect":{"type":"playAnimation","animation":"celebrate","priority":100,"interruption":"finish"}},
+        {"id":"again","trigger":{"type":"shownAgain"},"effect":{"type":"playAnimation","animation":"jump"}},
+        shot("key", "KeyA", "click", 0),
+    ]));
+    buddy.set_overlay_visible(0, false);
+    buddy.tick(500);
+    assert_eq!(buddy.state().animation, "idle");
+    buddy.set_overlay_visible(510, true);
+    buddy.tick(510);
+    assert_eq!(buddy.state().animation, "celebrate");
+    let first = buddy.state().action_instance_id;
+    buddy.set_overlay_visible(520, true);
+    buddy.tick(520);
+    assert_eq!(buddy.state().action_instance_id, first);
+    down(&mut buddy, 530, "KeyA");
+    buddy.tick(530);
+    assert_eq!(buddy.state().animation, "click");
+    buddy.set_overlay_visible(800, false);
+    buddy.set_overlay_visible(900, true);
+    buddy.tick(900);
+    assert_eq!(buddy.state().animation, "jump");
+}
+
+#[test]
+fn show_again_respects_cooldown_when_the_player_resets_input() {
+    let mut buddy = runtime(json!([
+        {"id":"again","trigger":{"type":"shownAgain"},"effect":{"type":"playAnimation","animation":"jump","durationMs":100,"cooldownMs":1000}}
+    ]));
+    buddy.set_overlay_visible(0, false);
+    buddy.set_overlay_visible(10, true);
+    buddy.tick(10);
+    for (hide, show, expected) in [(100, 200, "jump"), (300, 500, "idle"), (1100, 1200, "jump")] {
+        let mut controls = buddy.controls();
+        controls.active = false;
+        buddy.set_controls(hide, controls);
+        buddy.set_overlay_visible(hide, false);
+        controls.active = true;
+        buddy.set_controls(show, controls);
+        buddy.set_overlay_visible(show, true);
+        buddy.handle(
+            show,
+            InputEvent::Rearm {
+                keys: vec![],
+                buttons: vec![],
+            },
+        );
+        buddy.tick(show);
+        assert_eq!(buddy.state().animation, expected);
+    }
+}
+
+#[test]
+fn idle_timer_keeps_direction_changes_but_restarts_after_an_input_reaction() {
+    let mut buddy = runtime(json!([
+        {"id":"glance","trigger":{"type":"cursorMove"},"effect":{"type":"faceCursor","directions":{"upLeft":{"animation":"typing"}}}},
+        {"id":"fidget","trigger":{"type":"idleFor","seconds":1},"effect":{"type":"playAnimation","animation":"celebrate","durationMs":100}},
+        shot("key", "KeyA", "click", 0),
+    ]));
+    buddy.handle(990, InputEvent::CursorMove { x: 2.0, y: 2.0 });
+    assert_eq!(buddy.state().animation, "typing");
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    buddy.tick(999);
+    assert_eq!(buddy.next_deadline_ms(), Some(1000));
+    buddy.tick(1000);
+    assert_eq!(buddy.state().animation, "celebrate");
+    buddy.tick(1100);
+    assert_eq!(buddy.state().animation, "typing");
+    down(&mut buddy, 2100, "KeyA");
+    buddy.tick(2100);
+    assert_eq!(buddy.state().animation, "click");
+    buddy.tick(2267);
+    buddy.tick(3266);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    buddy.tick(3267);
+    assert_eq!(buddy.state().animation, "celebrate");
+}
+
+#[test]
+fn idle_timer_restarts_when_following_and_ignores_a_pointer_within_the_stop_distance() {
+    let mut project = data(json!([
+        {"id":"fidget","trigger":{"type":"idleFor","seconds":1},"effect":{"type":"playAnimation","animation":"celebrate"}},
+    ]));
+    project.project.cursor_follow = Some(
+        serde_json::from_value(json!({
+            "enabled": true, "stopDistanceDip": 40,
+            "bands": [{"minDistanceDip": 0, "speedDipPerSecond": 100, "animation": "walk"}]
+        }))
+        .unwrap(),
+    );
+    let mut buddy = Runtime::new(
+        validate_parts(project.project, project.character).unwrap(),
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        },
+        Point { x: 100.0, y: 100.0 },
+        Point { x: 100.0, y: 100.0 },
+    );
+    buddy.handle(990, InputEvent::CursorMove { x: 180.0, y: 150.0 });
+    buddy.tick(990);
+    assert_eq!(buddy.next_deadline_ms(), Some(1000));
+    buddy.handle(1000, InputEvent::CursorMove { x: 195.0, y: 150.0 });
+    buddy.tick(1000);
+    assert_eq!(buddy.state().source, AnimationSource::CursorFollow);
+    buddy.tick(1050);
+    assert_eq!(buddy.state().position.x, 105.0);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    buddy.tick(2049);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    buddy.tick(2050);
+    assert_eq!(buddy.state().animation, "celebrate");
+}
+
+#[test]
+fn idle_timer_runs_at_an_edge_when_held_movement_suppresses_following() {
+    let mut project = data(json!([
+        movement("ArrowLeft", -1.0, 0.0),
+        {"id":"fidget","trigger":{"type":"idleFor","seconds":1},"effect":{"type":"playAnimation","animation":"celebrate"}},
+    ]));
+    project.project.cursor_follow = Some(
+        serde_json::from_value(json!({
+            "enabled": true, "stopDistanceDip": 40,
+            "bands": [{"minDistanceDip": 0, "speedDipPerSecond": 100, "animation": "walk"}]
+        }))
+        .unwrap(),
+    );
+    let mut buddy = Runtime::new(
+        validate_parts(project.project, project.character).unwrap(),
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        },
+        Point { x: 5.0, y: 100.0 },
+        Point { x: 100.0, y: 100.0 },
+    );
+    down(&mut buddy, 0, "ArrowLeft");
+    buddy.handle(0, InputEvent::CursorMove { x: 500.0, y: 150.0 });
+    buddy.tick(50);
+    assert_eq!(buddy.state().position.x, 0.0);
+    buddy.tick(60);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    buddy.tick(1059);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    buddy.tick(1060);
+    assert_eq!(buddy.state().animation, "celebrate");
+
+    buddy.handle(
+        1070,
+        InputEvent::KeyUp {
+            code: "ArrowLeft".into(),
+        },
+    );
+    buddy.tick(1080);
+    assert_eq!(buddy.state().source, AnimationSource::CursorFollow);
+    assert!(buddy.state().position.x > 0.0);
+}
+
+#[test]
+fn idle_timer_restarts_on_reposition_but_not_when_the_position_is_unchanged() {
+    let mut buddy = runtime(json!([
+        {"id":"fidget","trigger":{"type":"idleFor","seconds":1},"effect":{"type":"playAnimation","animation":"celebrate"}},
+    ]));
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1000.0,
+        height: 800.0,
+    };
+    let position = Point { x: 400.0, y: 100.0 };
+    let size = Point { x: 100.0, y: 100.0 };
+    buddy.place(990, position, size, bounds);
+    assert_eq!(buddy.state().position, position);
+    buddy.tick(1000);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+
+    buddy.place(1500, position, size, bounds);
+    buddy.tick(1989);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    buddy.tick(1990);
+    assert_eq!(buddy.state().animation, "celebrate");
+}
+
+#[test]
+fn drop_animation_uses_the_commit_event_even_with_mouse_capture_disabled() {
+    let mut buddy = runtime(json!([
+        {"id":"hold","trigger":{"type":"drag"},"effect":{"type":"sustainAnimation","animation":"walk"}},
+        {"id":"land","trigger":{"type":"dragDropped"},"effect":{"type":"playAnimation","animation":"jump"}},
+        {"id":"tap","trigger":{"type":"buddyClick"},"effect":{"type":"playAnimation","animation":"click"}},
+    ]));
+    let mut controls = buddy.controls();
+    controls.mouse = false;
+    buddy.set_controls(0, controls);
+    buddy.handle(10, InputEvent::DragStart);
+    assert_eq!(buddy.state().animation, "walk");
+    buddy.handle(20, InputEvent::DragEnd);
+    assert_eq!(buddy.state().animation, "idle");
+    buddy.handle(30, InputEvent::DragStart);
+    buddy.handle(40, InputEvent::DragEnd);
+    buddy.handle(40, InputEvent::DragDropped);
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.handle(500, InputEvent::BuddyClick);
+    assert_eq!(buddy.state().animation, "click");
+}
+
+#[test]
 fn cursor_follow_switches_bands_and_stops_without_overshoot() {
     let mut data = data(json!([movement("ArrowLeft", -1.0, 0.0)]));
     data.project.cursor_follow = Some(
@@ -704,6 +915,146 @@ fn typing_rate_stabilizes_and_returns_idle_at_the_configured_short_timeout() {
     assert_eq!(runtime.next_deadline_ms(), None);
 }
 #[test]
+fn typing_stopped_uses_its_own_deadline_and_a_key_at_that_time_continues_the_burst() {
+    let mut buddy = runtime(json!([
+        {"id":"typing","trigger":{"type":"typingRate","minKps":0.5},"effect":{"type":"sustainAnimation","animation":"typing"}},
+        typing_stop(700),
+    ]));
+    typing_burst(&mut buddy, 0);
+    buddy.tick(2125);
+    assert_eq!(buddy.state().source, AnimationSource::TypingRate);
+    buddy.tick(2250);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    assert_eq!(buddy.next_deadline_ms(), Some(2700));
+
+    tap(&mut buddy, 2700, "KeyB");
+    buddy.tick(2700);
+    assert_ne!(buddy.displayed_binding_id(), Some("finished-typing"));
+    buddy.tick(3399);
+    assert_eq!(buddy.next_deadline_ms(), Some(3400));
+    buddy.tick(3400);
+    assert_eq!(buddy.displayed_binding_id(), Some("finished-typing"));
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.tick(3500);
+    buddy.tick(4500);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    assert_eq!(buddy.performance(4500).reactions_started, 1);
+}
+
+fn typing_stop(pause_ms: u32) -> Value {
+    json!({
+        "id":"finished-typing","trigger":{"type":"typingStopped","minTypingSeconds":2,
+        "minKeys":5,"pauseMs":pause_ms,"minIntervalSeconds":10},
+        "effect":{"type":"playAnimation","animation":"jump","durationMs":100,
+        "variation":{"mode":"cycle","alternatives":["click"]}}
+    })
+}
+
+fn typing_burst(buddy: &mut Runtime, start: u64) {
+    for offset in [0, 500, 1000, 1500, 2000] {
+        tap(buddy, start + offset, "KeyA");
+    }
+}
+
+#[test]
+fn typing_stopped_ignores_short_bursts_navigation_shortcuts_and_repeats() {
+    let mut buddy = runtime(json!([typing_stop(1200)]));
+    for time in [0, 50, 100, 150, 200] {
+        tap(&mut buddy, time, "KeyA");
+    }
+    buddy.tick(1400);
+    assert_eq!(buddy.performance(1400).reactions_started, 0);
+    tap(&mut buddy, 2000, "KeyA");
+    tap(&mut buddy, 2500, "ArrowLeft");
+    down(&mut buddy, 2750, "MetaLeft");
+    tap(&mut buddy, 2750, "KeyC");
+    up(&mut buddy, 2750, "MetaLeft");
+    down(&mut buddy, 3000, "KeyA");
+    buddy.handle(
+        3500,
+        InputEvent::KeyDown {
+            code: "KeyA".into(),
+            repeat: true,
+        },
+    );
+    up(&mut buddy, 3500, "KeyA");
+    tap(&mut buddy, 4000, "KeyA");
+    buddy.tick(5200);
+    assert_eq!(buddy.performance(5200).reactions_started, 0);
+}
+
+#[test]
+fn typing_stopped_discards_ended_bursts_and_uses_real_starts_for_interval_and_motion_order() {
+    let mut buddy = runtime(json!([typing_stop(700)]));
+    typing_burst(&mut buddy, 0);
+    buddy.tick(2700);
+    assert_eq!(buddy.state().animation, "jump");
+
+    buddy.handle(3000, InputEvent::Reset);
+    typing_burst(&mut buddy, 4000);
+    buddy.tick(6700);
+    typing_burst(&mut buddy, 9999);
+    // The deadline fell inside the interval even though the worker wakes later.
+    buddy.tick(12701);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    typing_burst(&mut buddy, 12702);
+    buddy.tick(15402);
+    assert_eq!(buddy.state().animation, "click");
+}
+
+#[test]
+fn typing_stopped_yields_to_clicks_and_wins_over_an_idle_reaction_at_the_same_time() {
+    let mut buddy = runtime(json!([
+        typing_stop(1250),
+        {"id":"typing","trigger":{"type":"typingRate","minKps":0.5},"effect":{"type":"sustainAnimation","animation":"typing"}},
+        {"id":"fidget","trigger":{"type":"idleFor","seconds":1},"effect":{"type":"playAnimation","animation":"celebrate","priority":100}},
+        {"id":"tap","trigger":{"type":"buddyClick"},"effect":{"type":"playAnimation","animation":"click","priority":0}},
+    ]));
+    typing_burst(&mut buddy, 0);
+    buddy.tick(2125);
+    buddy.tick(2250);
+    buddy.handle(3250, InputEvent::BuddyClick);
+    buddy.tick(3250);
+    assert_eq!(buddy.displayed_binding_id(), Some("tap"));
+    buddy.tick(3417);
+
+    typing_burst(&mut buddy, 4000);
+    buddy.tick(6125);
+    buddy.tick(6250);
+    buddy.tick(7250);
+    assert_eq!(buddy.displayed_binding_id(), Some("finished-typing"));
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.handle(7251, InputEvent::BuddyClick);
+    assert_eq!(buddy.displayed_binding_id(), Some("tap"));
+}
+
+#[test]
+fn typing_stopped_clears_partial_input_when_hidden_or_rearmed_and_ignores_stale_deadlines() {
+    let mut buddy = runtime(json!([typing_stop(700)]));
+    typing_burst(&mut buddy, 0);
+    buddy.handle(2100, InputEvent::OverlayVisibility { visible: false });
+    buddy.handle(2600, InputEvent::OverlayVisibility { visible: true });
+    buddy.tick(2700);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+
+    typing_burst(&mut buddy, 4000);
+    buddy.handle(
+        6100,
+        InputEvent::Rearm {
+            keys: vec![],
+            buttons: vec![],
+        },
+    );
+    buddy.tick(6700);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+
+    typing_burst(&mut buddy, 8000);
+    buddy.tick(12000);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    assert_eq!(buddy.performance(12000).reactions_started, 0);
+}
+
+#[test]
 fn modifiers_and_os_repeat_do_not_increase_rate() {
     let mut runtime = runtime(
         json!([{"id":"typing","trigger":{"type":"typingRate","minKps":1.0},"effect":{"type":"sustainAnimation","animation":"typing"}}]),
@@ -1122,6 +1473,73 @@ fn buddy_click_is_distinct_from_global_mouse_events_and_drag() {
 }
 
 #[test]
+fn click_cycles_only_when_playback_starts_and_keeps_its_place_after_hiding() {
+    let mut buddy = runtime(json!([
+        {"id":"tap","trigger":{"type":"buddyClick"},"effect":{
+            "type":"playAnimation","animation":"click","cooldownMs":300,
+            "variation":{"mode":"cycle","alternatives":["jump","celebrate"]}
+        }},
+        shot("higher", "KeyA", "celebrate", 100),
+    ]));
+    buddy.handle(0, InputEvent::BuddyClick);
+    assert_eq!(buddy.state().animation, "click");
+    buddy.handle(200, InputEvent::BuddyClick);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+    down(&mut buddy, 300, "KeyA");
+    buddy.handle(301, InputEvent::BuddyClick);
+    assert_eq!(buddy.displayed_binding_id(), Some("higher"));
+    buddy.handle(900, InputEvent::BuddyClick);
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.tick(1100);
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.handle(1300, InputEvent::OverlayVisibility { visible: false });
+    buddy.handle(1400, InputEvent::OverlayVisibility { visible: true });
+    buddy.handle(1400, InputEvent::BuddyClick);
+    assert_eq!(buddy.state().animation, "celebrate");
+    buddy.handle(2100, InputEvent::BuddyClick);
+    assert_eq!(buddy.state().animation, "click");
+}
+
+#[test]
+fn idle_shuffles_in_complete_rounds_and_preview_resumes_the_same_order() {
+    let bindings = json!([
+        {"id":"fidget","trigger":{"type":"idleFor","seconds":1},"effect":{
+            "type":"playAnimation","animation":"celebrate","durationMs":100,
+            "variation":{"mode":"shuffle","alternatives":["click","jump"]}
+        }},
+        {"id":"tap","trigger":{"type":"buddyClick"},"effect":{
+            "type":"playAnimation","animation":"click","durationMs":100
+        }},
+    ]);
+    let mut buddy = runtime(bindings.clone());
+    assert!(buddy.prime_motion_variation("fidget", 42, 0));
+    buddy.handle(1000, InputEvent::BuddyClick);
+    buddy.tick(1000);
+    assert_eq!(buddy.displayed_binding_id(), Some("tap"));
+    buddy.tick(1100);
+    let mut order = Vec::new();
+    for index in 0..9 {
+        let now = 2100 + u64::from(index) * 1100;
+        buddy.tick(now);
+        assert_eq!(buddy.displayed_binding_id(), Some("fidget"));
+        let animation = buddy.state().animation;
+        let mut preview = runtime(bindings.clone());
+        assert!(preview.prime_motion_variation("fidget", 42, index));
+        preview.tick(1000);
+        assert_eq!(preview.state().animation, animation);
+        order.push(animation);
+        buddy.tick(now + 100);
+        assert_eq!(buddy.state().source, AnimationSource::Idle);
+    }
+    for round in order.as_chunks::<3>().0 {
+        let mut clips: Vec<_> = round.iter().map(String::as_str).collect();
+        clips.sort_unstable();
+        assert_eq!(clips, ["celebrate", "click", "jump"]);
+    }
+    assert!(order.windows(2).all(|pair| pair[0] != pair[1]));
+}
+
+#[test]
 fn resource_duration_override_release_and_drag_take_effect_without_waiting_for_clip_end() {
     let mut binding = shot("press", "KeyA", "jump", 80);
     binding["effect"]["durationMs"] = 3000.into();
@@ -1195,4 +1613,220 @@ fn user_timing_override_recalculates_speed_and_idle_deadline_and_rejects_invalid
         },
     );
     assert_eq!(runtime.project().project.defaults.timing, timing);
+}
+
+#[test]
+fn timer_completion_retries_after_a_higher_priority_typing_animation_ends() {
+    let mut project = data(json!([
+        {"id":"typing","trigger":{"type":"typingRate","minKps":0.5},"effect":{"type":"sustainAnimation","animation":"typing","priority":100}},
+        {"id":"completion","trigger":{"type":"timerCompleted","phase":"countdown"},
+          "effect":{"type":"playAnimation","animation":"jump","durationMs":100,"priority":50}}
+    ]));
+    project.project.timer = Some(TimerDefaults {
+        enabled: true,
+        ..TimerDefaults::default()
+    });
+    project.project.defaults.timing.rate_stability_ms = 0;
+    project.project.defaults.timing.idle_timeout_ms = 700;
+    let mut buddy = Runtime::new(
+        project,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        },
+        Point { x: 100.0, y: 100.0 },
+        Point { x: 100.0, y: 100.0 },
+    );
+    down(&mut buddy, 0, "KeyA");
+    buddy.handle(
+        200,
+        InputEvent::TimerCompleted {
+            phase: TimerCompletion::Countdown,
+        },
+    );
+    buddy.tick(200);
+    assert_eq!(buddy.state().animation, "typing");
+    assert!(buddy.timer_reaction_pending());
+    buddy.tick(700);
+    assert_eq!(buddy.state().animation, "jump");
+    assert!(!buddy.timer_reaction_pending());
+    buddy.tick(800);
+    assert_eq!(buddy.state().animation, "idle");
+}
+
+#[test]
+fn timer_completion_waits_for_click_and_drag_and_uses_motion_variations() {
+    let mut project = data(json!([
+        {"id":"tap","trigger":{"type":"buddyClick"},"effect":{"type":"playAnimation","animation":"click","durationMs":200}},
+        {"id":"timer","trigger":{"type":"timerCompleted","phase":"countdown","alternatives":["focus"]},"effect":{
+            "type":"playAnimation","animation":"jump","durationMs":100,"cooldownMs":300,
+            "variation":{"mode":"cycle","alternatives":["celebrate"]}
+        }},
+    ]));
+    project.project.timer = Some(TimerDefaults {
+        enabled: true,
+        ..Default::default()
+    });
+    let mut buddy = Runtime::new(
+        project,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 800.0,
+        },
+        Point::default(),
+        Point { x: 100.0, y: 100.0 },
+    );
+    let completion = InputEvent::TimerCompleted {
+        phase: TimerCompletion::Countdown,
+    };
+    let focus = InputEvent::TimerCompleted {
+        phase: TimerCompletion::Focus,
+    };
+    buddy.handle(
+        50,
+        InputEvent::TimerCompleted {
+            phase: TimerCompletion::Break,
+        },
+    );
+    buddy.tick(50);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+
+    buddy.handle(100, completion.clone());
+    buddy.handle(100, InputEvent::BuddyClick);
+    buddy.tick(100);
+    assert_eq!(buddy.state().animation, "click");
+    buddy.tick(300);
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.handle(450, focus.clone());
+    buddy.tick(450);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+
+    buddy.handle(500, InputEvent::DragStart);
+    buddy.handle(600, focus);
+    buddy.tick(650);
+    assert_eq!(buddy.state().source, AnimationSource::Drag);
+    buddy.handle(700, InputEvent::DragEnd);
+    buddy.tick(700);
+    assert_eq!(buddy.state().animation, "celebrate");
+
+    buddy.handle(900, InputEvent::DragStart);
+    buddy.handle(1000, completion.clone());
+    buddy.handle(4100, InputEvent::DragEnd);
+    buddy.tick(4100);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+
+    buddy.handle(4200, completion);
+    buddy.set_overlay_visible(4200, false);
+    buddy.set_overlay_visible(4250, true);
+    buddy.tick(4250);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+}
+
+#[test]
+fn timer_group_uses_directional_idle_after_start_hold_and_drag() {
+    let mut project = data(json!([
+        {"id":"start","trigger":{"type":"timerStarted","phase":"countdown","alternatives":["focus"]},"effect":{"type":"playAnimation","animation":"jump","durationMs":100}},
+        {"id":"hold","trigger":{"type":"buddyLongPress","holdMs":600},"effect":{"type":"playAnimation","animation":"celebrate","durationMs":100}},
+        {"id":"tap","trigger":{"type":"buddyClick"},"effect":{"type":"playAnimation","animation":"click","durationMs":100}},
+        {"id":"drag","trigger":{"type":"drag"},"effect":{"type":"sustainAnimation","animation":"walk"}},
+        {"id":"finish","trigger":{"type":"timerCompleted","phase":"break"},"effect":{"type":"playAnimation","animation":"celebrate","durationMs":100}}
+    ]));
+    project.project.timer = Some(TimerDefaults {
+        enabled: true,
+        ..Default::default()
+    });
+    project.project.idle_groups = serde_json::from_value(json!([{
+        "id":"work","states":["countdown","focus"],"animation":"walk","cursorMode":"custom",
+        "directions":{"upLeft":{"animation":"typing","mirror":true}}
+    }]))
+    .unwrap();
+    let mut buddy = Runtime::new(
+        project,
+        Rect {
+            x: 0.,
+            y: 0.,
+            width: 1000.,
+            height: 800.,
+        },
+        Point { x: 100., y: 100. },
+        Point { x: 100., y: 100. },
+    );
+    buddy.set_timer_phase(10, Some(TimerPhase::Countdown));
+    buddy.handle(
+        10,
+        InputEvent::TimerStarted {
+            phase: TimerPhase::Countdown,
+        },
+    );
+    buddy.tick(10);
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.handle(20, InputEvent::CursorMove { x: 0., y: 0. });
+    buddy.tick(110);
+    assert_eq!(buddy.state().animation, "typing");
+    assert!(buddy.state().facing_left);
+    buddy.handle(120, InputEvent::BuddyClick);
+    assert_eq!(buddy.state().animation, "click");
+    buddy.tick(220);
+    buddy.handle(221, InputEvent::BuddyLongPress);
+    assert_eq!(buddy.state().animation, "celebrate");
+    buddy.tick(321);
+    buddy.handle(330, InputEvent::DragStart);
+    assert_eq!(buddy.state().source, AnimationSource::Drag);
+    buddy.handle(350, InputEvent::DragEnd);
+    assert_eq!(buddy.state().animation, "typing");
+    let idle_instance = buddy.state().action_instance_id;
+    buddy.set_timer_phase(400, Some(TimerPhase::Focus));
+    assert_eq!(buddy.state().action_instance_id, idle_instance);
+    buddy.handle(410, InputEvent::BuddyClick);
+    assert_eq!(buddy.state().animation, "click");
+    buddy.handle(420, InputEvent::DragStart);
+    assert_eq!(buddy.state().source, AnimationSource::Drag);
+    buddy.handle(530, InputEvent::DragEnd);
+    assert_eq!(buddy.state().animation, "typing");
+    buddy.set_timer_phase(550, None);
+    assert_eq!(buddy.state().animation, "idle");
+    for (at, phase) in [
+        (600, TimerCompletion::ShortBreak),
+        (800, TimerCompletion::LongBreak),
+    ] {
+        buddy.handle(at, InputEvent::TimerCompleted { phase });
+        buddy.tick(at);
+        assert_eq!(buddy.displayed_binding_id(), Some("finish"));
+    }
+}
+
+#[test]
+fn weighted_motions_follow_relative_weights_and_preview_replays_the_same_draws() {
+    let bindings = json!([{
+        "id":"weighted", "trigger":{"type":"buddyClick"}, "effect":{
+            "type":"playAnimation", "animation":"click", "durationMs":1,
+            "variation":{"mode":"weighted", "alternatives":["jump","celebrate"], "weights":[3,1,0]}
+        }
+    }]);
+    let mut buddy = runtime(bindings.clone());
+    assert!(buddy.prime_motion_variation("weighted", 42, 0));
+    let mut main = 0;
+    for index in 0..4096 {
+        buddy.handle(u64::from(index) * 10, InputEvent::BuddyClick);
+        let animation = buddy.state().animation;
+        match animation.as_str() {
+            "click" => main += 1,
+            "jump" => {}
+            unexpected => panic!("weight zero selected {unexpected}"),
+        }
+        if index == 137 {
+            let mut preview = runtime(bindings.clone());
+            assert!(preview.prime_motion_variation("weighted", 42, index));
+            preview.handle(0, InputEvent::BuddyClick);
+            assert_eq!(preview.state().animation, animation);
+        }
+    }
+    assert!(
+        (2949..=3195).contains(&main),
+        "expected about 75%, drew {main} of 4096"
+    );
 }

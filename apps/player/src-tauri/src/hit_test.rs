@@ -8,14 +8,31 @@ use tauri::WebviewWindow;
 
 const MAX_EDGE: usize = 192;
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HitMask {
     columns: usize,
     rows: usize,
     bits: Vec<u32>,
+    // Canvas origin and extent as fractions of the live client area.
     offset_x: f64,
     offset_y: f64,
+    fraction_x: f64,
+    fraction_y: f64,
+}
+
+impl Default for HitMask {
+    fn default() -> Self {
+        Self {
+            columns: 0,
+            rows: 0,
+            bits: Vec::new(),
+            offset_x: 0.0,
+            offset_y: 0.0,
+            fraction_x: 1.0,
+            fraction_y: 1.0,
+        }
+    }
 }
 
 impl HitMask {
@@ -26,6 +43,10 @@ impl HitMask {
             && self.bits.len() == (self.columns * self.rows).div_ceil(32)
             && (-1.0..=1.0).contains(&self.offset_x)
             && (-1.0..=1.0).contains(&self.offset_y)
+            && self.fraction_x > 0.0
+            && self.fraction_x <= 1.0
+            && self.fraction_y > 0.0
+            && self.fraction_y <= 1.0
     }
 
     fn contains(&self, x: f64, y: f64) -> bool {
@@ -33,8 +54,8 @@ impl HitMask {
         if !inside(x) || !inside(y) || self.columns == 0 {
             return false;
         }
-        let x = x - self.offset_x;
-        let y = y - self.offset_y;
+        let x = (x - self.offset_x) / self.fraction_x;
+        let y = (y - self.offset_y) / self.fraction_y;
         if !inside(x) || !inside(y) {
             return false;
         }
@@ -74,31 +95,44 @@ pub fn start(window: WebviewWindow, host: Arc<Host>) {
             // observable while the WebView window passes through mouse events.
             let mut ignored = true;
             while !host.exiting.load(Ordering::Acquire) {
+                let unavailable = host.controller.lock().unwrap().mode == Mode::Hidden
+                    || !host.overlay_ready.load(Ordering::Acquire);
+                if unavailable {
+                    host.track_follow_cursor(None);
+                    if ignored {
+                        host.hit_test_wake.wait(None);
+                        continue;
+                    }
+                }
                 let (sender, receiver) = mpsc::sync_channel(1);
                 let overlay = window.clone();
-                let host = host.clone();
+                let poll_host = host.clone();
                 if window
                     .run_on_main_thread(move || {
+                        let host = poll_host;
                         let (mode, follow) = {
                             let controller = host.controller.lock().unwrap();
                             (
                                 controller.mode,
                                 controller.cursor_follow
                                     && !controller.paused
-                                    && !controller.settings_open,
+                                    && !controller.settings_open
+                                    && !host.quick_timer.lock().unwrap().is_open(),
                             )
                         };
-                        let button_down =
-                            mode != Mode::Hidden && buddy_platform::mouse_button_down();
+                        let available =
+                            mode != Mode::Hidden && host.overlay_ready.load(Ordering::Acquire);
+                        let button_down = available && buddy_platform::mouse_button_down();
                         let menu_open = host.menu_open.load(Ordering::Acquire);
-                        let cursor = if mode == Mode::Normal && !button_down && !menu_open {
-                            overlay.cursor_position().ok()
-                        } else {
-                            None
-                        };
+                        let cursor =
+                            if available && mode == Mode::Normal && !button_down && !menu_open {
+                                overlay.cursor_position().ok()
+                            } else {
+                                None
+                            };
                         host.track_follow_cursor(if follow { cursor } else { None });
-                        let (mut next, delay) = if mode == Mode::Hidden {
-                            (true, 80)
+                        let (mut next, delay) = if !available {
+                            (true, 0)
                         } else if mode == Mode::Editing || button_down || menu_open {
                             // Preserve whichever window received the press until
                             // release, even as the frame or the cursor moves.
@@ -125,7 +159,8 @@ pub fn start(window: WebviewWindow, host: Arc<Host>) {
                     break;
                 };
                 ignored = next;
-                std::thread::sleep(Duration::from_millis(delay));
+                host.hit_test_wake
+                    .wait((!unavailable).then_some(Duration::from_millis(delay)));
             }
         })
         .expect("overlay hit test worker creation");
@@ -143,11 +178,30 @@ mod tests {
             bits: vec![259],
             offset_x: -1.0 / 3.0,
             offset_y: 0.0,
+            fraction_x: 1.0,
+            fraction_y: 1.0,
         };
         assert!(mask.valid());
         assert!(mask.contains(0.1, 0.1));
         assert!(!mask.contains(0.4, 0.1));
         assert!(mask.contains(0.4, 0.8));
         assert!(!mask.contains(-0.1, 0.1));
+    }
+
+    #[test]
+    fn hit_testing_excludes_extra_space_in_a_mismatched_viewport() {
+        let mask = HitMask {
+            columns: 3,
+            rows: 3,
+            bits: vec![259],
+            offset_x: -1.0 / 6.0,
+            offset_y: 0.0,
+            fraction_x: 0.5,
+            fraction_y: 1.0,
+        };
+        assert!(mask.valid());
+        assert!(mask.contains(0.1, 0.1));
+        assert!(mask.contains(0.25, 0.8));
+        assert!(!mask.contains(0.4, 0.8));
     }
 }

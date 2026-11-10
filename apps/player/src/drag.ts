@@ -4,9 +4,11 @@ export function installCharacterDrag(
   invoke: Invoke,
   onError: (error: unknown) => void,
   canGrab = (_event: PointerEvent) => true,
+  canvasScale = () => 1,
 ) {
   type Gesture = {
     x: number; y: number; grab: { x: number; y: number }; id: number;
+    pressedAt: number;
     started: boolean; session: string | null; moved: boolean; flushQueued: boolean; cancelled: boolean;
   };
   let pointer: Gesture | null = null, operation = Promise.resolve();
@@ -27,8 +29,11 @@ export function installCharacterDrag(
   canvas.onpointerdown = (event) => {
     if (event.button !== 0 || pointer || !canGrab(event)) return;
     const rect = canvas.getBoundingClientRect();
+    const scale = canvasScale();
     pointer = {
-      x: event.screenX, y: event.screenY, grab: { x: event.clientX - rect.left, y: event.clientY - rect.top },
+      x: event.screenX, y: event.screenY,
+      grab: { x: (event.clientX - rect.left) / scale, y: (event.clientY - rect.top) / scale },
+      pressedAt: event.timeStamp,
       id: event.pointerId, started: false, session: null, moved: false, flushQueued: false, cancelled: false,
     };
     canvas.setPointerCapture(event.pointerId);
@@ -46,22 +51,25 @@ export function installCharacterDrag(
   canvas.onpointermove = (event) => {
     if (pointer && event.pointerId === pointer.id) move(pointer, event);
   };
-  const finish = (event: PointerEvent, cancel: boolean) => {
+  const finish = (event: PointerEvent | null, cancel: boolean) => {
     const gesture = pointer;
-    if (!gesture || event.pointerId !== gesture.id) return;
-    if (!cancel && (event.screenX !== gesture.x || event.screenY !== gesture.y)) {
+    if (!gesture || (event && event.pointerId !== gesture.id)) return;
+    if (!cancel && event && (event.screenX !== gesture.x || event.screenY !== gesture.y)) {
       move(gesture, event);
     }
     pointer = null; gesture.cancelled = cancel;
-    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    if (canvas.hasPointerCapture(gesture.id)) canvas.releasePointerCapture(gesture.id);
     if (gesture.started) {
       enqueue(async () => {
         if (gesture.session) await invoke(cancel ? "cancel_character_edit" : "finish_character_edit", { sessionId: gesture.session });
       });
-    } else if (!cancel) {
-      enqueue(async () => { await invoke("character_click"); });
+    } else if (!cancel && event) {
+      const elapsed = event.timeStamp - gesture.pressedAt;
+      const heldMs = Number.isFinite(elapsed) ? Math.floor(Math.max(0, Math.min(elapsed, 0xffffffff))) : 0;
+      enqueue(async () => { await invoke("character_click", { heldMs }); });
     }
   };
   canvas.onpointerup = (event) => finish(event, false);
   canvas.onpointercancel = canvas.onlostpointercapture = (event) => finish(event, true);
+  return () => finish(null, true);
 }

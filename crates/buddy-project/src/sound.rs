@@ -1,14 +1,74 @@
 /// Check that an uploaded sound starts with a playable stream of the declared type.
 pub fn validate_sound(extension: &str, bytes: &[u8]) -> Result<(), String> {
     let valid = match extension {
-        "wav" => wav(bytes),
-        "mp3" => mp3(bytes),
+        "wav" => wav(bytes).map(|_| ()),
+        "mp3" => mp3_payload(bytes).and_then(mp3_frame).map(|_| ()),
         _ => None,
     };
     valid.ok_or_else(|| "expected a PCM WAV or MPEG Layer III audio file".into())
 }
 
-fn wav(bytes: &[u8]) -> Option<()> {
+struct PcmFrames {
+    count: u64,
+    rate: u32,
+    channels: u16,
+}
+
+impl PcmFrames {
+    fn decoded_bytes(&self, sample_rate: u32) -> u64 {
+        self.count
+            .saturating_mul(u64::from(sample_rate))
+            .div_ceil(u64::from(self.rate))
+            .saturating_mul(u64::from(self.channels) * 4)
+    }
+}
+
+/// Only send audio to Web Audio when its decoded PCM fits the cache budget.
+/// Streams with unknown lengths can still play from their original files.
+pub fn sound_fits_decode_budget(
+    extension: &str,
+    bytes: &[u8],
+    sample_rate: u32,
+    budget: u32,
+) -> bool {
+    if !(8_000..=384_000).contains(&sample_rate) || budget == 0 {
+        return false;
+    }
+    let budget = u64::from(budget);
+    if bytes.len() as u64 > budget {
+        return false;
+    }
+    if extension.eq_ignore_ascii_case("wav") {
+        return wav(bytes)
+            .is_some_and(|frames| frames.decoded_bytes(sample_rate.max(frames.rate)) <= budget);
+    }
+    if !extension.eq_ignore_ascii_case("mp3") {
+        return false;
+    }
+    let Some(mut payload) = mp3_payload(bytes) else {
+        return false;
+    };
+    let Some((_, first)) = mp3_frame(payload) else {
+        return false;
+    };
+    let mut total = PcmFrames { count: 0, ..first };
+    while !payload.is_empty() && !(payload.len() == 128 && payload.starts_with(b"TAG")) {
+        let Some((length, frame)) = mp3_frame(payload) else {
+            return false;
+        };
+        if frame.rate != total.rate || frame.channels != total.channels {
+            return false;
+        }
+        total.count = total.count.saturating_add(frame.count);
+        if total.decoded_bytes(sample_rate.max(total.rate)) > budget {
+            return false;
+        }
+        payload = &payload[length..];
+    }
+    true
+}
+
+fn wav(bytes: &[u8]) -> Option<PcmFrames> {
     if bytes.get(..4)? != b"RIFF" || bytes.get(8..12)? != b"WAVE" {
         return None;
     }
@@ -45,10 +105,14 @@ fn wav(bytes: &[u8]) -> Option<()> {
         && alignment == channels * (bits / 8)
         && data > 0
         && data.is_multiple_of(usize::from(alignment)))
-    .then_some(())
+    .then(|| PcmFrames {
+        count: (data / usize::from(alignment)) as u64,
+        rate,
+        channels,
+    })
 }
 
-fn mp3(bytes: &[u8]) -> Option<()> {
+fn mp3_payload(bytes: &[u8]) -> Option<&[u8]> {
     let mut start = 0;
     if bytes.starts_with(b"ID3") {
         let length = bytes.get(6..10)?;
@@ -63,7 +127,11 @@ fn mp3(bytes: &[u8]) -> Option<()> {
             start += 10;
         }
     }
-    let header = bytes.get(start..start + 4)?;
+    bytes.get(start..)
+}
+
+fn mp3_frame(bytes: &[u8]) -> Option<(usize, PcmFrames)> {
+    let header = bytes.get(..4)?;
     if header[0] != 0xff || header[1] & 0xe6 != 0xe2 {
         return None;
     }
@@ -73,7 +141,7 @@ fn mp3(bytes: &[u8]) -> Option<()> {
     if version == 1 || !(1..=14).contains(&index) || rate_index == 3 {
         return None;
     }
-    let rates = [44100, 48000, 32000];
+    let rates = [44100u32, 48000, 32000];
     let mut rate = rates[rate_index];
     let (samples, bitrate) = if version == 3 {
         (
@@ -89,6 +157,66 @@ fn mp3(bytes: &[u8]) -> Option<()> {
             [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160][index],
         )
     };
-    let length = samples * bitrate / rate + usize::from((header[2] >> 1) & 1);
-    bytes.get(start..start + length).map(|_| ())
+    let length = (samples * bitrate / rate) as usize + usize::from((header[2] >> 1) & 1);
+    bytes.get(..length)?;
+    Some((
+        length,
+        PcmFrames {
+            count: if version == 3 { 1152 } else { 576 },
+            rate,
+            channels: if header[3] >> 6 == 3 { 1 } else { 2 },
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wav_budget_counts_pcm_at_both_source_and_output_rates() {
+        let mut wav = b"RIFF".to_vec();
+        wav.extend(8036u32.to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend([1, 0, 1, 0]); // PCM, mono
+        wav.extend(8_000u32.to_le_bytes());
+        wav.extend(8_000u32.to_le_bytes());
+        wav.extend([1, 0, 8, 0]); // One byte per sample
+        wav.extend(b"data");
+        wav.extend(8_000u32.to_le_bytes());
+        wav.resize(8_044, 128);
+        assert!(validate_sound("wav", &wav).is_ok());
+        assert!(sound_fits_decode_budget("WAV", &wav, 48_000, 192_000));
+        assert!(!sound_fits_decode_budget("wav", &wav, 48_000, 191_999));
+        wav[24..28].copy_from_slice(&48_000u32.to_le_bytes());
+        wav[28..32].copy_from_slice(&48_000u32.to_le_bytes());
+        assert!(sound_fits_decode_budget("wav", &wav, 8_000, 32_000));
+        assert!(!sound_fits_decode_budget("wav", &wav, 8_000, 31_999));
+    }
+
+    #[test]
+    fn mp3_budget_counts_all_frames_and_leaves_unmeasurable_streams_playable() {
+        let mut frame = vec![0; 417]; // MPEG-1 Layer III, 128 kbps at 44.1 kHz
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+        let mut mp3 = frame.repeat(2);
+        mp3.extend(b"TAG");
+        mp3.extend([0; 125]);
+        assert!(validate_sound("mp3", &mp3).is_ok());
+        assert!(sound_fits_decode_budget("mp3", &mp3, 44_100, 2 * 1152 * 8));
+        assert!(!sound_fits_decode_budget(
+            "mp3",
+            &mp3,
+            44_100,
+            2 * 1152 * 8 - 1
+        ));
+        mp3.push(0);
+        assert!(validate_sound("mp3", &mp3).is_ok());
+        assert!(!sound_fits_decode_budget(
+            "mp3",
+            &mp3,
+            44_100,
+            8 * 1024 * 1024
+        ));
+    }
 }

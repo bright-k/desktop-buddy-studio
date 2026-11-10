@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createStudio } from "./server.mjs";
 import { ProjectStore, scopedFile } from "./store.mjs";
+import { run } from "./cli.mjs";
 const cli = resolve("target/debug/buddy");
 async function fixture(t) {
   const root = await fs.mkdtemp(join(tmpdir(), ".buddy-studio-test-"));
@@ -18,6 +19,64 @@ const payload = (d) => ({
   project: d.project,
   character: d.character,
   license: d.license,
+});
+
+test("an empty project saves before its first sprite and builds a render plan from the imported GIF alone", async (t) => {
+  const store = await fixture(t);
+  const doc = await store.create({ name: "Empty Buddy", template: "empty" });
+  const blankPath = await store.currentPath(doc.meta.id);
+  assert.equal(doc.character.image, undefined);
+  assert.equal(doc.character.defaultAnimation, "");
+  assert.deepEqual(doc.character.animations, {});
+  assert.deepEqual(doc.images, []);
+  await assert.rejects(fs.access(join(blankPath, "character", "sprite.png")), { code: "ENOENT" });
+  await assert.rejects(run(cli, ["validate", blankPath]), /defaultAnimation/);
+
+  doc.project.timer = { enabled: true };
+  const blank = await store.save(doc.meta.id, payload(doc));
+  assert.equal((await store.load(doc.meta.id)).project.timer.enabled, true);
+  assert.equal((await store.clone(doc.meta.id)).character.image, undefined);
+
+  const gif = await store.upload(doc.meta.id, await fs.readFile("examples/media-resources/blink.gif"), "blink.gif");
+  blank.character.resources = { blink: { image: `resources/${gif.name}` } };
+  blank.character.animations.idle = { resource: "blink", frames: [], loop: true, useSourceTiming: true };
+  blank.character.defaultAnimation = "idle";
+  const ready = await store.save(doc.meta.id, payload(blank));
+  assert.equal(ready.character.image, undefined);
+  assert.equal(ready.renderPlan.animations.idle.frames.length, gif.frames);
+  ready.character.resources.blink.name = "기본 눈 깜박임";
+  const renamed = await store.save(doc.meta.id, payload(ready));
+  assert.deepEqual(renamed.character.resources.blink, {
+    image: `resources/${gif.name}`, name: "기본 눈 깜박임",
+  });
+  assert.equal(renamed.character.animations.idle.resource, "blink");
+  const readyPath = await store.currentPath(doc.meta.id);
+  const snapshot = join(store.root, "sprite-only");
+  await run(cli, ["snapshot", readyPath, "--output", snapshot]);
+  await assert.rejects(fs.access(join(snapshot, "character", "sprite.png")), { code: "ENOENT" });
+  const copy = await store.clone(doc.meta.id);
+  assert.equal(copy.renderPlan.animations.idle.frames.length, gif.frames);
+  assert.equal(copy.character.resources.blink.name, "기본 눈 깜박임");
+});
+
+test("a legacy sprite can be removed only after its last animation reference is replaced", async (t) => {
+  const store = await fixture(t);
+  const doc = await store.create({ name: "Legacy Buddy", template: "typing-cat" });
+  const legacyPath = await store.currentPath(doc.meta.id);
+  delete doc.character.image;
+  await assert.rejects(store.save(doc.meta.id, payload(doc)), /legacy frames/);
+  assert.equal((await store.load(doc.meta.id)).character.image, "sprite.png");
+
+  const gif = await store.upload(doc.meta.id, await fs.readFile("examples/media-resources/blink.gif"), "blink.gif");
+  doc.character.resources = { blink: { image: `resources/${gif.name}` } };
+  for (const clip of Object.values(doc.character.animations))
+    Object.assign(clip, { resource: "blink", frames: [], regions: [] });
+  const saved = await store.save(doc.meta.id, payload(doc));
+  assert.equal(saved.character.image, undefined);
+  await assert.rejects(fs.access(join(await store.currentPath(doc.meta.id), "character", "sprite.png")), { code: "ENOENT" });
+  await fs.access(join(legacyPath, "character", "sprite.png"));
+  const restored = await store.restore(doc.meta.id, doc.meta.revision, saved.meta.revision, null);
+  assert.equal(restored.character.image, "sprite.png");
 });
 function wavFixture() {
   const wav = Buffer.alloc(44 + 800);
@@ -183,7 +242,7 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   assert.equal(audioUpload.status, 201);
   const sound = await audioUpload.json();
   assert.equal(sound.kind, "audio");
-  d.character.sounds = { ping: { audio: `resources/${sound.name}` } };
+  d.character.sounds = { ping: { audio: `resources/${sound.name}`, name: "완료 소리" } };
   d.character.resources = { blink: { image: `resources/${gif.name}` } };
   d.character.animations["idle-blink"] = { resource: "blink", loop: true };
   d.character.defaultAnimation = "typing";
@@ -203,6 +262,7 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   const soundSave = await request(prefix, { method: "PUT", body: JSON.stringify(payload(d)) });
   assert.equal(soundSave.status, 200);
   const saved = await soundSave.json();
+  assert.equal(saved.character.sounds.ping.name, "완료 소리");
   assert.equal(saved.project.build.macosDmg.guide, d.project.build.macosDmg.guide);
   assert.equal(saved.project.cursorFollow.stopDistanceDip, 0);
   const guideDownload = await request(prefix.replace("/api/", "/%61pi/") + `/source/assets/installer/${guide.name}`);
@@ -243,13 +303,119 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   assert.deepEqual(jump.sound, { resource: "ping", volume: 0.7 });
   assert.equal(timeline.at(-1).state.animation, "typing");
   assert.equal(timeline.at(-1).state.sound, undefined);
+  saved.project.timer = { enabled: true };
+  saved.project.idleGroups = [
+    { id: "work", name: "작업", states: ["countdown", "focus"], animation: "walk", cursorMode: "custom",
+      directions: { upLeft: { animation: "idle-blink", mirror: true } } },
+    { id: "rest", name: "휴식", states: ["shortBreak", "longBreak"], cursorMode: "inherit" },
+  ];
+  saved.project.bindings.push({
+    id: "timer-start", trigger: { type: "timerStarted", phase: "countdown", alternatives: ["focus"] },
+    effect: { type: "playAnimation", animation: "jump", durationMs: 100 },
+  }, {
+    id: "buddy-hold", trigger: { type: "buddyLongPress", holdMs: 600 },
+    effect: { type: "playAnimation", animation: "click", durationMs: 100 },
+  }, {
+    id: "timer-end", trigger: { type: "timerCompleted", phase: "longBreak" },
+    effect: { type: "playAnimation", animation: "celebrate", durationMs: 100 },
+  }, {
+    id: "typing-done",
+    trigger: { type: "typingStopped", minTypingSeconds: 2, minKeys: 5, pauseMs: 700, minIntervalSeconds: 10 },
+    effect: {
+      type: "playAnimation",
+      animation: "jump",
+      variation: { mode: "cycle", alternatives: ["click"] },
+    },
+  }, {
+    id: "idle-fidget",
+    trigger: { type: "idleFor", seconds: 300 },
+    effect: {
+      type: "playAnimation",
+      animation: "celebrate",
+      variation: { mode: "cycle", alternatives: ["click"] },
+    },
+  });
+  const timedSave = await request(prefix, { method: "PUT", body: JSON.stringify(payload(saved)) });
+  assert.equal(timedSave.status, 200);
+  const timed = await timedSave.json();
+  assert.equal(timed.project.bindings.at(-1).trigger.seconds, 300);
+  assert.deepEqual(timed.project.idleGroups, saved.project.idleGroups);
+  const overlapping = structuredClone(timed);
+  overlapping.project.idleGroups[1].states.push("focus");
+  const rejected = await request(prefix, { method: "PUT", body: JSON.stringify(payload(overlapping)) });
+  assert.equal(rejected.ok, false);
+  const error = (await rejected.json()).error;
+  assert.match(error, /idleGroups\[1\]\.states/);
+  assert.match(error, /작업.*휴식/);
+  assert.equal((await store.metadata(d.meta.id)).revision, timed.meta.revision);
+  const timerPreview = await request(prefix + "/simulate", {
+    method: "POST",
+    body: JSON.stringify({ untilMs: 550, includeBindingIds: true, events: [
+      { atMs: 0, event: { type: "timerPhaseChanged", phase: "focus" } },
+      { atMs: 10, event: { type: "timerStarted", phase: "focus" } },
+      { atMs: 50, event: { type: "cursorMove", x: 120, y: 120 } },
+      { atMs: 200, event: { type: "buddyLongPress" } },
+      { atMs: 400, event: { type: "timerPhaseChanged", phase: null } },
+      { atMs: 400, event: { type: "timerCompleted", phase: "longBreak" } },
+    ] }),
+  });
+  assert.equal(timerPreview.status, 200);
+  const timerFrames = await timerPreview.json();
+  assert.equal(timerFrames.find(frame => frame.atMs === 10).bindingId, "timer-start");
+  const groupPose = timerFrames.find(frame => frame.atMs === 150).state;
+  assert.equal(groupPose.animation, "idle-blink");
+  assert.equal(groupPose.facingLeft, true);
+  assert.equal(timerFrames.find(frame => frame.atMs === 200).bindingId, "buddy-hold");
+  assert.equal(timerFrames.find(frame => frame.atMs === 400).bindingId, "timer-end");
+  assert.equal(timerFrames.at(-1).state.facingLeft, false);
+  const idlePreview = await request(prefix + "/simulate", {
+    method: "POST",
+    body: JSON.stringify({ fromMs: 299900, untilMs: 300100, events: [] }),
+  });
+  assert.equal(idlePreview.status, 200);
+  const idleFrames = await idlePreview.json();
+  assert.equal(idleFrames[0].atMs, 0);
+  assert.equal(idleFrames[0].state.animation, "typing");
+  assert.equal(idleFrames.find((frame) => frame.atMs === 100).state.animation, "celebrate");
+  const motionPreview = { bindingId: "idle-fidget", revision: timed.meta.revision, seed: 42, starts: 1 };
+  const nextMotion = await request(prefix + "/simulate", {
+    method: "POST",
+    body: JSON.stringify({ fromMs: 299900, untilMs: 300100, events: [], motionPreview }),
+  });
+  assert.equal(nextMotion.status, 200);
+  const selected = (await nextMotion.json()).find((frame) => frame.atMs === 100);
+  assert.equal(selected.bindingId, "idle-fidget");
+  assert.equal(selected.state.animation, "click");
+  const staleMotion = await request(prefix + "/simulate", {
+    method: "POST",
+    body: JSON.stringify({
+      fromMs: 299900, untilMs: 300100, events: [],
+      motionPreview: { ...motionPreview, revision: saved.meta.revision },
+    }),
+  });
+  assert.equal(staleMotion.status, 409);
+  const typingInputs = [0, 500, 1000, 1500, 2000, 2700].flatMap(atMs => [
+    { atMs, event: { type: "keyDown", code: "KeyJ" } },
+    { atMs: atMs + 5, event: { type: "keyUp", code: "KeyJ" } },
+  ]);
+  const typingPreview = await request(prefix + "/simulate", {
+    method: "POST",
+    body: JSON.stringify({
+      fromMs: 2600, untilMs: 3500, events: typingInputs,
+      motionPreview: { ...motionPreview, bindingId: "typing-done" },
+    }),
+  });
+  assert.equal(typingPreview.status, 200);
+  const finishedTyping = (await typingPreview.json()).find(frame => frame.bindingId === "typing-done");
+  assert.equal(finishedTyping.atMs, 800);
+  assert.equal(finishedTyping.state.animation, "click");
   const queued = await (
     await request(prefix + "/builds", {
       method: "POST",
-      body: JSON.stringify({ revision: saved.meta.revision, development: true }),
+      body: JSON.stringify({ revision: timed.meta.revision, development: true }),
     })
   ).json();
-  assert.equal(queued.revision, saved.meta.revision);
+  assert.equal(queued.revision, timed.meta.revision);
   // The missing template must fail at template verification on every OS.
   const deadline = Date.now() + 10000;
   let finished;
@@ -264,8 +430,8 @@ test("HTTP requires session authorization and same origin; actual engine simulat
   assert.equal(finished?.status, "failed");
   assert.match(finished.error, /^verify-template\r?$/m);
   assert.doesNotMatch(finished.error, /^configure-product\r?$/m);
-  delete saved.project.build.macosDmg;
-  const removed = await request(prefix, { method: "PUT", body: JSON.stringify(payload(saved)) });
+  delete timed.project.build.macosDmg;
+  const removed = await request(prefix, { method: "PUT", body: JSON.stringify(payload(timed)) });
   assert.equal(removed.status, 200);
   assert.equal((await request(prefix + `/source/assets/installer/${guide.name}`)).status, 404);
 });

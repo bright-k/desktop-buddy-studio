@@ -1,4 +1,4 @@
-use buddy_project::{MouseButton, WheelDirection};
+use buddy_project::{MouseButton, TimerCompletion, TimerPhase, WheelDirection};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -33,8 +33,22 @@ pub enum InputEvent {
         y: f64,
     },
     BuddyClick,
+    BuddyLongPress,
     DragStart,
     DragEnd,
+    DragDropped,
+    TimerPhaseChanged {
+        phase: Option<TimerPhase>,
+    },
+    TimerStarted {
+        phase: TimerPhase,
+    },
+    TimerCompleted {
+        phase: TimerCompletion,
+    },
+    OverlayVisibility {
+        visible: bool,
+    },
     Reset,
     /// Native capture epoch boundary. These keys/buttons are suppressed until
     /// release; this snapshot never restores held actions or matcher progress.

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import { join, basename } from "node:path";
 import { run } from "./cli.mjs";
 import { atomicJson, StudioError, requireId } from "./store.mjs";
-const removable = new Set(["succeeded", "failed", "cancelled", "interrupted", "partial", "import_failed"]);
+const removable = new Set(["succeeded", "failed", "cancelled", "interrupted", "partial", "import_failed", "sync_failed"]);
 
 export class BuildQueue {
   constructor(store, { templatePack, development = false, target } = {}) {
@@ -215,33 +215,26 @@ export class BuildQueue {
       );
       job.result = result;
       // A development .app is a directory; provide an ordinary downloadable ZIP.
-      if (process.platform === "darwin") {
-        const apps = (await fs.readdir(result.directory)).filter((n) =>
+      if (job.target === "macos-arm64") {
+        const [app] = (await fs.readdir(result.directory)).filter((n) =>
           n.endsWith(".app"),
         );
-        for (const app of apps) {
-          const zip = `${app}.zip`;
-          await run(
-            "/usr/bin/ditto",
-            [
-              "-c",
-              "-k",
-              "--sequesterRsrc",
-              "--keepParent",
-              join(result.directory, app),
-              join(result.directory, zip),
-            ],
-            { signal: controller.signal },
-          );
-          job.downloads = [
-            ...(job.downloads ?? []),
-            {
-              name: zip,
-              path: `${basename(result.directory)}/${zip}`,
-              bytes: (await fs.stat(join(result.directory, zip))).size,
-            },
-          ];
-        }
+        if (!app) throw new StudioError("macOS 앱 번들을 찾을 수 없습니다.");
+        const { version, platformIdentity } = JSON.parse(
+          await fs.readFile(join(result.directory, "build-report.json"), "utf8"),
+        );
+        const zip = `${platformIdentity.binaryName}_${version}_macos-arm64.app.zip`;
+        const zipPath = join(result.directory, zip);
+        await run(
+          "/usr/bin/ditto",
+          ["-c", "-k", "--sequesterRsrc", "--keepParent", join(result.directory, app), zipPath],
+          { signal: controller.signal },
+        );
+        job.downloads = [{
+          name: zip,
+          path: `${basename(result.directory)}/${zip}`,
+          bytes: (await fs.stat(zipPath)).size,
+        }];
       }
       job.downloads = [
         ...(job.downloads ?? []),

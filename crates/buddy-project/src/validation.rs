@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet},
     fmt, fs,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
     time::SystemTime,
 };
@@ -51,8 +52,25 @@ fn problem(file: &str, path: &str, code: &str, message: impl Into<String>) -> Va
 pub struct SourceAsset {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
+    pub size: u64,
     pub modified: Option<SystemTime>,
     pub hash: String,
+}
+impl SourceAsset {
+    /// Reopen a validated asset without keeping an encoded copy resident.
+    pub fn read_verified(&self) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(self.size as usize);
+        fs::File::open(&self.path)?
+            .take(self.size + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != self.size || sha256(&bytes) != self.hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "asset changed after validation",
+            ));
+        }
+        Ok(bytes)
+    }
 }
 #[derive(Debug, Clone)]
 pub struct ValidatedProject {
@@ -68,7 +86,7 @@ pub struct LoadedProject {
     pub entry_relative_path: String,
     pub data: ValidatedProject,
     pub files: BTreeMap<String, SourceAsset>,
-    pub image_relative_path: String,
+    pub image_relative_path: Option<String>,
     pub content_hash: String,
     pub render_assets: BTreeMap<String, Vec<u8>>,
     /// Only populated when the native Player loads verified bundled frames.
@@ -176,8 +194,23 @@ pub fn parse_json<T: DeserializeOwned>(bytes: &[u8], file: &str) -> Result<T, Va
 }
 
 pub fn validate_parts(
+    project: Project,
+    character: Character,
+) -> Result<ValidatedProject, ValidationError> {
+    validate_parts_inner(project, character, false)
+}
+
+pub fn validate_editable_parts(
+    project: Project,
+    character: Character,
+) -> Result<ValidatedProject, ValidationError> {
+    validate_parts_inner(project, character, true)
+}
+
+fn validate_parts_inner(
     mut project: Project,
     character: Character,
+    allow_empty: bool,
 ) -> Result<ValidatedProject, ValidationError> {
     let mut errors = Vec::new();
     let mut check = |ok: bool, file: &str, path: &str, message: &str| {
@@ -191,6 +224,26 @@ pub fn validate_parts(
         }
     };
     let file = "buddy.project.json";
+    if let Some(timer) = &project.timer {
+        check(
+            (1..=10_800).contains(&timer.countdown_seconds),
+            file,
+            "$.timer.countdownSeconds",
+            "countdown must be 1..10800 seconds",
+        );
+        check(
+            timer.pomodoro.is_valid(),
+            file,
+            "$.timer.pomodoro",
+            "focus must be 1..120 minutes, breaks 1..60 minutes, and rounds 2..8",
+        );
+        check(
+            valid_timer_presets(timer.countdown_presets()),
+            file,
+            "$.timer.countdownPresets",
+            "use up to 10 distinct timer presets of 1..10800 seconds",
+        );
+    }
     check(
         project.schema_version == 1,
         file,
@@ -363,7 +416,7 @@ pub fn validate_parts(
     let sheet = character.sheet;
     let dimensions_ok = (1..=4096).contains(&sheet.width) && (1..=4096).contains(&sheet.height);
     check(
-        dimensions_ok,
+        character.image.is_none() || dimensions_ok,
         char_file,
         "$.sheet",
         "sheet dimensions must be 1..4096",
@@ -384,7 +437,7 @@ pub fn validate_parts(
         && sheet.frame_count
             <= (sheet.width / sheet.frame_width) * (sheet.height / sheet.frame_height);
     check(
-        cells_ok,
+        character.image.is_none() || cells_ok,
         char_file,
         "$.sheet.frameCount",
         "invalid sheet divisibility or frame count",
@@ -394,6 +447,15 @@ pub fn validate_parts(
         char_file,
         "$.anchor",
         "anchor must be 0..1",
+    );
+    check(
+        character.canvas_layout.is_none_or(|layout| {
+            (0.5..=1.0).contains(&layout.horizontal_anchor_extent)
+                && (1.0..=2.0).contains(&layout.scale_envelope)
+        }),
+        char_file,
+        "$.canvasLayout",
+        "canvas layout exceeds the supported anchor or scale range",
     );
     let is_looping = |name: &str| character.animations.get(name).is_some_and(|a| a.looping);
     if let Some(follow) = &project.cursor_follow {
@@ -435,7 +497,7 @@ pub fn validate_parts(
         }
     }
     check(
-        is_looping(&character.default_animation),
+        is_looping(&character.default_animation) || (allow_empty && character.awaiting_sprite()),
         char_file,
         "$.defaultAnimation",
         "defaultAnimation must reference an existing looping animation",
@@ -447,6 +509,69 @@ pub fn validate_parts(
                 .all(|pose| pose.animation.as_deref().is_none_or(is_looping)),
             file,
             "$.idle.directions",
+            "idle directions must reference existing looping animations",
+        );
+    }
+    check(
+        project.idle_groups.len() <= 4,
+        file,
+        "$.idleGroups",
+        "at most four idle groups",
+    );
+    let mut group_ids = HashSet::new();
+    let mut state_owners = BTreeMap::new();
+    for (index, group) in project.idle_groups.iter().enumerate() {
+        let path = format!("$.idleGroups[{index}]");
+        check(
+            safe_id(&group.id) && group_ids.insert(&group.id),
+            file,
+            &format!("{path}.id"),
+            "idle group IDs must be portable and unique",
+        );
+        check(
+            group.name.as_ref().is_none_or(|name| {
+                name.chars().count() <= 40 && !name.chars().any(char::is_control)
+            }),
+            file,
+            &format!("{path}.name"),
+            "idle group names must be at most 40 characters without control characters",
+        );
+        check(
+            !group.states.is_empty(),
+            file,
+            &format!("{path}.states"),
+            "choose at least one state for the idle group",
+        );
+        let label = group
+            .name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&group.id);
+        for state in &group.states {
+            if let Some(owner) = state_owners.insert(*state, label) {
+                check(
+                    false,
+                    file,
+                    &format!("{path}.states"),
+                    &format!(
+                        "idle state {state:?} is assigned to both \"{owner}\" and \"{label}\""
+                    ),
+                );
+            }
+        }
+        check(
+            group.animation.as_deref().is_none_or(is_looping),
+            file,
+            &format!("{path}.animation"),
+            "idle groups must reference existing looping animations",
+        );
+        check(
+            group
+                .directions
+                .values()
+                .all(|pose| pose.animation.as_deref().is_none_or(is_looping)),
+            file,
+            &format!("{path}.directions"),
             "idle directions must reference existing looping animations",
         );
     }
@@ -472,6 +597,28 @@ pub fn validate_parts(
         "$.sounds",
         "maximum 32 sounds with portable IDs",
     );
+    for (section, id, name) in character
+        .resources
+        .iter()
+        .map(|(id, resource)| ("resources", id, resource.name.as_deref()))
+        .chain(
+            character
+                .sounds
+                .iter()
+                .map(|(id, sound)| ("sounds", id, sound.name.as_deref())),
+        )
+    {
+        check(
+            name.is_none_or(|name| {
+                !name.trim().is_empty()
+                    && name.chars().count() <= 80
+                    && !name.chars().any(char::is_control)
+            }),
+            char_file,
+            &format!("$.{section}.{id}.name"),
+            "resource names must contain 1..80 characters without control characters",
+        );
+    }
     for (name, animation) in &character.animations {
         let path = format!("$.animations.{name}");
         check(safe_id(name), char_file, &path, "invalid animation name");
@@ -499,7 +646,7 @@ pub fn validate_parts(
             animation.frames.len() <= 256 && animation.regions.len() <= 256
                 && (animation.frames.is_empty() || animation.regions.is_empty())
                 && if let Some(id) = &animation.resource { character.resources.contains_key(id) }
-                   else { (!animation.frames.is_empty() || !animation.regions.is_empty()) && animation.frames.iter().all(|f| *f < sheet.frame_count) },
+                   else { character.image.is_some() && (!animation.frames.is_empty() || !animation.regions.is_empty()) && animation.frames.iter().all(|f| *f < sheet.frame_count) },
             char_file,
             &path,
             "use existing resource, or legacy frames inside frameCount; frames and regions are exclusive (maximum 256)",
@@ -512,6 +659,8 @@ pub fn validate_parts(
     let mut bands = Vec::new();
     let mut cursor_count = 0;
     let mut sequence_count = 0;
+    let mut has_typing_stopped = false;
+    let mut has_buddy_long_press = false;
     for (index, binding) in project.bindings.iter().enumerate() {
         let path = format!("$.bindings[{index}]");
         check(
@@ -528,6 +677,14 @@ pub fn validate_parts(
                     | Trigger::MouseDown { .. }
                     | Trigger::MouseUp { .. }
                     | Trigger::BuddyClick
+                    | Trigger::BuddyLongPress { .. }
+                    | Trigger::DragDropped
+                    | Trigger::FirstShown
+                    | Trigger::ShownAgain
+                    | Trigger::IdleFor { .. }
+                    | Trigger::TypingStopped { .. }
+                    | Trigger::TimerCompleted { .. }
+                    | Trigger::TimerStarted { .. }
                     | Trigger::Wheel { .. }
                     | Trigger::MouseInput { .. }
                     | Trigger::KeySequence { .. },
@@ -558,6 +715,84 @@ pub fn validate_parts(
         let mut compiled = None;
         let mut compiled_alternatives = Vec::new();
         match &binding.trigger {
+            Trigger::BuddyLongPress { hold_ms } => {
+                check(
+                    !has_buddy_long_press,
+                    file,
+                    &format!("{path}.trigger"),
+                    "maximum one buddy long-press event per project",
+                );
+                has_buddy_long_press = true;
+                check(
+                    (BUDDY_HOLD_MIN_MS..=BUDDY_HOLD_MAX_MS).contains(hold_ms),
+                    file,
+                    &format!("{path}.trigger.holdMs"),
+                    "hold duration must be 300..2000 ms",
+                );
+            }
+            Trigger::TimerStarted {
+                phase,
+                alternatives,
+            } => check(
+                alternatives.len() <= 3
+                    && !alternatives.contains(phase)
+                    && alternatives
+                        .iter()
+                        .enumerate()
+                        .all(|(index, alternative)| !alternatives[..index].contains(alternative)),
+                file,
+                &format!("{path}.trigger.alternatives"),
+                "timer start phases must be distinct",
+            ),
+            Trigger::TimerCompleted {
+                phase,
+                alternatives,
+            } => check(
+                alternatives.len() <= 3
+                    && alternatives.iter().enumerate().all(|(index, alternative)| {
+                        std::iter::once(phase)
+                            .chain(&alternatives[..index])
+                            .all(|previous| {
+                                !previous.matches(*alternative) && !alternative.matches(*previous)
+                            })
+                    }),
+                file,
+                &format!("{path}.trigger.alternatives"),
+                "timer completion phases must be distinct",
+            ),
+            Trigger::IdleFor { seconds } => check(
+                (1..=3600).contains(seconds),
+                file,
+                &format!("{path}.trigger.seconds"),
+                "idle duration must be 1..3600 seconds",
+            ),
+            Trigger::TypingStopped {
+                min_typing_seconds,
+                min_keys,
+                pause_ms,
+                min_interval_seconds,
+            } => {
+                check(
+                    !has_typing_stopped,
+                    file,
+                    &format!("{path}.trigger"),
+                    "maximum one typing-stopped event per project",
+                );
+                has_typing_stopped = true;
+                for (field, value, min, max) in [
+                    ("minTypingSeconds", *min_typing_seconds, 2, 60),
+                    ("minKeys", *min_keys, 2, 100),
+                    ("pauseMs", *pause_ms, 500, 5000),
+                    ("minIntervalSeconds", *min_interval_seconds, 10, 600),
+                ] {
+                    check(
+                        (min..=max).contains(&value),
+                        file,
+                        &format!("{path}.trigger.{field}"),
+                        &format!("value must be {min}..{max}"),
+                    );
+                }
+            }
             Trigger::KeyDown { alternatives, .. }
             | Trigger::KeyUp { alternatives, .. }
             | Trigger::WhileKeyDown { alternatives, .. } => {
@@ -671,6 +906,7 @@ pub fn validate_parts(
         match &binding.effect {
             Effect::PlayAnimation {
                 animation,
+                variation,
                 priority,
                 cooldown_ms,
                 duration_ms,
@@ -686,6 +922,39 @@ pub fn validate_parts(
                     &format!("{path}.effect.animation"),
                     "one-shot must reference an existing non-loop animation",
                 );
+                if let Some(variation) = variation {
+                    check(
+                        (1..=7).contains(&variation.alternatives.len()),
+                        file,
+                        &format!("{path}.effect.variation.alternatives"),
+                        "a motion variation requires 2..8 animations including the first",
+                    );
+                    let mut distinct = HashSet::from([animation]);
+                    for (index, alternative) in variation.alternatives.iter().enumerate() {
+                        check(
+                            distinct.insert(alternative)
+                                && character
+                                    .animations
+                                    .get(alternative)
+                                    .is_some_and(|a| !a.looping),
+                            file,
+                            &format!("{path}.effect.variation.alternatives[{index}]"),
+                            "motion candidates must be distinct existing non-loop animations",
+                        );
+                    }
+                    let weighted = matches!(variation.mode, MotionVariationMode::Weighted);
+                    let valid_weights = variation.weights.as_ref().map_or(!weighted, |weights| {
+                        weights.len() == 1 + variation.alternatives.len()
+                            && weights.iter().all(|&weight| weight <= 10_000)
+                            && (!weighted || weights.iter().any(|&weight| weight > 0))
+                    });
+                    check(
+                        valid_weights,
+                        file,
+                        &format!("{path}.effect.variation.weights"),
+                        "provide one weight (0..10000) per motion; weighted selection requires a positive weight",
+                    );
+                }
                 check(
                     *priority <= 100 && *cooldown_ms <= 10000
                         && duration_ms.is_none_or(|d| (1..=60000).contains(&d))
@@ -839,9 +1108,16 @@ fn read_source(
     relative: &str,
     limit: u64,
     files: &mut BTreeMap<String, SourceAsset>,
+    retain_bytes: bool,
 ) -> Result<Vec<u8>, ValidationError> {
     if let Some(existing) = files.get(relative) {
-        return Ok(existing.bytes.clone());
+        return if !retain_bytes {
+            existing
+                .read_verified()
+                .map_err(|e| problem(relative, "$", "READ_FAILED", e.to_string()))
+        } else {
+            Ok(existing.bytes.clone())
+        };
     }
     let folded: String = relative.nfc().flat_map(char::to_lowercase).collect();
     if files
@@ -866,8 +1142,7 @@ fn read_source(
             "asset exceeds size limit",
         ));
     }
-    use std::io::Read;
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(before.len() as usize);
     fs::File::open(&path)
         .and_then(|f| f.take(limit + 1).read_to_end(&mut bytes))
         .map_err(|e| problem(relative, "$", "READ_FAILED", e.to_string()))?;
@@ -889,12 +1164,17 @@ fn read_source(
         relative.into(),
         SourceAsset {
             path,
+            size: before.len(),
             modified: after.modified().ok(),
             hash: sha256(&bytes),
-            bytes: bytes.clone(),
+            bytes: if retain_bytes {
+                bytes.clone()
+            } else {
+                Vec::new()
+            },
         },
     );
-    if files.values().map(|file| file.bytes.len()).sum::<usize>() > ASSET_LIMIT {
+    if files.values().map(|file| file.size).sum::<u64>() > ASSET_LIMIT as u64 {
         return Err(problem(
             relative,
             "$",
@@ -928,7 +1208,12 @@ fn check_png(bytes: &[u8], file: &str) -> Result<(u32, u32), ValidationError> {
 }
 
 pub fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationError> {
-    load_project_inner(path.as_ref(), None)
+    load_project_inner(path.as_ref(), None, false, true)
+}
+
+/// Open a project for editing, including a project waiting for its first sprite.
+pub fn load_editable_project(path: impl AsRef<Path>) -> Result<LoadedProject, ValidationError> {
+    load_project_inner(path.as_ref(), None, true, true)
 }
 
 /// Read the same source snapshot, using bundled frames if they are complete and current.
@@ -937,12 +1222,27 @@ pub fn load_project_with_prepared(
     path: impl AsRef<Path>,
     prepared: &Path,
 ) -> Result<LoadedProject, ValidationError> {
-    load_project_inner(path.as_ref(), Some(prepared))
+    load_project_inner(path.as_ref(), Some(prepared), false, true)
+}
+
+/// Keep only asset descriptors when the packaged frames can be used directly.
+pub fn load_player_project(
+    path: impl AsRef<Path>,
+    prepared: &Path,
+) -> Result<LoadedProject, ValidationError> {
+    load_project_inner(
+        path.as_ref(),
+        prepared.is_dir().then_some(prepared),
+        false,
+        false,
+    )
 }
 
 fn load_project_inner(
     input: &Path,
     prepared: Option<&Path>,
+    allow_empty: bool,
+    retain_bytes: bool,
 ) -> Result<LoadedProject, ValidationError> {
     let entry = if input.is_dir() {
         input.join("buddy.project.json")
@@ -963,7 +1263,7 @@ fn load_project_inner(
             )
         })?;
     let mut files = BTreeMap::new();
-    let project_bytes = read_source(&root, entry_name, JSON_LIMIT, &mut files)?;
+    let project_bytes = read_source(&root, entry_name, JSON_LIMIT, &mut files, retain_bytes)?;
     let project: Project = parse_json(&project_bytes, entry_name)?;
     if project.schema_version != 1 {
         return Err(problem(
@@ -985,7 +1285,13 @@ fn load_project_inner(
             "character manifest must be JSON",
         ));
     }
-    let character_bytes = read_source(&root, &project.character, JSON_LIMIT, &mut files)?;
+    let character_bytes = read_source(
+        &root,
+        &project.character,
+        JSON_LIMIT,
+        &mut files,
+        retain_bytes,
+    )?;
     let character: Character = parse_json(&character_bytes, &project.character)?;
     let character_dir = Path::new(&project.character)
         .parent()
@@ -993,7 +1299,9 @@ fn load_project_inner(
         .to_path_buf();
     // Validate each manifest-relative path before joining; Path::join alone can
     // erase a prefix when given an absolute path.
-    for name in std::iter::once(&character.image)
+    for name in character
+        .image
+        .iter()
         .chain(std::iter::once(&character.license))
         .chain(character.resources.values().map(|r| &r.image))
         .chain(character.sounds.values().map(|sound| &sound.audio))
@@ -1011,15 +1319,20 @@ fn load_project_inner(
             ));
         }
     }
-    let image_relative = character_dir
-        .join(&character.image)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let image_relative = character.image.as_ref().map(|image| {
+        character_dir
+            .join(image)
+            .to_string_lossy()
+            .replace('\\', "/")
+    });
     let license_relative = character_dir
         .join(&character.license)
         .to_string_lossy()
         .replace('\\', "/");
-    for name in [&image_relative, &project.product.icon] {
+    for name in image_relative
+        .iter()
+        .chain(std::iter::once(&project.product.icon))
+    {
         if Path::new(name).extension().and_then(|s| s.to_str()) != Some("png") {
             return Err(problem(
                 name,
@@ -1041,17 +1354,24 @@ fn load_project_inner(
             "license must be UTF-8 .txt",
         ));
     }
-    let png = read_source(&root, &image_relative, PNG_LIMIT, &mut files)?;
-    let dimensions = check_png(&png, &image_relative)?;
-    if dimensions != (character.sheet.width, character.sheet.height) {
-        return Err(problem(
-            &project.character,
-            "$.sheet",
-            "IMAGE_DIMENSION_MISMATCH",
-            "declared sheet differs from PNG dimensions",
-        ));
+    if let Some(relative) = &image_relative {
+        let png = read_source(&root, relative, PNG_LIMIT, &mut files, retain_bytes)?;
+        if check_png(&png, relative)? != (character.sheet.width, character.sheet.height) {
+            return Err(problem(
+                &project.character,
+                "$.sheet",
+                "IMAGE_DIMENSION_MISMATCH",
+                "declared sheet differs from PNG dimensions",
+            ));
+        }
     }
-    let icon = read_source(&root, &project.product.icon, PNG_LIMIT, &mut files)?;
+    let icon = read_source(
+        &root,
+        &project.product.icon,
+        PNG_LIMIT,
+        &mut files,
+        retain_bytes,
+    )?;
     let (width, height) = check_png(&icon, &project.product.icon)?;
     if width != height || !(512..=1024).contains(&width) {
         return Err(problem(
@@ -1061,7 +1381,13 @@ fn load_project_inner(
             "icon must be a 512..1024 square PNG",
         ));
     }
-    let license = read_source(&root, &license_relative, JSON_LIMIT, &mut files)?;
+    let license = read_source(
+        &root,
+        &license_relative,
+        JSON_LIMIT,
+        &mut files,
+        retain_bytes,
+    )?;
     std::str::from_utf8(&license).map_err(|_| {
         problem(
             &license_relative,
@@ -1070,7 +1396,7 @@ fn load_project_inner(
             "license must be UTF-8",
         )
     })?;
-    let mut data = validate_parts(project, character).map_err(|mut error| {
+    let mut data = validate_parts_inner(project, character, allow_empty).map_err(|mut error| {
         for diagnostic in &mut error.0 {
             if diagnostic.file == "buddy.project.json" {
                 diagnostic.file = entry_name.into();
@@ -1089,7 +1415,7 @@ fn load_project_inner(
                 .and_then(|value| value.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            let bytes = read_source(&root, path, PNG_LIMIT, &mut files)?;
+            let bytes = read_source(&root, path, PNG_LIMIT, &mut files, retain_bytes)?;
             let valid = match ext.as_str() {
                 "png" => {
                     check_png(&bytes, path)?;
@@ -1141,7 +1467,7 @@ fn load_project_inner(
                 "supported: PNG, JPEG, GIF, WebP, BMP",
             ));
         }
-        read_source(&root, &relative, PNG_LIMIT, &mut files)?;
+        read_source(&root, &relative, PNG_LIMIT, &mut files, retain_bytes)?;
         resource_paths.insert(id.as_str(), relative);
     }
     let mut sound_files = BTreeMap::new();
@@ -1155,7 +1481,7 @@ fn load_project_inner(
             .and_then(|ext| ext.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let bytes = read_source(&root, &relative, PNG_LIMIT, &mut files)?;
+        let bytes = read_source(&root, &relative, PNG_LIMIT, &mut files, retain_bytes)?;
         validate_sound(&extension, &bytes)
             .map_err(|e| problem(&relative, "$", "INVALID_AUDIO", e))?;
         sound_files.insert(id.clone(), relative);
@@ -1164,8 +1490,15 @@ fn load_project_inner(
     for (name, file) in &files {
         hash.update((name.len() as u64).to_le_bytes());
         hash.update(name.as_bytes());
-        hash.update((file.bytes.len() as u64).to_le_bytes());
-        hash.update(&file.bytes);
+        hash.update(file.size.to_le_bytes());
+        if retain_bytes {
+            hash.update(&file.bytes);
+        } else {
+            let bytes = file
+                .read_verified()
+                .map_err(|e| problem(name, "$", "READ_FAILED", e.to_string()))?;
+            hash.update(bytes);
+        }
     }
     let content_hash = format!("{:x}", hash.finalize());
     let mut render_assets = BTreeMap::new();
@@ -1177,20 +1510,47 @@ fn load_project_inner(
         (footprints, paths)
     } else {
         let mut budget = 0;
-        let base = decode_media(&png, &mut budget, &mut render_assets)
-            .map_err(|e| problem(&image_relative, "$", "INVALID_IMAGE", e))?;
-        data.render_plan = legacy_plan(&data.character, &base.frames[0].image);
+        let base = image_relative
+            .as_ref()
+            .map(|relative| {
+                let bytes;
+                let file = &files[relative];
+                let source = if retain_bytes {
+                    &file.bytes
+                } else {
+                    bytes = file
+                        .read_verified()
+                        .map_err(|e| problem(relative, "$", "READ_FAILED", e.to_string()))?;
+                    &bytes
+                };
+                decode_media(source, &mut budget, &mut render_assets)
+                    .map_err(|e| problem(relative, "$", "INVALID_IMAGE", e))
+            })
+            .transpose()?;
+        if let Some(base) = &base {
+            data.render_plan = legacy_plan(&data.character, &base.frames[0].image);
+        }
         let mut decoded = BTreeMap::new();
         for (id, relative) in resource_paths {
-            let media = decode_media(&files[&relative].bytes, &mut budget, &mut render_assets)
+            let bytes;
+            let file = &files[&relative];
+            let source = if retain_bytes {
+                &file.bytes
+            } else {
+                bytes = file
+                    .read_verified()
+                    .map_err(|e| problem(&relative, "$", "READ_FAILED", e.to_string()))?;
+                &bytes
+            };
+            let media = decode_media(source, &mut budget, &mut render_assets)
                 .map_err(|e| problem(&relative, "$", "INVALID_IMAGE", e))?;
             decoded.insert(id, media);
         }
         for (name, animation) in &data.character.animations {
             let media = if let Some(id) = &animation.resource {
                 &decoded[id.as_str()]
-            } else if !animation.regions.is_empty() {
-                &base
+            } else if let Some(base) = base.as_ref().filter(|_| !animation.regions.is_empty()) {
+                base
             } else {
                 continue;
             };
@@ -1208,7 +1568,7 @@ fn load_project_inner(
             crate::render_footprints(
                 &data.character,
                 &data.render_plan,
-                std::iter::once(&base).chain(decoded.values()),
+                base.iter().chain(decoded.values()),
                 &render_assets,
             ),
             BTreeMap::new(),

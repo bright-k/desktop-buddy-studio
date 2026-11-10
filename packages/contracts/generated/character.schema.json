@@ -71,6 +71,29 @@
       ],
       "type": "object"
     },
+    "CanvasLayout": {
+      "additionalProperties": false,
+      "description": "The viewport of the source project before unused clips were removed.",
+      "properties": {
+        "horizontalAnchorExtent": {
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.5,
+          "type": "number"
+        },
+        "scaleEnvelope": {
+          "format": "double",
+          "maximum": 2.0,
+          "minimum": 1.0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "horizontalAnchorExtent",
+        "scaleEnvelope"
+      ],
+      "type": "object"
+    },
     "FrameRegion": {
       "additionalProperties": false,
       "properties": {
@@ -126,6 +149,14 @@
       "properties": {
         "image": {
           "type": "string"
+        },
+        "name": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -176,6 +207,14 @@
       "properties": {
         "audio": {
           "type": "string"
+        },
+        "name": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -203,6 +242,16 @@
       },
       "type": "object"
     },
+    "canvasLayout": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CanvasLayout"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "defaultAnimation": {
       "type": "string"
     },
@@ -210,7 +259,10 @@
       "type": "string"
     },
     "image": {
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "license": {
       "type": "string"
@@ -245,7 +297,6 @@
     "id",
     "name",
     "license",
-    "image",
     "sheet",
     "anchor",
     "defaultAnimation",

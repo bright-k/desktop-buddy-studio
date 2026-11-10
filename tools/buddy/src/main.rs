@@ -57,7 +57,7 @@ enum Command {
         directory: PathBuf,
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, default_value = "typing-cat", value_parser = ["typing-cat", "click-mascot"])]
+        #[arg(long, default_value = "typing-cat", value_parser = ["empty", "typing-cat", "click-mascot"])]
         template: String,
     },
     /// Report toolchain, supported-host, and input-permission status.
@@ -73,8 +73,14 @@ enum Command {
     Simulate {
         project: PathBuf,
         events: PathBuf,
+        #[arg(long, requires = "timeline")]
+        from_ms: Option<u64>,
         #[arg(long)]
         until_ms: Option<u64>,
+        #[arg(long, requires = "timeline")]
+        motion_preview: Option<String>,
+        #[arg(long, requires = "timeline")]
+        include_binding_ids: bool,
         #[arg(long)]
         timeline: bool,
     },
@@ -91,6 +97,8 @@ enum Command {
         project: PathBuf,
         #[arg(long)]
         output: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        allow_empty: bool,
     },
     /// Export only validated project files, preserving identity and content hash.
     Snapshot {
@@ -201,9 +209,20 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Simulate {
             project,
             events,
+            from_ms,
+            until_ms,
+            motion_preview,
+            include_binding_ids,
+            timeline,
+        } => commands::simulate(
+            &project,
+            &events,
+            from_ms.unwrap_or(0),
             until_ms,
             timeline,
-        } => commands::simulate(&project, &events, until_ms, timeline),
+            motion_preview.as_deref(),
+            include_binding_ids,
+        ),
         Command::MediaInfo {
             path,
             frame,
@@ -239,8 +258,17 @@ fn run(cli: Cli) -> Result<(), String> {
             );
             Ok(())
         }
-        Command::Inspect { project, output } => {
-            let loaded = buddy_project::load_project(project).map_err(|e| e.to_string())?;
+        Command::Inspect {
+            project,
+            output,
+            allow_empty,
+        } => {
+            let loaded = if allow_empty {
+                buddy_project::load_editable_project(project)
+            } else {
+                buddy_project::load_project(project)
+            }
+            .map_err(|e| e.to_string())?;
             if let Some(dir) = output {
                 fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 for (name, bytes) in &loaded.render_assets {

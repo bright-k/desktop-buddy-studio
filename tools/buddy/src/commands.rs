@@ -42,9 +42,14 @@ pub fn input_probe(seconds: u64, request_permission: bool) -> Result<(), String>
                 InputEvent::Wheel { .. } | InputEvent::DiagonalWheel { .. } => "wheel",
                 InputEvent::CursorMove { .. } => "cursorMove",
                 InputEvent::Reset => "reset",
-                InputEvent::DragStart | InputEvent::DragEnd => "drag",
+                InputEvent::DragStart | InputEvent::DragEnd | InputEvent::DragDropped => "drag",
                 InputEvent::BuddyClick => "buddyClick",
+                InputEvent::BuddyLongPress => "buddyLongPress",
+                InputEvent::OverlayVisibility { .. } => "overlayVisibility",
                 InputEvent::Rearm { .. } => "rearm",
+                InputEvent::TimerCompleted { .. } => "timerCompleted",
+                InputEvent::TimerStarted { .. } => "timerStarted",
+                InputEvent::TimerPhaseChanged { .. } => "timerPhaseChanged",
             };
             *counts.entry(kind).or_default() += 1;
         }
@@ -62,6 +67,7 @@ pub fn new_project(directory: &Path, name: Option<String>, template: &str) -> Re
         return Err("Destination already exists; choose a new project directory".into());
     }
     let mascot = template == "click-mascot";
+    let empty = template == "empty";
     let source = if mascot {
         include_bytes!("../../../examples/click-mascot/buddy.project.json").as_slice()
     } else {
@@ -93,19 +99,28 @@ pub fn new_project(directory: &Path, name: Option<String>, template: &str) -> Re
     } else {
         include_bytes!("../../../examples/typing-cat/character/manifest.json").as_slice()
     };
-    let character =
+    let mut character: buddy_project::Character =
         buddy_project::parse_json(manifest, "template manifest").map_err(|e| e.to_string())?;
-    buddy_project::validate_parts(project.clone(), character).map_err(|e| e.to_string())?;
-    let files: [(&str, &[u8]); 4] = [
+    let blank_manifest;
+    let manifest = if empty {
+        project.bindings.clear();
+        character.id = "character".into();
+        character.name = project.product.name.clone();
+        character.image = None;
+        character.default_animation.clear();
+        character.animations.clear();
+        character.sheet.width = character.sheet.frame_width;
+        character.sheet.height = character.sheet.frame_height;
+        character.sheet.frame_count = 1;
+        blank_manifest = serde_json::to_vec_pretty(&character).map_err(|e| e.to_string())?;
+        &blank_manifest
+    } else {
+        manifest
+    };
+    buddy_project::validate_editable_parts(project.clone(), character)
+        .map_err(|e| e.to_string())?;
+    let mut files: Vec<(&str, &[u8])> = vec![
         ("character/manifest.json", manifest),
-        (
-            "character/sprite.png",
-            if mascot {
-                include_bytes!("../../../examples/click-mascot/character/sprite.png")
-            } else {
-                include_bytes!("../../../examples/typing-cat/character/sprite.png")
-            },
-        ),
         (
             "assets/app-icon.png",
             if mascot {
@@ -119,6 +134,16 @@ pub fn new_project(directory: &Path, name: Option<String>, template: &str) -> Re
             include_bytes!("../../../examples/typing-cat/character/LICENSE.txt"),
         ),
     ];
+    if !empty {
+        files.push((
+            "character/sprite.png",
+            if mascot {
+                include_bytes!("../../../examples/click-mascot/character/sprite.png")
+            } else {
+                include_bytes!("../../../examples/typing-cat/character/sprite.png")
+            },
+        ));
+    }
     fs::create_dir_all(directory).map_err(|e| e.to_string())?;
     for (name, bytes) in files {
         let path = directory.join(name);
@@ -144,11 +169,22 @@ struct TimedEvent {
     at_ms: u64,
     event: InputEvent,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MotionPreview {
+    binding_id: String,
+    seed: u32,
+    starts: u32,
+}
+
 pub fn simulate(
     project: &Path,
     events: &Path,
+    from_ms: u64,
     until_ms: Option<u64>,
     timeline: bool,
+    motion_preview: Option<&str>,
+    include_binding_ids: bool,
 ) -> Result<(), String> {
     let loaded = buddy_project::load_project(project).map_err(|e| e.to_string())?;
     let bytes = fs::read(events).map_err(|e| e.to_string())?;
@@ -156,6 +192,11 @@ pub fn simulate(
         .map_err(|e| e.to_string())?;
     if !events.windows(2).all(|pair| pair[0].at_ms <= pair[1].at_ms) {
         return Err("Synthetic event times must be monotonic".into());
+    }
+    let last_event = events.last().map_or(0, |event| event.at_ms);
+    let until = until_ms.unwrap_or(last_event.max(from_ms));
+    if from_ms > 3_600_000 || until < last_event || !(from_ms..=from_ms + 60_000).contains(&until) {
+        return Err("Simulation requires a start within one hour and a window of at most 60 seconds containing the final event".into());
     }
     let mut runtime = Runtime::new(
         loaded.data,
@@ -168,44 +209,64 @@ pub fn simulate(
         Point { x: 100.0, y: 100.0 },
         Point { x: 256.0, y: 256.0 },
     );
+    if let Some(spec) = motion_preview {
+        let preview: MotionPreview =
+            serde_json::from_str(spec).map_err(|e| format!("Invalid motion preview: {e}"))?;
+        if !runtime.prime_motion_variation(&preview.binding_id, preview.seed, preview.starts) {
+            return Err(
+                "Motion preview requires an existing variation and at most 10000 previous starts"
+                    .into(),
+            );
+        }
+    }
     let print = |at_ms: u64, runtime: &Runtime| {
-        if timeline {
+        if include_binding_ids || motion_preview.is_some() {
             println!(
                 "{}",
-                serde_json::json!({"atMs": at_ms, "state": runtime.state()})
+                json!({"atMs": at_ms - from_ms, "state": runtime.state(), "bindingId": runtime.displayed_binding_id()})
+            );
+        } else if timeline {
+            println!(
+                "{}",
+                serde_json::json!({"atMs": at_ms - from_ms, "state": runtime.state()})
             );
         } else {
             println!("{}", serde_json::to_string(&runtime.state()).unwrap());
         }
     };
+    let mut events = events.into_iter().peekable();
     let mut now = 0;
-    if timeline {
-        print(0, &runtime);
-    }
-    for event in events {
-        if event.at_ms > 60000 {
-            return Err("simulation maximum 60 seconds".into());
-        }
-        if timeline {
-            while now + 10 < event.at_ms {
-                now += 10;
-                runtime.advance(now);
+    loop {
+        let had_event = events.peek().is_some_and(|event| event.at_ms == now);
+        while events.peek().is_some_and(|event| event.at_ms == now) {
+            let event = events.next().unwrap();
+            runtime.handle(now, event.event);
+            if !timeline && events.peek().is_some_and(|event| event.at_ms == now) {
                 print(now, &runtime);
             }
         }
-        now = event.at_ms;
-        runtime.handle(now, event.event);
-        print(now, &runtime);
-    }
-    if let Some(until) = until_ms {
-        if until > 60000 || until < now {
-            return Err("invalid until-ms (maximum 60000)".into());
-        }
-        while now < until {
-            now = (now + 10).min(until);
-            runtime.advance(now);
+        runtime.tick(now);
+        if (timeline && now >= from_ms)
+            || (!timeline && (had_event || (until_ms.is_some() && now >= last_event && now > 0)))
+        {
             print(now, &runtime);
         }
+        if now == until {
+            break;
+        }
+        let next_event = events.peek().map_or(until, |event| event.at_ms);
+        let limit = if now < from_ms {
+            from_ms
+        } else if timeline || (until_ms.is_some() && now >= last_event) {
+            now + 10
+        } else {
+            next_event
+        };
+        let deadline = runtime
+            .next_deadline_ms()
+            .filter(|&due| due > now)
+            .unwrap_or(until);
+        now = next_event.min(limit).min(deadline).min(until);
     }
     Ok(())
 }

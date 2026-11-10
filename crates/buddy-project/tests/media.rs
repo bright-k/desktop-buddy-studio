@@ -111,6 +111,16 @@ fn resources_crops_hashes_and_gif_timing_survive_loading() {
     let prepared = dir.path().join("prepared-render");
     write_prepared_rendering(&selected, &prepared).unwrap();
     let packaged = load_project_with_prepared(dir.path(), &prepared).unwrap();
+    let player = load_player_project(dir.path(), &prepared).unwrap();
+    assert_eq!(player.content_hash, packaged.content_hash);
+    assert_eq!(player.prepared_render_paths, packaged.prepared_render_paths);
+    assert!(player.render_assets.is_empty());
+    assert!(player.files.values().all(|asset| asset.bytes.is_empty()));
+    let sprite = "character/sprite.png";
+    assert_eq!(
+        player.files[sprite].read_verified().unwrap(),
+        packaged.files[sprite].bytes
+    );
     assert!(packaged.render_assets.is_empty());
     assert_eq!(
         serde_json::to_value(&packaged.data.render_plan).unwrap(),
@@ -123,6 +133,13 @@ fn resources_crops_hashes_and_gif_timing_survive_loading() {
     let recovered = load_project_with_prepared(dir.path(), &prepared).unwrap();
     assert!(recovered.prepared_render_paths.is_empty());
     assert_eq!(recovered.render_assets, selected.render_assets);
+    let recovered_player = load_player_project(dir.path(), &prepared).unwrap();
+    assert!(recovered_player.prepared_render_paths.is_empty());
+    assert_eq!(recovered_player.render_assets, selected.render_assets);
+    assert!(recovered_player
+        .files
+        .values()
+        .all(|asset| asset.bytes.is_empty()));
 
     write_prepared_rendering(&selected, &prepared).unwrap();
     fs::write(dir.path().join("character/LICENSE.txt"), "updated license").unwrap();

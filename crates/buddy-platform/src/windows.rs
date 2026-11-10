@@ -30,6 +30,34 @@ use windows_sys::Win32::{
 mod touchpad;
 use touchpad::Touchpads;
 
+pub(crate) fn desktop_available() -> bool {
+    unsafe {
+        let mut buffer = ptr::null_mut();
+        let mut length = 0;
+        if WTSQuerySessionInformationW(
+            ptr::null_mut(),
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buffer,
+            &mut length,
+        ) == 0
+            || buffer.is_null()
+        {
+            return false;
+        }
+        let available = if length as usize >= size_of::<WTSINFOEXW>() {
+            let info = &*buffer.cast::<WTSINFOEXW>();
+            info.Level == 1
+                && info.Data.WTSInfoExLevel1.SessionState == WTSActive
+                && info.Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_UNLOCK as i32
+        } else {
+            false
+        };
+        WTSFreeMemory(buffer.cast());
+        available
+    }
+}
+
 struct Context {
     sender: EventSender,
     devices: BTreeMap<usize, BTreeMap<String, u16>>,
@@ -297,7 +325,11 @@ unsafe fn mouse(context: &mut Context, mouse: RAWMOUSE, anonymous: bool, receive
                         y: i32::from((position >> 16) as i16),
                     };
                     let hit = WindowFromPoint(point);
-                    (!hit.is_null()).then(|| GetAncestor(hit, GA_ROOT) as usize)
+                    let mut owner = 0;
+                    if !hit.is_null() {
+                        GetWindowThreadProcessId(GetAncestor(hit, GA_ROOT), &mut owner);
+                    }
+                    (owner != 0).then_some(owner as usize)
                 } else {
                     None
                 };
@@ -371,7 +403,7 @@ pub(crate) fn run(
     status: Arc<Mutex<InputStatus>>,
     stop: Arc<AtomicBool>,
     ready: SyncSender<()>,
-    overlay: Option<usize>,
+    targets: Vec<usize>,
 ) {
     if !options.keyboard && !options.mouse {
         let _ = ready.send(());
@@ -387,7 +419,7 @@ pub(crate) fn run(
         options,
         status: status.clone(),
         rearm_keys: BTreeMap::new(),
-        overlay_mouse: OverlayMouseRoute::new(overlay),
+        overlay_mouse: OverlayMouseRoute::new(targets),
         queue_epoch: 0,
         touchpads: Touchpads::default(),
         scroll_sources: ScrollSources::default(),

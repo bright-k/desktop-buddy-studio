@@ -5,6 +5,7 @@ export function settingsValues(status: RuntimeStatus): SettingsValues {
   return {
     keyboard: status.keyboard, mouse: status.mouse, movement: status.movementEnabled,
     "cursor-follow": status.cursorFollow,
+    "sound-enabled": status.soundEnabled,
     top: status.alwaysOnTop, scale: String(Math.round(status.scale * 100)), monitor: status.basePlacement.monitorHint,
     "position-x": String(Math.round(status.basePlacement.position.x)), "position-y": String(Math.round(status.basePlacement.position.y)),
     "idle-timeout": String(status.timing.idleTimeoutMs), "rate-stability": String(status.timing.rateStabilityMs),
@@ -35,6 +36,7 @@ export function settingsUpdate(values: SettingsValues, baseline: SettingsValues 
   return {
     keyboard: toggle("keyboard"), mouse: toggle("mouse"), movementEnabled: toggle("movement"),
     cursorFollow: toggle("cursor-follow"),
+    soundEnabled: toggle("sound-enabled"),
     alwaysOnTop: toggle("top"), scale: changed("scale") ? number("scale", 25, 300) / 100 : null,
     timing: changed("idle-timeout", "rate-evaluation", "rate-window", "rate-stability")
       ? { idleTimeoutMs, rateEvaluationMs, rateWindowMs: milliseconds("rate-window", 100, 10000), rateStabilityMs: milliseconds("rate-stability", 0, 2000) }

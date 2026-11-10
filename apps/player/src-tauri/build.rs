@@ -2,6 +2,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "get_bootstrap",
+            "read_render_frame",
             "read_reaction_audio",
             "subscribe_character_state",
             "ack_character_frame",
@@ -19,6 +20,11 @@ fn main() {
             "cancel_character_edit",
             "character_click",
             "show_buddy_menu",
+            "get_timer",
+            "timer_action",
+            "open_timer_from_badge",
+            "get_timer_quick",
+            "finish_timer_quick",
         ]),
     ))
     .expect("Tauri build configuration");

@@ -3,9 +3,9 @@ use crate::{
     PerformanceSnapshot, ReactionEnd, Rect, PROTOCOL_VERSION,
 };
 use buddy_project::{
-    is_modifier, is_supported_key, CursorDirection, Effect, Interruption, KeyModifier, MouseButton,
-    Point, PointerInput, Retrigger, SoundCue, SourceFacing, Trigger, ValidatedProject,
-    WheelDirection,
+    is_modifier, is_supported_key, CursorDirection, Effect, IdleCursorMode, Interruption,
+    KeyModifier, MotionVariation, MotionVariationMode, MouseButton, Point, PointerInput, Retrigger,
+    SoundCue, SourceFacing, TimerCompletion, TimerPhase, Trigger, ValidatedProject, WheelDirection,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -51,12 +51,140 @@ pub struct RuntimeDiagnostics {
 
 struct OneShot {
     binding: usize,
+    animation: String,
     ends_at: u64,
     exact_keys: bool,
+}
+struct MotionOrder {
+    next: usize,
+    deck: Vec<usize>,
+    rng: fastrand::Rng,
+}
+impl MotionOrder {
+    fn new(rng: fastrand::Rng) -> Self {
+        Self {
+            next: 0,
+            deck: Vec::new(),
+            rng,
+        }
+    }
+
+    fn take(&mut self, variation: &MotionVariation) -> usize {
+        let count = 1 + variation.alternatives.len();
+        match variation.mode {
+            MotionVariationMode::Cycle => {
+                let choice = self.next;
+                self.next = (self.next + 1) % count;
+                choice
+            }
+            MotionVariationMode::Shuffle => {
+                if self.next == self.deck.len() {
+                    let previous = self.deck.last().copied();
+                    self.deck.clear();
+                    self.deck.extend(0..count);
+                    self.rng.shuffle(&mut self.deck);
+                    if Some(self.deck[0]) == previous {
+                        self.deck.swap(0, self.rng.usize(1..count));
+                    }
+                    self.next = 0;
+                }
+                let choice = self.deck[self.next];
+                self.next += 1;
+                choice
+            }
+            MotionVariationMode::Weighted => {
+                let weights = variation
+                    .weights
+                    .as_deref()
+                    .expect("validated motion weights");
+                let total = weights.iter().copied().map(u32::from).sum::<u32>();
+                let mut ticket = self.rng.u32(..total);
+                for (index, &weight) in weights.iter().enumerate() {
+                    let weight = u32::from(weight);
+                    if ticket < weight {
+                        return index;
+                    }
+                    ticket -= weight;
+                }
+                unreachable!("ticket is below the total weight");
+            }
+        }
+    }
 }
 struct PendingBand {
     band: Option<usize>,
     since: u64,
+}
+
+struct IdleTimer {
+    binding: usize,
+    interval: u64,
+    due: u64,
+}
+
+struct TypingBurst {
+    first_at: u64,
+    last_at: u64,
+    keys: u32,
+}
+
+struct TypingStop {
+    binding: usize,
+    min_typing_ms: u64,
+    min_keys: u32,
+    pause_ms: u64,
+    min_interval_ms: u64,
+    burst: Option<TypingBurst>,
+    last_reaction: Option<u64>,
+}
+
+impl TypingStop {
+    fn observe(&mut self, at: u64) {
+        if let Some(burst) = &mut self.burst {
+            if at <= burst.last_at.saturating_add(self.pause_ms) {
+                burst.last_at = burst.last_at.max(at);
+                burst.keys = (burst.keys + 1).min(self.min_keys);
+                return;
+            }
+        }
+        self.burst = Some(TypingBurst {
+            first_at: at,
+            last_at: at,
+            keys: 1,
+        });
+    }
+
+    fn deadline(&self) -> Option<u64> {
+        let burst = self.burst.as_ref()?;
+        (burst.keys >= self.min_keys && burst.last_at - burst.first_at >= self.min_typing_ms)
+            .then(|| burst.last_at.saturating_add(self.pause_ms))
+    }
+
+    fn take_due(&mut self, now: u64) -> Option<usize> {
+        let due = self.deadline()?;
+        let overdue = now.checked_sub(due)?;
+        self.burst = None;
+        // A stalled worker should not replay a reaction long after the typing ended.
+        (overdue <= 500
+            && self
+                .last_reaction
+                .is_none_or(|last| due.saturating_sub(last) >= self.min_interval_ms))
+        .then_some(self.binding)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TimerReaction {
+    Started(TimerPhase),
+    Completed(TimerCompletion),
+}
+impl TimerReaction {
+    fn matches(self, trigger: &Trigger) -> bool {
+        match self {
+            Self::Started(phase) => trigger.matches_timer_start(phase),
+            Self::Completed(phase) => trigger.matches_timer_completion(phase),
+        }
+    }
 }
 
 pub struct Runtime {
@@ -69,13 +197,23 @@ pub struct Runtime {
     move_blocked: BTreeSet<String>,
     matchers: Vec<(usize, SequenceMatcher)>,
     last_start: Vec<Option<u64>>,
+    motion_orders: Vec<Option<MotionOrder>>,
     rate_times: VecDeque<u64>,
     diagnostics: RuntimeDiagnostics,
     performance: FramePerformance,
     rate_band: Option<usize>,
     pending_band: Option<PendingBand>,
     rate_next: Option<u64>,
+    typing_stop: Option<TypingStop>,
     one_shot: Option<OneShot>,
+    visible: bool,
+    ever_shown: bool,
+    pending_show: Option<bool>,
+    pending_timer: Option<(TimerReaction, u64)>,
+    timer_phase: Option<TimerPhase>,
+    idle_group: Option<usize>,
+    idle_timers: Vec<IdleTimer>,
+    timing_idle: bool,
     now: u64,
     epoch: u32,
     bounds: Rect,
@@ -127,6 +265,60 @@ impl Runtime {
         let count = data.project.bindings.len();
         let display = data.character.default_animation.clone();
         let follow_config = data.project.cursor_follow.clone().unwrap_or_default();
+        let motion_orders = data
+            .project
+            .bindings
+            .iter()
+            .map(|binding| {
+                matches!(
+                    binding.effect,
+                    Effect::PlayAnimation {
+                        variation: Some(_),
+                        ..
+                    }
+                )
+                .then(|| MotionOrder::new(fastrand::Rng::new()))
+            })
+            .collect();
+        let idle_timers = data
+            .project
+            .bindings
+            .iter()
+            .enumerate()
+            .filter_map(|(binding, entry)| {
+                let Trigger::IdleFor { seconds } = entry.trigger else {
+                    return None;
+                };
+                let interval = u64::from(seconds) * 1000;
+                Some(IdleTimer {
+                    binding,
+                    interval,
+                    due: interval,
+                })
+            })
+            .collect();
+        let typing_stop = data
+            .project
+            .bindings
+            .iter()
+            .enumerate()
+            .find_map(|(binding, entry)| match entry.trigger {
+                Trigger::TypingStopped {
+                    min_typing_seconds,
+                    min_keys,
+                    pause_ms,
+                    min_interval_seconds,
+                } => Some(TypingStop {
+                    binding,
+                    min_typing_ms: u64::from(min_typing_seconds) * 1000,
+                    min_keys,
+                    pause_ms: u64::from(pause_ms),
+                    min_interval_ms: u64::from(min_interval_seconds) * 1000,
+                    burst: None,
+                    last_reaction: None,
+                }),
+                _ => None,
+            });
         Self {
             data,
             controls,
@@ -137,13 +329,25 @@ impl Runtime {
             move_blocked: BTreeSet::new(),
             matchers,
             last_start: vec![None; count],
+            motion_orders,
             rate_times: VecDeque::new(),
             diagnostics: RuntimeDiagnostics::default(),
             performance: FramePerformance::default(),
             rate_band: None,
             pending_band: None,
             rate_next: None,
+            typing_stop,
             one_shot: None,
+            // In-process simulations start on a desktop with the buddy visible.
+            // The native overlay explicitly starts hidden before its first draw.
+            visible: true,
+            ever_shown: false,
+            pending_show: None,
+            pending_timer: None,
+            timer_phase: None,
+            idle_group: None,
+            idle_timers,
+            timing_idle: true,
             now: 0,
             epoch: 0,
             bounds,
@@ -168,6 +372,38 @@ impl Runtime {
     }
     pub fn project(&self) -> &ValidatedProject {
         &self.data
+    }
+    /// Resume an event's selection order in a fresh Studio simulation.
+    pub fn prime_motion_variation(&mut self, binding_id: &str, seed: u32, starts: u32) -> bool {
+        if starts > 10_000 {
+            return false;
+        }
+        let Some(index) = self
+            .data
+            .project
+            .bindings
+            .iter()
+            .position(|b| b.id == binding_id)
+        else {
+            return false;
+        };
+        let Effect::PlayAnimation {
+            variation: Some(variation),
+            ..
+        } = &self.data.project.bindings[index].effect
+        else {
+            return false;
+        };
+        let mut order = MotionOrder::new(fastrand::Rng::with_seed(u64::from(seed)));
+        for _ in 0..starts {
+            order.take(variation);
+        }
+        self.motion_orders[index] = Some(order);
+        true
+    }
+    pub fn displayed_binding_id(&self) -> Option<&str> {
+        self.display_binding
+            .map(|index| self.data.project.bindings[index].id.as_str())
     }
     pub fn set_timing(&mut self, now: u64, timing: buddy_project::Timing) {
         if timing.is_valid() && self.data.project.defaults.timing != timing {
@@ -205,7 +441,14 @@ impl Runtime {
         self.rate_band = None;
         self.pending_band = None;
         self.rate_next = None;
-        self.last_start.fill(None);
+        if let Some(typing) = &mut self.typing_stop {
+            typing.burst = None;
+        }
+        for (last_start, binding) in self.last_start.iter_mut().zip(&self.data.project.bindings) {
+            if !binding.trigger.is_automatic() {
+                *last_start = None;
+            }
+        }
         self.one_shot = None;
         self.shot_release = None;
         self.dragging = false;
@@ -221,6 +464,9 @@ impl Runtime {
             || self.controls.mouse != controls.mouse
         {
             self.controls = controls;
+            if !controls.active {
+                self.pending_show = None;
+            }
             self.reset(now);
         } else {
             if self.controls.movement_enabled != controls.movement_enabled {
@@ -235,7 +481,11 @@ impl Runtime {
         self.advance(now);
         self.bounds = bounds;
         self.size = size;
-        self.position = bounds.clamp(position.x, position.y, size);
+        let position = bounds.clamp(position.x, position.y, size);
+        if position != self.position {
+            self.timing_idle = false;
+        }
+        self.position = position;
         self.sync_display(false);
     }
     pub fn set_drag_cursor(&mut self, cursor: Point) {
@@ -249,6 +499,64 @@ impl Runtime {
         center: Point,
     ) {
         self.native_follow = Some((enabled, target, center));
+    }
+    pub fn set_overlay_visible(&mut self, now: u64, visible: bool) {
+        if self.visible == visible && (!visible || self.ever_shown) {
+            return;
+        }
+        self.advance(now);
+        self.visible = visible;
+        if visible {
+            self.pending_show = Some(!self.ever_shown);
+            self.ever_shown = true;
+        } else {
+            self.pending_show = None;
+            self.pending_timer = None;
+            if let Some(typing) = &mut self.typing_stop {
+                typing.burst = None;
+            }
+        }
+        self.sync_display(false);
+    }
+    pub fn cancel_timer_reaction(&mut self) {
+        self.pending_timer = None;
+    }
+    pub fn timer_reaction_pending(&self) -> bool {
+        self.pending_timer.is_some()
+    }
+    pub fn set_timer_phase(&mut self, now: u64, phase: Option<TimerPhase>) {
+        if self.timer_phase == phase {
+            return;
+        }
+        self.advance(now);
+        self.timer_phase = phase;
+        self.idle_group = phase.and_then(|phase| {
+            self.data
+                .project
+                .idle_groups
+                .iter()
+                .position(|group| group.states.contains(&phase))
+        });
+        if matches!(self.pending_timer, Some((TimerReaction::Started(started), _)) if Some(started) != phase)
+        {
+            self.pending_timer = None;
+        }
+        if self.one_shot.as_ref().is_some_and(|shot| {
+            matches!(
+                self.data.project.bindings[shot.binding].trigger,
+                Trigger::TimerStarted { .. }
+            )
+        }) {
+            self.performance.end(
+                self.now,
+                self.epoch,
+                self.action_instance,
+                ReactionEnd::Cancelled,
+            );
+            self.one_shot = None;
+            self.shot_release = None;
+        }
+        self.sync_display(false);
     }
     pub fn handle(&mut self, now: u64, event: InputEvent) {
         self.handle_received(now, now, event);
@@ -292,7 +600,50 @@ impl Runtime {
         event: InputEvent,
         started_in_sample: Option<usize>,
     ) -> Option<usize> {
+        if let InputEvent::OverlayVisibility { visible } = event {
+            self.set_overlay_visible(now, visible);
+            return None;
+        }
+        if let InputEvent::TimerPhaseChanged { phase } = event {
+            if self
+                .data
+                .project
+                .timer
+                .as_ref()
+                .is_some_and(|timer| timer.enabled)
+            {
+                self.set_timer_phase(now, phase);
+            }
+            return None;
+        }
         self.advance(now);
+        let timer_reaction = match event {
+            InputEvent::TimerStarted { phase } => Some(TimerReaction::Started(phase)),
+            InputEvent::TimerCompleted { phase } => Some(TimerReaction::Completed(phase)),
+            _ => None,
+        };
+        if let Some(reaction) = timer_reaction {
+            if self.visible
+                && self
+                    .data
+                    .project
+                    .timer
+                    .as_ref()
+                    .is_some_and(|timer| timer.enabled)
+                && self
+                    .data
+                    .project
+                    .bindings
+                    .iter()
+                    .any(|binding| reaction.matches(&binding.trigger))
+            {
+                self.pending_timer = Some((reaction, self.now.saturating_add(3000)));
+            }
+            return None;
+        }
+        if matches!(event, InputEvent::DragDropped) {
+            self.timing_idle = false;
+        }
         if matches!(event, InputEvent::DragStart | InputEvent::DragEnd) {
             self.dragging = matches!(event, InputEvent::DragStart);
             if !self.dragging {
@@ -358,10 +709,13 @@ impl Runtime {
             &event,
             InputEvent::KeyDown { .. } | InputEvent::KeyUp { .. }
         );
-        let buddy_click = matches!(&event, InputEvent::BuddyClick);
+        let direct = matches!(
+            &event,
+            InputEvent::BuddyClick | InputEvent::BuddyLongPress | InputEvent::DragDropped
+        );
         if (keyboard && !self.controls.keyboard)
-            || (!keyboard && !buddy_click && !self.controls.mouse)
-            || (buddy_click && self.dragging)
+            || (!keyboard && !direct && !self.controls.mouse)
+            || (direct && self.dragging)
         {
             return None;
         }
@@ -375,25 +729,29 @@ impl Runtime {
                 if self.blocked.contains(code) || (*repeat && !self.held.contains(code)) {
                     return None;
                 }
-                if !repeat {
-                    self.held.insert(code.clone());
-                    if !is_modifier(code) {
-                        if self.rate_times.len() >= 2000 {
-                            self.diagnostics.rate_overflow_resets =
-                                self.diagnostics.rate_overflow_resets.saturating_add(1);
-                            self.rate_times.clear();
-                            self.rate_band = None;
-                            self.pending_band = None;
-                        }
-                        self.rate_times.push_back(self.now);
-                        if self.rate_next.is_none() {
-                            self.rate_next = Some(self.now);
-                        }
+                let fresh_press = !repeat && self.held.insert(code.clone());
+                if !repeat && !is_modifier(code) {
+                    if self.rate_times.len() >= 2000 {
+                        self.diagnostics.rate_overflow_resets =
+                            self.diagnostics.rate_overflow_resets.saturating_add(1);
+                        self.rate_times.clear();
+                        self.rate_band = None;
+                        self.pending_band = None;
+                    }
+                    self.rate_times.push_back(self.now);
+                    if self.rate_next.is_none() {
+                        self.rate_next = Some(self.now);
                     }
                 }
                 let shortcut = self.held.iter().chain(self.blocked.iter()).any(|key| {
                     key.starts_with("Control") || key.starts_with("Alt") || key.starts_with("Meta")
                 });
+                if fresh_press && !shortcut && self.visible && !self.dragging && is_typing_key(code)
+                {
+                    if let Some(typing) = &mut self.typing_stop {
+                        typing.observe(received_at.min(self.now));
+                    }
+                }
                 if shortcut || matches!(code.as_str(), "Backspace" | "Delete") {
                     self.reset_matchers();
                 } else if !repeat && !is_modifier(code) {
@@ -416,7 +774,7 @@ impl Runtime {
                 }
                 self.reset_matchers();
             }
-            InputEvent::BuddyClick => self.reset_matchers(),
+            InputEvent::BuddyClick | InputEvent::BuddyLongPress => self.reset_matchers(),
             InputEvent::CursorMove { x, y } if x.is_finite() && y.is_finite() => {
                 self.cursor = Some(Point { x: *x, y: *y })
             }
@@ -465,6 +823,8 @@ impl Runtime {
                         (button == input).then_some(false)
                     }
                     (Trigger::BuddyClick, InputEvent::BuddyClick) => Some(false),
+                    (Trigger::BuddyLongPress { .. }, InputEvent::BuddyLongPress) => Some(false),
+                    (Trigger::DragDropped, InputEvent::DragDropped) => Some(false),
                     (Trigger::Wheel { direction }, InputEvent::Wheel { direction: input }) => {
                         (direction == input).then_some(false)
                     }
@@ -480,15 +840,8 @@ impl Runtime {
                 if started_in_sample == Some(index) {
                     return Some((index, exact_keys));
                 }
-                if let Effect::PlayAnimation {
-                    cooldown_ms,
-                    retrigger,
-                    ..
-                } = binding.effect
-                {
-                    if self.last_start[index].is_some_and(|start| {
-                        self.now.saturating_sub(start) < u64::from(cooldown_ms)
-                    }) {
+                if let Effect::PlayAnimation { retrigger, .. } = binding.effect {
+                    if self.cooling_down(index) {
                         cooldown_count += 1;
                         return None;
                     }
@@ -599,6 +952,142 @@ impl Runtime {
             self.movement_facing_left = Some(dx < 0.0);
         }
         self.sync_display(false);
+    }
+    /// Evaluate automatic events after applying all input in the current batch.
+    pub fn tick(&mut self, now: u64) {
+        self.advance(now);
+        let appearance = self.pending_show.take();
+        let timer = self.pending_timer.and_then(|(reaction, expires)| {
+            if self.now >= expires {
+                self.pending_timer = None;
+                return None;
+            }
+            let available = self.visible
+                && self.controls.active
+                && !self.dragging
+                && !self.movement_available()
+                && (matches!(
+                    self.display_source,
+                    AnimationSource::Idle | AnimationSource::TypingRate
+                ) || self.one_shot.as_ref().is_some_and(|shot| {
+                    self.data.project.bindings[shot.binding]
+                        .trigger
+                        .is_automatic()
+                }));
+            if !available {
+                return None;
+            }
+            let candidate = self
+                .data
+                .project
+                .bindings
+                .iter()
+                .enumerate()
+                .filter(|(index, binding)| {
+                    reaction.matches(&binding.trigger) && !self.cooling_down(*index)
+                })
+                .map(|(index, _)| index)
+                .max_by_key(|&index| self.priority(index, false));
+            if candidate.is_none() {
+                self.pending_timer = None;
+            }
+            candidate
+        });
+        let typing = self
+            .typing_stop
+            .as_mut()
+            .and_then(|typing| typing.take_due(self.now));
+        let idle_due =
+            self.timing_idle && self.idle_timers.iter().any(|timer| self.now >= timer.due);
+        if timer.is_none() && typing.is_none() && appearance.is_none() && !idle_due {
+            return;
+        }
+        let can_start = self.visible && self.controls.active && !self.movement_available();
+        let typing = typing.filter(|&index| {
+            can_start
+                && self.controls.keyboard
+                && matches!(
+                    self.display_source,
+                    AnimationSource::Idle | AnimationSource::TypingRate
+                )
+                && !self.cooling_down(index)
+        });
+        let bindings = &self.data.project.bindings;
+        let show = appearance.into_iter().flat_map(|first| {
+            bindings
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, binding)| {
+                    matches!(
+                        (&binding.trigger, first),
+                        (Trigger::FirstShown, true) | (Trigger::ShownAgain, false)
+                    )
+                    .then_some(index)
+                })
+        });
+        let idle = self
+            .idle_timers
+            .iter()
+            .filter(|timer| idle_due && self.now >= timer.due)
+            .map(|timer| timer.binding);
+        let winner = typing.or_else(|| {
+            if can_start && self.display_source == AnimationSource::Idle {
+                show.chain(idle)
+                    .filter(|&index| !self.cooling_down(index))
+                    .max_by_key(|&index| self.priority(index, false))
+            } else {
+                None
+            }
+        });
+        if idle_due {
+            for timer in &mut self.idle_timers {
+                if self.now >= timer.due {
+                    timer.due = self.now.saturating_add(timer.interval);
+                }
+            }
+        }
+        if timer.is_some_and(|index| self.try_start(index, false, self.now)) {
+            self.pending_timer = None;
+        } else if let Some(index) = winner {
+            if self.try_start(index, false, self.now) {
+                if typing == Some(index) {
+                    if let Some(typing) = &mut self.typing_stop {
+                        typing.last_reaction = Some(self.now);
+                    }
+                }
+                let ends_at = self.one_shot.as_ref().unwrap().ends_at;
+                if let Some(timer) = self
+                    .idle_timers
+                    .iter_mut()
+                    .find(|timer| timer.binding == index)
+                {
+                    timer.due = ends_at.saturating_add(timer.interval);
+                }
+            }
+        }
+    }
+    fn cooling_down(&self, index: usize) -> bool {
+        let Effect::PlayAnimation { cooldown_ms, .. } = self.data.project.bindings[index].effect
+        else {
+            return false;
+        };
+        self.last_start[index]
+            .is_some_and(|start| self.now.saturating_sub(start) < u64::from(cooldown_ms))
+    }
+    fn movement_available(&self) -> bool {
+        if self.moving {
+            return true;
+        }
+        let velocity = self.movement_vector();
+        if velocity == Point::default() {
+            return self.follow_motion().is_some();
+        }
+        // Held movement takes precedence over following, even at an edge.
+        self.bounds.clamp(
+            self.position.x + velocity.x * 0.016,
+            self.position.y + velocity.y * 0.016,
+            self.size,
+        ) != self.position
     }
     fn follow_motion(&self) -> Option<FollowMotion> {
         let config = &self.follow_config;
@@ -717,6 +1206,12 @@ impl Runtime {
         (priority, exact_keys, Reverse(index))
     }
     fn can_interrupt(&self, incoming: usize, exact_keys: bool, current: &OneShot) -> bool {
+        if self.data.project.bindings[current.binding]
+            .trigger
+            .is_automatic()
+        {
+            return true;
+        }
         let Effect::PlayAnimation { interruption, .. } =
             self.data.project.bindings[current.binding].effect
         else {
@@ -751,10 +1246,24 @@ impl Runtime {
         }
         if let Effect::PlayAnimation {
             animation,
+            variation,
             duration_ms,
             ..
         } = &self.data.project.bindings[index].effect
         {
+            let animation = if let Some(variation) = variation {
+                let order = self.motion_orders[index]
+                    .as_mut()
+                    .expect("validated motion order");
+                let choice = order.take(variation);
+                if choice == 0 {
+                    animation
+                } else {
+                    &variation.alternatives[choice - 1]
+                }
+            } else {
+                animation
+            };
             let clip = &self.data.render_plan.animations[animation];
             let duration = duration_ms.map(u64::from).unwrap_or_else(|| {
                 clip.frames
@@ -783,6 +1292,7 @@ impl Runtime {
             }
             self.one_shot = Some(OneShot {
                 binding: index,
+                animation: animation.clone(),
                 ends_at: self.now.saturating_add(duration),
                 exact_keys,
             });
@@ -939,13 +1449,16 @@ impl Runtime {
         self.continuous_binding = continuous_binding;
         // A held key or rate band can interrupt on activation, not on every tick.
         // A continuous condition that arrived with a one-shot is resolved at its start.
-        if !force
-            && self.one_shot.as_ref().is_some_and(|shot| {
-                newly_active.is_some_and(|(incoming, _, exact_keys)| {
-                    self.can_interrupt(incoming, exact_keys, shot)
-                })
-            })
-        {
+        if self.one_shot.as_ref().is_some_and(|shot| {
+            let automatic = self.data.project.bindings[shot.binding]
+                .trigger
+                .is_automatic();
+            (automatic && (!self.visible || self.dragging || self.movement_available()))
+                || (!force
+                    && newly_active.is_some_and(|(incoming, _, exact_keys)| {
+                        self.can_interrupt(incoming, exact_keys, shot)
+                    }))
+        }) {
             self.performance.end(
                 self.now,
                 self.epoch,
@@ -974,10 +1487,16 @@ impl Runtime {
         } else {
             (None, AnimationSource::Idle)
         };
+        let idle_group = self
+            .idle_group
+            .filter(|_| source == AnimationSource::Idle)
+            .map(|index| &self.data.project.idle_groups[index]);
         let mut animation = binding
             .and_then(|index| match &self.data.project.bindings[index].effect {
-                Effect::PlayAnimation { animation, .. }
-                | Effect::SustainAnimation { animation, .. } => Some(animation.as_str()),
+                Effect::PlayAnimation { .. } => {
+                    self.one_shot.as_ref().map(|shot| shot.animation.as_str())
+                }
+                Effect::SustainAnimation { animation, .. } => Some(animation.as_str()),
                 Effect::Move { animation, .. } => animation.as_deref(),
                 Effect::FaceCursor { .. } => None,
             })
@@ -990,6 +1509,7 @@ impl Runtime {
                     None
                 }
             })
+            .or_else(|| idle_group.and_then(|group| group.animation.as_deref()))
             .unwrap_or(&self.data.character.default_animation);
         let mut target_left = self.movement_facing_left;
         let mut mirror_override = None;
@@ -1011,14 +1531,20 @@ impl Runtime {
                     target_left = Some(cursor.x < self.position.x + self.size.x / 2.0);
                 }
             } else if source == AnimationSource::Idle {
-                let directions = match &self.data.project.idle {
-                    Some(idle) => idle.cursor_enabled.then_some(Some(&idle.directions)),
-                    None => self.data.project.bindings.iter().find_map(|binding| {
-                        match &binding.effect {
-                            Effect::FaceCursor { directions } => Some(directions.as_ref()),
-                            _ => None,
+                let directions = match idle_group.map(|group| group.cursor_mode) {
+                    Some(IdleCursorMode::Off) => None,
+                    Some(IdleCursorMode::Custom) => idle_group.map(|group| Some(&group.directions)),
+                    _ => match &self.data.project.idle {
+                        Some(idle) => idle.cursor_enabled.then_some(Some(&idle.directions)),
+                        None => {
+                            self.data.project.bindings.iter().find_map(|binding| {
+                                match &binding.effect {
+                                    Effect::FaceCursor { directions } => Some(directions.as_ref()),
+                                    _ => None,
+                                }
+                            })
                         }
-                    }),
+                    },
                 };
                 if let Some(directions) = directions {
                     let direction = self.cursor_direction(cursor);
@@ -1048,6 +1574,26 @@ impl Runtime {
             self.display_binding = binding;
             self.animation_started_at = self.now;
             self.action_instance = self.action_instance.wrapping_add(1);
+        }
+        if !self.idle_timers.is_empty() {
+            // Direction-specific idle clips and fidgets belong to the same
+            // idle stretch. A real action or movement starts a fresh stretch.
+            let idle = self.controls.active
+                && self.visible
+                && !self.movement_available()
+                && (source == AnimationSource::Idle
+                    || self.one_shot.as_ref().is_some_and(|shot| {
+                        matches!(
+                            self.data.project.bindings[shot.binding].trigger,
+                            Trigger::IdleFor { .. }
+                        )
+                    }));
+            if idle && !self.timing_idle {
+                for timer in &mut self.idle_timers {
+                    timer.due = self.now.saturating_add(timer.interval);
+                }
+            }
+            self.timing_idle = idle;
         }
     }
     pub fn diagnostics(&self) -> RuntimeDiagnostics {
@@ -1100,8 +1646,13 @@ impl Runtime {
         [
             movement,
             self.rate_next,
+            self.typing_stop.as_ref().and_then(TypingStop::deadline),
+            self.pending_timer.map(|(_, expires)| expires),
             self.one_shot.as_ref().map(|shot| shot.ends_at),
             self.performance.next_deadline(),
+            self.timing_idle
+                .then(|| self.idle_timers.iter().map(|timer| timer.due).min())
+                .flatten(),
         ]
         .into_iter()
         .flatten()
@@ -1118,6 +1669,27 @@ struct FollowMotion {
 
 fn key_matches(pattern: &str, input: &str) -> bool {
     pattern == input || (pattern == "*" && is_supported_key(input) && !is_modifier(input))
+}
+
+fn is_typing_key(code: &str) -> bool {
+    // The caller already checked that this is a supported physical key.
+    code.starts_with("Key")
+        || code.starts_with("Digit")
+        || matches!(
+            code,
+            "Space"
+                | "Backquote"
+                | "Minus"
+                | "Equal"
+                | "BracketLeft"
+                | "BracketRight"
+                | "Backslash"
+                | "Semicolon"
+                | "Quote"
+                | "Comma"
+                | "Period"
+                | "Slash"
+        )
 }
 
 fn key_match_rank(trigger: &Trigger, input: &str, active: u8) -> Option<bool> {
