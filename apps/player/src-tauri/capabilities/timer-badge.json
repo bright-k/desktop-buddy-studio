@@ -1,0 +1,5 @@
+{
+  "identifier": "timer-badge",
+  "windows": ["timer-badge"],
+  "permissions": ["allow-get-timer", "allow-open-timer-from-badge", "core:event:allow-listen", "core:event:allow-unlisten"]
+}

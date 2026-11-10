@@ -1,0 +1,20 @@
+[package]
+name = "buddy-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "buddy"
+path = "src/main.rs"
+
+[dependencies]
+buddy-project = { path = "../../crates/buddy-project" }
+buddy-runtime = { path = "../../crates/buddy-runtime" }
+buddy-platform = { path = "../../crates/buddy-platform" }
+buddy-builder = { path = "../../crates/buddy-builder" }
+serde_json.workspace = true
+serde.workspace = true
+uuid.workspace = true
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3.5"

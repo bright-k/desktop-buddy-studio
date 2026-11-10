@@ -1,0 +1,104 @@
+/* Shared system palette for the settings, timer, and small overlay controls. */
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  background: transparent;
+  color: var(--player-ink);
+  --player-ink: #252723;
+  --player-muted: #565e53;
+  --player-bg: #f6f7f2;
+  --player-surface: #fffefa;
+  --player-soft: #eef1e9;
+  --player-line: #d8dcd1;
+  --player-accent: #235448;
+  --player-accent-hover: #194439;
+  --player-on-accent: #ffffff;
+  --player-focus: #246950;
+  --player-warning: #fff1d7;
+  --player-error: #942929;
+  --player-scrim: #17251f66;
+  --player-shadow: #17251f33;
+  --player-badge-line: #7d897d;
+  --player-phase-focus: #faeee7;
+  --player-phase-rest: #e9f4ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --player-ink: #f2f1ea;
+    --player-muted: #bac4b7;
+    --player-bg: #20231f;
+    --player-surface: #292d27;
+    --player-soft: #343b32;
+    --player-line: #4d574c;
+    --player-accent: #acd9c8;
+    --player-accent-hover: #c1e5d7;
+    --player-on-accent: #112e23;
+    --player-focus: #acd9c8;
+    --player-warning: #483621;
+    --player-error: #f9b6ac;
+    --player-scrim: #0008;
+    --player-shadow: #0005;
+    --player-badge-line: #839084;
+    --player-phase-focus: #392b25;
+    --player-phase-rest: #26362d;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: transparent; overflow: hidden; }
+canvas { display: block; touch-action: none; }
+#app canvas { cursor: grab; }
+#app.editing canvas { cursor: grabbing; }
+.edit-toolbar { position: fixed; top: 5px; left: 5px; display: flex; gap: 4px; }
+[hidden] { display: none !important; }
+button { border: 1px solid var(--player-line); background: var(--player-surface); color: var(--player-ink); padding: 9px 14px; border-radius: 10px; cursor: pointer; font: inherit; }
+button:not(:disabled):hover { background: var(--player-soft); }
+button:disabled { opacity: .6; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--player-focus); outline-offset: 3px; }
+body.settings { overflow: auto; background: var(--player-bg); }
+.settings #app { max-width: 640px; margin: auto; padding: 30px; }
+.eyebrow { color: var(--player-muted); font-size: 11px; font-weight: 700; letter-spacing: .18em; }
+h1 { margin: 10px 0; font-size: 27px; letter-spacing: -.04em; }
+p { color: var(--player-muted); line-height: 1.65; font-size: 13px; }
+section { padding: 20px 22px; margin-top: 20px; background: var(--player-surface); border: 1px solid var(--player-line); border-radius: 18px; }
+h2 { margin: 0 0 16px; font-size: 15px; }
+label { display: flex; align-items: center; gap: 10px; margin: 15px 0; font-size: 14px; }
+input { accent-color: var(--player-accent); }
+.scale { flex-wrap: wrap; }
+.scale input { flex: 1; min-width: 120px; }
+.hint { font-size: 12px; }
+footer { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.primary, .timer-primary { background: var(--player-accent); color: var(--player-on-accent); border-color: var(--player-accent); font-weight: 650; }
+.primary:not(:disabled):hover, .timer-primary:not(:disabled):hover { background: var(--player-accent-hover); }
+.primary { margin-left: auto; }
+
+.coordinates { display: flex; gap: 20px; }
+.coordinates input { width: 100px; }
+select, input[type="number"] { border: 1px solid var(--player-line); border-radius: 6px; padding: 6px; font: inherit; color: var(--player-ink); background: var(--player-surface); max-width: 100%; }
+pre { max-height: 24rem; overflow: auto; font-size: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Settings are scrollable; save actions stay within reach at every window size. */
+.settings #app { max-width: 720px; padding: 24px 24px 0; }
+.settings header p { margin-bottom: 14px; }
+.settings fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.settings section { margin-top: 14px; padding: 18px; }
+.settings .runtime-banner, .settings .notice { padding: 12px 15px; background: var(--player-soft); border-radius: 12px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.settings .notice { background: var(--player-warning); }
+.settings .coordinates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.settings .coordinates label { display: grid; gap: 8px; margin: 10px 0; min-width: 0; }
+.settings .coordinates input { width: 100%; min-width: 0; }
+.settings .monitor-field { flex-wrap: wrap; }
+.settings .monitor-field select { min-width: 0; width: 100%; }
+.settings details summary { cursor: pointer; font-size: 14px; line-height: 1.6; }
+.settings .settings-button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.settings .settings-actions { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 16px -24px 0; padding: 14px 24px; background: var(--player-bg); border-top: 1px solid var(--player-line); backdrop-filter: blur(10px); z-index: 2; }
+.settings #save-state { font-size: 12px; color: var(--player-muted); }
+.settings #message { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
+.settings #message:empty { display: none; }
+.settings .primary { margin-left: 0; }
+.settings .danger { color: var(--player-error); }
+.settings .error-text { color: var(--player-error); }
+.settings fieldset:disabled { opacity: .6; }
+.settings dialog { width: min(440px, calc(100vw - 32px)); border: 1px solid var(--player-line); border-radius: 18px; padding: 24px; color: var(--player-ink); background: var(--player-surface); box-shadow: 0 20px 60px var(--player-shadow); }
+.settings dialog::backdrop, .timer-window dialog::backdrop { background: var(--player-scrim); }
+.settings .diagnostic-heading { margin-top: 22px; }
+@media (max-width: 500px) { .settings #app { padding: 18px 16px 0; } .settings .settings-actions { margin-inline: -16px; padding: 12px 16px; } .settings section { padding: 15px; } .settings button { padding: 9px 11px; font-size: 13px; } }

@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/buddy-project", "crates/buddy-runtime", "crates/buddy-platform", "crates/buddy-builder", "tools/buddy", "apps/player/src-tauri"]
+default-members = ["crates/buddy-project", "crates/buddy-runtime", "crates/buddy-platform", "crates/buddy-builder", "tools/buddy"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.99"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+ts-rs = { version = "11", features = ["serde-compat", "no-serde-warnings"] }
+thiserror = "2"
+sha2 = "0.10"
+unicode-normalization = "0.1"
+uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "webp", "bmp"] }
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
