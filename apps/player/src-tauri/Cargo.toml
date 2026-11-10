@@ -1,0 +1,26 @@
+[package]
+name = "buddy-player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+preview = []
+
+[dependencies]
+buddy-project = { path = "../../../crates/buddy-project" }
+buddy-runtime = { path = "../../../crates/buddy-runtime" }
+buddy-platform = { path = "../../../crates/buddy-platform" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["tray-icon", "protocol-asset", "image-png"] }
+fs2 = "0.4"
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

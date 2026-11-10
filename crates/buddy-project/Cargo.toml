@@ -1,0 +1,20 @@
+[package]
+name = "buddy-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+ts-rs.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
+image.workspace = true
+serde_path_to_error = "0.1"
+
+[dev-dependencies]
+tempfile.workspace = true

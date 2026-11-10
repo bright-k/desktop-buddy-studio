@@ -1,0 +1,5 @@
+{
+  "identifier": "timer",
+  "windows": ["timer"],
+  "permissions": ["allow-get-timer", "allow-timer-action", "core:event:allow-listen", "core:event:allow-unlisten"]
+}
