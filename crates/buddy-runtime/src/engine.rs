@@ -437,10 +437,7 @@ impl Runtime {
         for (_, matcher) in &mut self.matchers {
             matcher.reset();
         }
-        self.rate_times.clear();
-        self.rate_band = None;
-        self.pending_band = None;
-        self.rate_next = None;
+        self.clear_typing_rate();
         if let Some(typing) = &mut self.typing_stop {
             typing.burst = None;
         }
@@ -1297,12 +1294,24 @@ impl Runtime {
                 exact_keys,
             });
             self.last_start[index] = Some(self.now);
+            if matches!(
+                self.data.project.bindings[index].trigger,
+                Trigger::KeySequence { .. }
+            ) {
+                self.clear_typing_rate();
+            }
             self.sync_display(true);
             self.performance
                 .start(received_at, self.epoch, self.action_instance, fps);
             return true;
         }
         false
+    }
+    fn clear_typing_rate(&mut self) {
+        self.rate_times.clear();
+        self.rate_band = None;
+        self.pending_band = None;
+        self.rate_next = None;
     }
     fn evaluate_rate(&mut self) {
         let timing = self.data.project.defaults.timing;
@@ -1311,10 +1320,7 @@ impl Runtime {
             .back()
             .is_some_and(|last| self.now.saturating_sub(*last) >= u64::from(timing.idle_timeout_ms))
         {
-            self.rate_times.clear();
-            self.rate_band = None;
-            self.pending_band = None;
-            self.rate_next = None;
+            self.clear_typing_rate();
             return;
         }
         if self.rate_next.is_none_or(|due| self.now < due) {

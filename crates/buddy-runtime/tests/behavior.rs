@@ -914,6 +914,105 @@ fn typing_rate_stabilizes_and_returns_idle_at_the_configured_short_timeout() {
     assert_eq!(runtime.state().animation, "idle");
     assert_eq!(runtime.next_deadline_ms(), None);
 }
+
+#[test]
+fn keyword_start_clears_active_and_pending_typing_rate() {
+    for (second_key_at, rate_active) in [(80, false), (120, true)] {
+        let mut keyword = pattern("mm", 5000);
+        keyword["effect"]["durationMs"] = json!(80);
+        let mut buddy = runtime(json!([
+            {"id":"typing","trigger":{"type":"typingRate","minKps":0.5},"effect":{"type":"sustainAnimation","animation":"typing"}},
+            keyword,
+        ]));
+
+        tap(&mut buddy, 0, "KeyM");
+        buddy.advance(second_key_at);
+        assert_eq!(buddy.state().typing_band_id.is_some(), rate_active);
+        tap(&mut buddy, second_key_at, "KeyM");
+        assert_eq!(buddy.displayed_binding_id(), Some("secret"));
+        assert_eq!(buddy.state().typing_band_id, None);
+
+        buddy.advance(second_key_at + 80);
+        assert_eq!(buddy.state().source, AnimationSource::Idle);
+        buddy.advance(second_key_at + 150);
+        assert_eq!(buddy.state().source, AnimationSource::Idle);
+    }
+}
+
+#[test]
+fn typing_rate_counts_new_input_during_keyword_playback() {
+    let mut keyword = pattern("mm", 5000);
+    keyword["effect"]["durationMs"] = json!(320);
+    let mut buddy = runtime(json!([
+        {"id":"typing","trigger":{"type":"typingRate","minKps":1.0},"effect":{"type":"sustainAnimation","animation":"typing"}},
+        keyword,
+    ]));
+
+    tap(&mut buddy, 0, "KeyM");
+    tap(&mut buddy, 80, "KeyM");
+    tap(&mut buddy, 90, "KeyA");
+    buddy.advance(140);
+    buddy.advance(240);
+    // A single new press is below 1 KPS in the default two-second window.
+    assert_eq!(buddy.state().typing_band_id, None);
+    tap(&mut buddy, 250, "KeyB");
+    buddy.advance(290);
+    buddy.advance(390);
+    assert_eq!(buddy.state().typing_band_id.as_deref(), Some("typing"));
+    assert_eq!(buddy.displayed_binding_id(), Some("secret"));
+    buddy.advance(400);
+    assert_eq!(buddy.state().source, AnimationSource::TypingRate);
+}
+
+#[test]
+fn keyword_blocked_by_cooldown_preserves_typing_rate() {
+    let mut keyword = pattern("mm", 5000);
+    keyword["effect"]["durationMs"] = json!(80);
+    keyword["effect"]["cooldownMs"] = json!(1000);
+    let mut buddy = runtime(json!([
+        {"id":"typing","trigger":{"type":"typingRate","minKps":0.5},"effect":{"type":"sustainAnimation","animation":"typing"}},
+        keyword,
+    ]));
+
+    tap(&mut buddy, 0, "KeyM");
+    tap(&mut buddy, 80, "KeyM");
+    tap(&mut buddy, 350, "KeyA");
+    buddy.advance(450);
+    let typing = buddy.state();
+    assert_eq!(typing.source, AnimationSource::TypingRate);
+    tap(&mut buddy, 460, "KeyM");
+    tap(&mut buddy, 470, "KeyM");
+
+    assert_eq!(buddy.performance(470).ignored_cooldown, 1);
+    assert_eq!(buddy.state().action_instance_id, typing.action_instance_id);
+    buddy.advance(719);
+    assert_eq!(buddy.state().source, AnimationSource::TypingRate);
+    buddy.advance(720);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+}
+
+#[test]
+fn keyword_blocked_by_priority_preserves_typing_rate() {
+    let mut buddy = runtime(json!([
+        {"id":"typing","trigger":{"type":"typingRate","minKps":0.5},"effect":{"type":"sustainAnimation","animation":"typing","priority":100}},
+        pattern("mm", 5000),
+    ]));
+
+    tap(&mut buddy, 0, "KeyA");
+    buddy.advance(100);
+    let typing = buddy.state();
+    assert_eq!(typing.source, AnimationSource::TypingRate);
+    tap(&mut buddy, 110, "KeyM");
+    tap(&mut buddy, 120, "KeyM");
+
+    assert_eq!(buddy.performance(120).ignored_priority, 1);
+    assert_eq!(buddy.state().action_instance_id, typing.action_instance_id);
+    buddy.advance(369);
+    assert_eq!(buddy.state().source, AnimationSource::TypingRate);
+    buddy.advance(370);
+    assert_eq!(buddy.state().source, AnimationSource::Idle);
+}
+
 #[test]
 fn typing_stopped_uses_its_own_deadline_and_a_key_at_that_time_continues_the_burst() {
     let mut buddy = runtime(json!([
