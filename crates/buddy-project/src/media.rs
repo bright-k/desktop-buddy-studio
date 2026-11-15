@@ -7,7 +7,7 @@ use std::{
 
 const MIB: u64 = 1024 * 1024;
 const IMAGE_DECODE_ALLOC_LIMIT: u64 = 64 * MIB;
-pub const DECODED_LIMIT: u64 = 128 * MIB;
+pub const DECODED_LIMIT: u64 = 256 * MIB;
 #[derive(Debug, Clone)]
 pub struct DecodedMedia {
     pub frames: Vec<RenderFrame>,

@@ -26,6 +26,7 @@ import { animationScaleLimits, buddyHoldMs, defaultTimerPresets, supportedPhysic
 import { CharacterRenderer, horizontalAnchorExtent } from "../../../packages/renderer/src/index";
 import { ReactionAudio } from "../../../packages/renderer/src/audio";
 import macDmgPreset from "../../../packaging/macos/defaults/layout.json";
+import { formatFrameList, frameListLimit, parseFrameList } from "./frame-list";
 import { readRoute, writeRoute, type StudioRoute } from "./route";
 import "./style.css";
 type Meta = {
@@ -683,7 +684,7 @@ function animations() {
     )
     .join(
       "",
-    )}</select></label><div class="form-grid">${field("재생 속도 (FPS)", `${p}.fps`, "number", 'min="1" max="30"')}${check("반복 재생", `${p}.loop`)}</div>${isGif ? check("GIF 원본 프레임 시간 사용", `${p}.useSourceTiming`) : a.resource ? "" : `<label class="field"><span>스프라이트 프레임 번호 (0부터, 쉼표로 구분)</span><input id="clip-frames" value="${a.frames.join(", ")}" placeholder="0, 1, 2, 3"></label>`}<p class="hint">일회성 이벤트는 반복을 끄고, 입력 속도·키 유지·드래그 동작은 반복을 켜세요. GIF는 프레임과 영역을 비워두면 전체를 사용합니다.</p></div>${scaleEditor(a)}${animationReferences(selectedClip)}${isGif ? gifFramesEditor(a) : cropEditor(a)}`;
+    )}</select></label><div class="form-grid">${field("재생 속도 (FPS)", `${p}.fps`, "number", 'min="1" max="30"')}${check("반복 재생", `${p}.loop`)}</div>${isGif ? check("GIF 원본 프레임 시간 사용", `${p}.useSourceTiming`) : a.resource ? "" : frameListField(a.frames, "스프라이트 프레임 번호 (0부터)", "0, 1-3", doc!.character.sheet.frameCount)}<p class="hint">일회성 이벤트는 반복을 끄고, 입력 속도·키 유지·드래그 동작은 반복을 켜세요. GIF는 프레임과 영역을 비워두면 전체를 사용합니다.</p></div>${scaleEditor(a)}${animationReferences(selectedClip)}${isGif ? gifFramesEditor(a) : cropEditor(a)}`;
 }
 function anchorPercent(anchor: number | null | undefined) {
   return anchor == null ? "" : String(Number((anchor * 100).toFixed(8)));
@@ -737,16 +738,32 @@ function showGifFrame(index: number, delay = 160) {
     image.src = gifFrameUrl(filename, index);
   }, delay);
 }
+function frameListField(frames: readonly number[], label: string, placeholder: string, count: number) {
+  return `<label class="field"><span>${label}</span><input id="clip-frames" value="${formatFrameList(frames)}" placeholder="${placeholder}" data-frame-count="${count}" aria-describedby="clip-frames-error" spellcheck="false"></label>
+    <p id="clip-frames-error" class="error-text" role="status" hidden></p>`;
+}
+function setFrameListError(input: HTMLInputElement, message = "") {
+  input.setCustomValidity(message);
+  if (message) input.setAttribute("aria-invalid", "true");
+  else input.removeAttribute("aria-invalid");
+  const error = document.querySelector<HTMLElement>("#clip-frames-error")!;
+  error.textContent = message;
+  error.hidden = !message;
+}
+function checkFrameList() {
+  const input = document.querySelector<HTMLInputElement>("#clip-frames");
+  if (input && !input.reportValidity()) throw new Error(input.validationMessage);
+}
 function gifFramesEditor(animation: Animation) {
   const filename = doc!.character.resources[animation.resource!].image.slice(10);
   const count = doc!.library[filename]?.frames;
   const first = animation.frames[0] ?? 0;
-  return `<div class="card"><h3>GIF 프레임 선택</h3><p class="hint">재생 목록을 비우면 원본 전체를 재생합니다. 번호 순서대로 재생하며 같은 프레임을 반복해서 넣을 수 있습니다.</p>
+  return `<div class="card"><h3>GIF 프레임 선택</h3><p class="hint">프레임 번호와 범위를 쉼표로 구분하세요. 예: 0, 8-31, 40. 31-8은 역순으로 재생합니다. 목록을 비우면 원본 전체를 재생합니다.</p>
     <div class="gif-frame-preview checker"><img id="gif-frame-preview" alt="" hidden></div>
     <p id="gif-frame-status" class="hint" role="status"></p>
-    <div class="row-actions"><label class="field"><span>확인할 프레임 번호${count ? ` (0~${count - 1})` : ""}</span><input id="gif-frame-number" type="number" min="0" max="${(count ?? 256) - 1}" value="${first}" step="1"></label>
+    <div class="row-actions"><label class="field"><span>확인할 프레임 번호${count ? ` (0~${count - 1})` : ""}</span><input id="gif-frame-number" type="number" min="0" max="${(count ?? frameListLimit) - 1}" value="${first}" step="1"></label>
     <button class="small" data-action="append-gif-frame">＋ 재생 목록에 추가</button><button class="small" data-action="clear-gif-frames">전체 프레임 사용</button></div>
-    <label class="field"><span>재생 목록 (쉼표로 구분)</span><input id="clip-frames" value="${animation.frames.join(", ")}" placeholder="전체 프레임"></label></div>`;
+    ${frameListField(animation.frames, "재생 목록 (0부터)", "전체 프레임", count ?? frameListLimit)}</div>`;
 }
 function cropEditor(a: Animation) {
   return `<div class="card"><div class="card-heading"><h3>영역 선택 <span class="pill">SPRITE CROP</span></h3><button class="text-button" data-action="clear-regions">전체 이미지로 초기화</button></div><p class="hint">이미지 위를 드래그해 표시할 사각형을 선택하세요. GIF에는 영역 자르기를 적용할 수 없습니다.</p><div class="crop-viewport checker"><canvas id="crop-canvas" aria-label="스프라이트 영역 선택"></canvas></div><div class="crop-fields">${["x", "y", "width", "height"].map((key, i) => `<label class="field"><span>${["X", "Y", "너비", "높이"][i]}</span><input type="number" min="${i < 2 ? 0 : 1}" id="crop-${key}" value="${crop[key as keyof FrameRegion]}"></label>`).join("")}</div><div class="row-actions"><button class="small" data-action="apply-region">이 영역만 표시</button><button class="small" data-action="append-region">＋ 다음 프레임으로 추가</button></div><div class="region-list">${(a.regions ?? []).map((r, i) => `<span class="region">${i}: ${r.x},${r.y} · ${r.width}×${r.height}<button data-action="remove-region" data-id="${i}" aria-label="${i}번 영역 제외">×</button></span>`).join("")}</div><details><summary>격자로 프레임 만들기</summary><div class="crop-fields">${[
@@ -1538,7 +1555,9 @@ function updateProjectList(meta: Meta) {
   projects = [meta, ...projects.filter((project) => project.id !== meta.id)];
 }
 async function save(icon?: string) {
-  if (!doc || busy || projectLoading || !dirty) return;
+  if (!doc || busy || projectLoading) return;
+  checkFrameList();
+  if (!dirty) return;
   setEditorBusy("편집 내용을 확인하는 중…");
   try {
     await flushDraft();
@@ -2390,6 +2409,7 @@ async function performAction(name: string, id?: string) {
       await save();
       break;
     case "validate":
+      checkFrameList();
       setEditorBusy("리소스와 이벤트 연결을 검증하는 중…");
       try {
         await projectApi("validate", post(payload()));
@@ -2561,15 +2581,19 @@ async function performAction(name: string, id?: string) {
     case "append-gif-frame":
     case "clear-gif-frames": {
       const animation = doc!.character.animations[selectedClip];
+      const list = document.querySelector<HTMLInputElement>("#clip-frames")!;
       if (name === "append-gif-frame") {
+        if (!list.reportValidity()) return;
         const frame = document.querySelector<HTMLInputElement>("#gif-frame-number")!;
         if (frame.value === "" || !frame.reportValidity()) return;
-        if (animation.frames.length >= 256) throw new Error("재생 목록은 최대 256프레임입니다.");
+        if (animation.frames.length >= frameListLimit)
+          throw new Error(`재생 목록은 최대 ${frameListLimit}프레임입니다.`);
         animation.frames.push(frame.valueAsNumber);
       } else {
         animation.frames = [];
       }
-      document.querySelector<HTMLInputElement>("#clip-frames")!.value = animation.frames.join(", ");
+      list.value = formatFrameList(animation.frames);
+      setFrameListError(list);
       markDirty();
       break;
     }
@@ -3147,14 +3171,22 @@ app.addEventListener("input", (event) => {
     }
   }
   if (input.id === "clip-frames") {
-    const values = input.value
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean)
-      .map(Number);
-    doc!.character.animations[selectedClip].frames = values;
-    doc!.character.animations[selectedClip].regions = [];
+    const animation = doc?.character.animations[selectedClip];
+    if (!animation || doc?.meta.archived) return;
+    let frames: number[];
+    try {
+      frames = parseFrameList(input.value, Number(input.dataset.frameCount));
+    } catch (error) {
+      setFrameListError(input, (error as Error).message);
+      return;
+    }
+    setFrameListError(input);
+    if (animation.regions.length === 0 && frames.length === animation.frames.length &&
+        frames.every((frame, i) => frame === animation.frames[i])) return;
+    animation.frames = frames;
+    animation.regions = [];
     markDirty();
+    return;
   }
   if (input.id === "max-kps") {
     (doc!.project.bindings[selectedBinding].trigger as any).maxKps = input.value
