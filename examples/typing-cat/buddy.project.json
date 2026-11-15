@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "projectId": "38142fc3-7b15-4fdb-8cde-51b7e5e3373b",
+  "product": {
+    "slug": "typing-cat",
+    "name": "Typing Cat",
+    "version": "0.1.0",
+    "identifier": "com.example.buddy.typingcat",
+    "icon": "assets/app-icon.png"
+  },
+  "character": "character/manifest.json",
+  "defaults": {
+    "scale": 1.0,
+    "alwaysOnTop": true,
+    "position": {
+      "monitor": "primary",
+      "anchor": "bottomRight",
+      "marginDip": 24
+    },
+    "input": {
+      "keyboard": true,
+      "mouse": true
+    },
+    "movementEnabled": false
+  },
+  "bindings": [
+    {
+      "id": "typing-slow",
+      "trigger": {
+        "type": "typingRate",
+        "minKps": 0.5,
+        "maxKps": 3.0
+      },
+      "effect": {
+        "type": "sustainAnimation",
+        "animation": "typing"
+      }
+    },
+    {
+      "id": "typing-fast",
+      "trigger": {
+        "type": "typingRate",
+        "minKps": 3.0
+      },
+      "effect": {
+        "type": "sustainAnimation",
+        "animation": "typingFast"
+      }
+    },
+    {
+      "id": "jump",
+      "trigger": {
+        "type": "keyDown",
+        "code": "Space",
+        "repeat": false
+      },
+      "effect": {
+        "type": "playAnimation",
+        "animation": "jump",
+        "priority": 80,
+        "retrigger": "restart",
+        "cooldownMs": 120
+      }
+    },
+    {
+      "id": "click",
+      "trigger": {
+        "type": "mouseDown",
+        "button": "primary"
+      },
+      "effect": {
+        "type": "playAnimation",
+        "animation": "click",
+        "priority": 60,
+        "retrigger": "restart",
+        "cooldownMs": 100
+      }
+    },
+    {
+      "id": "secret-cat",
+      "trigger": {
+        "type": "keySequence",
+        "keyword": "고양이",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 5000
+      },
+      "effect": {
+        "type": "playAnimation",
+        "animation": "celebrate",
+        "priority": 95,
+        "retrigger": "restart",
+        "cooldownMs": 2000
+      }
+    },
+    {
+      "id": "right",
+      "trigger": {
+        "type": "whileKeyDown",
+        "code": "ArrowRight"
+      },
+      "effect": {
+        "type": "move",
+        "x": 1,
+        "y": 0,
+        "speedDipPerSecond": 120,
+        "animation": "walk"
+      }
+    }
+  ],
+  "build": {
+    "targets": [
+      "windows-x64",
+      "macos-arm64"
+    ],
+    "signing": {
+      "windows": "none",
+      "macos": "ad-hoc"
+    }
+  }
+}

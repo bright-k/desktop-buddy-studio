@@ -1,0 +1,5 @@
+{
+  "identifier": "timer-quick",
+  "windows": ["timer-quick"],
+  "permissions": ["allow-get-timer", "allow-get-timer-quick", "allow-finish-timer-quick", "core:event:allow-listen", "core:event:allow-unlisten"]
+}

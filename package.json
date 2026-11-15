@@ -1,0 +1,29 @@
+{
+  "name": "desktop-buddy-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "contracts": "node scripts/cargo.mjs run --locked -q -p buddy-cli -- export-contracts",
+    "build:player": "npm run contracts && tsc -p apps/player/tsconfig.json && vite build --config apps/player/vite.config.ts",
+    "player:dev": "node scripts/player.mjs dev",
+    "player:build": "node scripts/player.mjs build",
+    "package:cli": "node scripts/package-cli.mjs",
+    "test:renderer": "node --test scripts/renderer.test.mjs",
+    "check": "npm run build:player && npm run build:studio && npm run test:renderer && npm run test:studio && node scripts/cargo.mjs test --workspace && node scripts/cargo.mjs clippy --workspace --all-targets -- -D warnings",
+    "studio": "node scripts/studio.mjs",
+    "build:studio": "npm run contracts && tsc -p apps/studio/tsconfig.json && vite build --config apps/studio/vite.config.ts",
+    "test:studio": "node --test studio/*.test.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4",
+    "typescript": "5.9.3",
+    "vite": "6.4.1"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "identifier": "overlay",
+  "windows": ["overlay"],
+  "permissions": ["allow-get-bootstrap", "allow-read-render-frame", "allow-read-reaction-audio", "allow-subscribe-character-state", "allow-ack-character-frame", "allow-set-character-hit-mask", "allow-begin-character-drag", "allow-update-character-edit", "allow-finish-character-edit", "allow-cancel-character-edit", "allow-character-click", "allow-show-buddy-menu"]
+}
