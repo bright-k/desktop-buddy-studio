@@ -1,0 +1,14 @@
+{
+  "tauriCliVersion": "2.12.4",
+  "source": "https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi",
+  "originalSha256": "d00089d3b1a2c4a30d7b6e098079100cb8f25e980f84d4515aca4597b95e967d",
+  "license": "MIT OR Apache-2.0",
+  "modifications": [
+    "full SHA-256 product identity for install path and registry",
+    "disable display-name MSI migration",
+    "stable slug plus short hash shortcut names with collision guard",
+    "require empty or matching-marker custom install directory",
+    "leave user settings unless explicitly requested during uninstall"
+  ],
+  "normalizedOriginalSha256": "d00089d3b1a2c4a30d7b6e098079100cb8f25e980f84d4515aca4597b95e967d"
+}

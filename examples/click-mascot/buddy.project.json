@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "projectId": "27e75963-e365-4fb7-97b5-f3029c9dd7a1",
+  "product": {
+    "slug": "click-mascot",
+    "name": "Click Mascot",
+    "version": "0.1.0",
+    "identifier": "com.example.buddy.clickmascot",
+    "icon": "assets/app-icon.png"
+  },
+  "character": "character/manifest.json",
+  "defaults": {
+    "scale": 1.0,
+    "alwaysOnTop": true,
+    "position": {
+      "monitor": "primary",
+      "anchor": "bottomRight",
+      "marginDip": 24
+    },
+    "input": {
+      "keyboard": true,
+      "mouse": true
+    },
+    "movementEnabled": false
+  },
+  "bindings": [
+    {
+      "id": "click",
+      "trigger": {
+        "type": "mouseDown",
+        "button": "primary"
+      },
+      "effect": {
+        "type": "playAnimation",
+        "animation": "click",
+        "priority": 60,
+        "retrigger": "restart",
+        "cooldownMs": 100
+      }
+    }
+  ],
+  "build": {
+    "targets": [
+      "windows-x64",
+      "macos-arm64"
+    ],
+    "signing": {
+      "windows": "none",
+      "macos": "ad-hoc"
+    }
+  }
+}

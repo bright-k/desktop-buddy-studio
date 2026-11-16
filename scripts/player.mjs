@@ -1,0 +1,17 @@
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { toolchainEnvironment } from './toolchain.mjs';
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const mode = process.argv[2] ?? 'dev';
+const env = toolchainEnvironment();
+const built = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build:player'], { cwd: root, env, stdio: 'inherit', shell: process.platform === 'win32' });
+if (built.status !== 0) process.exit(built.status ?? 1);
+const metadata = JSON.parse(readFileSync(join(root, 'node_modules/@tauri-apps/cli/package.json'), 'utf8'));
+const bin = typeof metadata.bin === 'string' ? metadata.bin : metadata.bin.tauri;
+const args = [mode];
+if (mode === 'dev') args.push('--no-watch', '--config', 'src-tauri/tauri.dev.json');
+args.push(...process.argv.slice(3));
+const child = spawnSync(process.execPath, [join(root, 'node_modules/@tauri-apps/cli', bin), ...args], { cwd: join(root, 'apps/player'), env, stdio: 'inherit' });
+process.exit(child.status ?? 1);
