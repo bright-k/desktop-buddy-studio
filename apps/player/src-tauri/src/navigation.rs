@@ -13,12 +13,12 @@ fn player_origin() -> (&'static str, &'static str) {
     }
 }
 
-pub fn overlay_recovery_url(generation: u32) -> Result<Url, String> {
+pub fn overlay_recovery_url(generation: u32) -> tauri::Result<Url> {
     let (scheme, host) = player_origin();
     Url::parse(&format!(
         "{scheme}://{host}/index.html?overlay-recovery={generation}"
     ))
-    .map_err(|error| error.to_string())
+    .map_err(tauri::Error::InvalidUrl)
 }
 
 pub fn allow_overlay_navigation(url: &Url) -> bool {

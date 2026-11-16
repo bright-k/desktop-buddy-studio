@@ -364,6 +364,31 @@ test('superseded states waiting for the image never receive a fictitious ACK', t
   assert.equal(h.acknowledgements[0].actionInstanceId, 2);
 });
 
+test('a visible renderer reports failed paints and clears the failure on real drawing', t => {
+  const h = harness(t);
+  h.renderer.update(h.state(1), 1);
+  h.step(0);
+  h.images[0].onload();
+  h.step(0);
+  assert.equal(h.renderer.paintBlocked, false);
+
+  h.context.fail = true;
+  h.renderer.update(h.state(2), 2);
+  h.step(40);
+  assert.equal(h.renderer.paintBlocked, true);
+  assert.equal(h.acknowledgements.at(-1).outcome, 'error');
+  h.renderer.setVisible(false);
+  assert.equal(h.renderer.paintBlocked, false);
+
+  h.context.fail = false;
+  h.renderer.setVisible(true);
+  h.step(140);
+  h.images.at(-1).onload();
+  h.step(140);
+  assert.equal(h.renderer.paintBlocked, false);
+  assert.equal(h.acknowledgements.at(-1).outcome, 'drawn');
+});
+
 test('the first overlay frame can draw before the native window enables animation frames', t => {
   const h = harness(t, { drawFirstFrameImmediately: true });
   h.renderer.update(h.state(1), 10);
@@ -483,6 +508,46 @@ test('Player bitmaps close on eviction and when an outstanding read outlives dis
   waiting.resolve(bitmap('four'));
   await new Promise(setImmediate);
   assert.deepEqual(closed, ['one', 'two', 'idle', 'three', 'four']);
+  assert.equal(h.scheduled, 0);
+});
+
+test('stalled Player bitmap requests release rendering through asset URLs', async t => {
+  const ids = ['first', 'second', 'third', 'fourth', 'jump'];
+  const requests = new Map();
+  const region = { x: 0, y: 0, width: 30, height: 30 };
+  const h = harness(t, {
+    images: Object.fromEntries(ids.map(id => [id, `${id}.png`])),
+    plan: { animations: {
+      idle: { looping: true, frames: ids.slice(0, 4).map(image => ({ image, region, durationMs: 100 })) },
+      jump: { looping: false, frames: [{ image: 'jump', region, durationMs: 100 }] },
+    } },
+    loadBitmap: id => {
+      const request = Promise.withResolvers();
+      requests.set(id, request);
+      return request.promise;
+    },
+  });
+  h.renderer.update(h.state(1), 1);
+  h.step(0);
+  assert.deepEqual([...requests.keys()], ids.slice(0, 4));
+  h.renderer.update({ ...h.state(2), animation: 'jump' }, 2);
+  h.step(100);
+  assert.equal(h.images.length, 0);
+  h.step(5000);
+  const image = h.images.find(image => image.src === 'jump.png');
+  assert.ok(image);
+  image.onload();
+  h.step(5000);
+  assert.equal(h.drawCalls.at(-1)[0], image);
+  assert.equal(requests.size, 4);
+
+  const closed = [];
+  for (const [id, request] of requests) {
+    request.resolve({ width: 30, height: 30, close: () => closed.push(id) });
+  }
+  await new Promise(setImmediate);
+  assert.deepEqual(closed, ids.slice(0, 4));
+  h.renderer.dispose();
   assert.equal(h.scheduled, 0);
 });
 

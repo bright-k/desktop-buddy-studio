@@ -44,6 +44,8 @@ export class CharacterRenderer {
   private receivedAt = 0;
   private frameRequest = 0;
   private frameTimer = 0;
+  private frameWaitSince?: number;
+  private paintFailed = false;
   private lastPaint = -Infinity;
   private lastSignature = "";
   private images = new Map<string, ImageAsset>();
@@ -51,6 +53,7 @@ export class CharacterRenderer {
   private residentBytes = 0;
   private loadingImages = 0;
   private bitmapRequests = 0;
+  private bitmapUnavailable = false;
   private currentImage?: ImageAsset;
   private idleImage?: ImageAsset;
   private extents = new Map<RenderAnimation, { width: number; height: number; duration: number }>();
@@ -170,7 +173,14 @@ export class CharacterRenderer {
   setVisible(visible: boolean) {
     this.visible = visible;
     if (visible) this.schedule();
-    else this.stop();
+    else {
+      this.frameWaitSince = undefined;
+      this.stop();
+    }
+  }
+  get paintBlocked() {
+    return this.visible && (this.paintFailed || this.context.isContextLost?.() === true ||
+      (this.frameWaitSince !== undefined && performance.now() - this.frameWaitSince >= IMAGE_TIMEOUT_MS));
   }
   stop() {
     if (this.frameRequest) cancelAnimationFrame(this.frameRequest);
@@ -222,7 +232,7 @@ export class CharacterRenderer {
   }
   private prepareImage(asset: ImageAsset | undefined, now: number, protectedAssets: Set<ImageAsset>) {
     if (!asset) return;
-    if (asset.status === "loading" && now >= asset.deadline)
+    if (asset.status === "loading" && asset.image && now >= asset.deadline)
       this.failImage(asset);
     if (this.resident.delete(asset)) {
       this.resident.add(asset);
@@ -233,7 +243,8 @@ export class CharacterRenderer {
       return;
     if (asset !== this.currentImage && asset.bytes + (this.currentImage?.bytes ?? 0) > IMAGE_CACHE_BYTES)
       return;
-    if (this.loadBitmap && this.bitmapRequests >= IMAGE_LOAD_LIMIT) return;
+    const loadBitmap = this.bitmapUnavailable ? undefined : this.loadBitmap;
+    if (loadBitmap && this.bitmapRequests >= IMAGE_LOAD_LIMIT) return;
     if (!this.makeRoom(asset.bytes, 1, protectedAssets) && asset !== this.currentImage) return;
     protectedAssets.add(asset);
     this.resident.add(asset);
@@ -242,7 +253,7 @@ export class CharacterRenderer {
     asset.status = "loading";
     asset.deadline = now + IMAGE_TIMEOUT_MS;
     const wake = () => {
-      if (this.currentImage !== asset) return;
+      if (this.currentImage !== asset && this.currentImage?.status !== "new") return;
       this.stop();
       this.schedule();
     };
@@ -262,20 +273,46 @@ export class CharacterRenderer {
       this.failImage(asset);
       wake();
     };
-    if (this.loadBitmap) {
+    const loadImage = () => {
+      // The overlay reads the composited alpha to decide which pixels can be clicked.
+      const image = new Image();
+      if (this.onPixelsChanged) image.crossOrigin = "anonymous";
+      asset.image = image;
+      asset.deadline = performance.now() + IMAGE_TIMEOUT_MS;
+      image.onload = () => {
+        if (asset.image === image) ready(image.naturalWidth * image.naturalHeight * 4 || asset.bytes);
+      };
+      image.onerror = () => {
+        if (asset.image === image) failed();
+      };
+      const [base, fragment] = asset.url.split(/#(.*)/s);
+      image.src = asset.failures && !/^(data|blob):/.test(base)
+        ? `${base}${base.includes("?") ? "&" : "?"}buddy-retry=${Date.now()}-${asset.failures}${fragment ? "#" + fragment : ""}`
+        : asset.url;
+    };
+    if (loadBitmap) {
       const revision = asset.revision;
       this.bitmapRequests++;
-      void this.loadBitmap(asset.id).then(bitmap => {
-        if (asset.revision !== revision) {
+      const timeout = window.setTimeout(() => {
+        // Native IPC cannot cancel an outstanding read. Use asset URLs until
+        // the pending replies drain so lost responses cannot stall rendering.
+        this.bitmapUnavailable = true;
+        if (asset.revision === revision) loadImage();
+        wake();
+      }, IMAGE_TIMEOUT_MS);
+      void loadBitmap(asset.id).then(bitmap => {
+        if (asset.revision !== revision || asset.image) {
           bitmap.close();
           return;
         }
         asset.bitmap = bitmap;
         ready(bitmap.width * bitmap.height * 4);
       }, () => {
-        if (asset.revision === revision) failed();
+        if (asset.revision === revision && !asset.image) loadImage();
       }).finally(() => {
+        clearTimeout(timeout);
         this.bitmapRequests--;
+        if (this.bitmapRequests === 0) this.bitmapUnavailable = false;
         if (this.currentImage?.status === "new") {
           this.stop();
           this.schedule();
@@ -283,21 +320,7 @@ export class CharacterRenderer {
       });
       return;
     }
-    const image = new Image();
-    // The overlay reads the composited alpha to decide which pixels can be clicked.
-    if (this.onPixelsChanged) image.crossOrigin = "anonymous";
-    asset.image = image;
-    image.onload = () => {
-      if (asset.image === image) ready(image.naturalWidth * image.naturalHeight * 4 || asset.bytes);
-    };
-    image.onerror = () => {
-      if (asset.image === image) failed();
-    };
-    // Bypass a cached failed response without changing the asset path.
-    const [base, fragment] = asset.url.split(/#(.*)/s);
-    image.src = asset.failures && !/^(data|blob):/.test(base)
-      ? `${base}${base.includes("?") ? "&" : "?"}buddy-retry=${Date.now()}-${asset.failures}${fragment ? "#" + fragment : ""}`
-      : asset.url;
+    loadImage();
   }
   private schedule(delay = 0) {
     if (!this.visible || !this.state || this.frameRequest || this.frameTimer) return;
@@ -308,11 +331,19 @@ export class CharacterRenderer {
       }, delay);
     // A hidden native window may not receive animation frame callbacks yet.
     else if (this.drawFirstFrameImmediately) this.paint(performance.now());
-    else this.frameRequest = requestAnimationFrame((time) => this.paint(time));
+    else {
+      this.frameWaitSince ??= performance.now();
+      this.frameRequest = requestAnimationFrame((time) => this.paint(time));
+    }
   }
   private paint(time: number) {
     this.frameRequest = 0;
+    this.frameWaitSince = undefined;
     if (!this.state || !this.visible) return;
+    if (this.context.isContextLost?.()) {
+      this.paintFailed = true;
+      return;
+    }
     const name = this.plan.animations[this.state.animation] ? this.state.animation : "idle";
     const animation = this.plan.animations[name];
     if (!animation?.frames.length) {
@@ -350,6 +381,7 @@ export class CharacterRenderer {
       : Infinity;
     const image = asset?.bitmap ?? asset?.image;
     if (asset?.status !== "ready" || !image) {
+      this.paintFailed = true;
       if (!asset || asset.failures) this.drawError();
       const delay = Math.min(nextFrame, asset && asset.status !== "new"
         ? Math.max(1, asset.deadline - now) : Infinity);
@@ -373,12 +405,12 @@ export class CharacterRenderer {
       const destinationX = this.canvas.width / 2 - anchor * destinationWidth;
       const destinationY =
         (this.canvas.height - destinationHeight) * this.character.anchor.y;
-      this.context.setTransform(1, 0, 0, 1, 0, 0);
-      this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
-      this.context.imageSmoothingEnabled = false;
-      if (this.state.facingLeft)
-        this.context.setTransform(-1, 0, 0, 1, this.canvas.width, 0);
       try {
+        this.context.setTransform(1, 0, 0, 1, 0, 0);
+        this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.context.imageSmoothingEnabled = false;
+        if (this.state.facingLeft)
+          this.context.setTransform(-1, 0, 0, 1, this.canvas.width, 0);
         this.context.drawImage(
           image,
           frame.region.x,
@@ -403,12 +435,16 @@ export class CharacterRenderer {
       this.onPixelsChanged?.(true);
       this.acknowledge("drawn");
     }
-    if (signature !== this.lastSignature)
+    if (signature !== this.lastSignature) {
       this.schedule(Math.max(1, this.lastPaint + 1000 / 30 - time));
-    else if (Number.isFinite(nextFrame)) this.schedule(nextFrame);
+    } else {
+      this.paintFailed = false;
+      if (Number.isFinite(nextFrame)) this.schedule(nextFrame);
+    }
   }
   private drawError() {
     if (!this.state || !this.visible) return;
+    this.paintFailed = true;
     if (!this.lastSignature) {
       this.context.setTransform(1, 0, 0, 1, 0, 0);
       this.context.fillStyle = "#f7bb82";

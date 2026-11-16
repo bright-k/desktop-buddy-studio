@@ -30,6 +30,25 @@ use windows_sys::Win32::{
 mod touchpad;
 use touchpad::Touchpads;
 
+static RAW_INPUT_RESERVED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) struct RawInputReservation(());
+
+pub(crate) fn reserve_raw_input() -> Result<RawInputReservation, String> {
+    // Raw Input registrations belong to the process. A worker that timed out
+    // during startup still owns cleanup until it leaves the native loop.
+    RAW_INPUT_RESERVED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| RawInputReservation(()))
+        .map_err(|_| "이전 Windows 입력 감지가 종료되는 중입니다.".into())
+}
+
+impl Drop for RawInputReservation {
+    fn drop(&mut self) {
+        RAW_INPUT_RESERVED.store(false, Ordering::Release);
+    }
+}
+
 pub(crate) fn desktop_available() -> bool {
     unsafe {
         let mut buffer = ptr::null_mut();
@@ -225,9 +244,6 @@ unsafe extern "system" fn window_proc(
                 }
             }
             WM_TIMER => {
-                if context.stop.load(Ordering::Acquire) {
-                    PostQuitMessage(0);
-                }
                 if context.previous.elapsed() > Duration::from_secs(1) {
                     context.devices.clear();
                     context.sender.reset();
@@ -470,18 +486,23 @@ pub(crate) fn run(
                 hwndTarget: window,
             })
             .collect();
-        if RegisterRawInputDevices(
-            devices.as_ptr(),
-            devices.len() as u32,
-            size_of::<RAWINPUTDEVICE>() as u32,
-        ) == 0
-            || SetTimer(window, 1, 250, None) == 0
+        if context.stop.load(Ordering::Acquire) {
+            DestroyWindow(window);
+            return;
+        }
+        if SetTimer(window, 1, 250, None) == 0
+            || RegisterRawInputDevices(
+                devices.as_ptr(),
+                devices.len() as u32,
+                size_of::<RAWINPUTDEVICE>() as u32,
+            ) == 0
         {
             *status.lock().unwrap() = options.status(
                 PermissionState::NotRequired,
                 CaptureState::Failed,
                 Some("Raw Input registration or watchdog timer failed".into()),
             );
+            KillTimer(window, 1);
             DestroyWindow(window);
             let _ = ready.send(());
             return;
@@ -504,7 +525,12 @@ pub(crate) fn run(
             options.status(PermissionState::NotRequired, CaptureState::Running, None);
         let _ = ready.send(());
         let mut message = MSG::default();
-        while GetMessageW(&mut message, ptr::null_mut(), 0, 0) > 0 {
+        while !context.stop.load(Ordering::Acquire)
+            && GetMessageW(&mut message, ptr::null_mut(), 0, 0) > 0
+        {
+            if context.stop.load(Ordering::Acquire) {
+                break;
+            }
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -520,6 +546,14 @@ pub(crate) fn run(
         WTSUnRegisterSessionNotification(window);
         KillTimer(window, 1);
         DestroyWindow(window);
+        if !context.stop.load(Ordering::Acquire) {
+            *status.lock().unwrap() = options.status(
+                PermissionState::NotRequired,
+                CaptureState::Failed,
+                Some("Raw Input message loop stopped".into()),
+            );
+            context.sender.reset();
+        }
     }
 }
 
@@ -677,6 +711,20 @@ fn scan_code(scan: u16, flags: u16) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stopping_worker_keeps_raw_input_reserved_until_cleanup() {
+        let reservation = reserve_raw_input().unwrap();
+        let (finish, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            wait.recv().unwrap();
+            drop(reservation);
+        });
+        assert!(reserve_raw_input().is_err());
+        finish.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(reserve_raw_input().is_ok());
+    }
 
     #[test]
     fn hid_packets_use_the_declared_report_size_and_count() {

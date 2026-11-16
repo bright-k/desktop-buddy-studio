@@ -4,7 +4,7 @@ use std::{
     sync::{atomic::Ordering, mpsc, Arc},
     time::Duration,
 };
-use tauri::WebviewWindow;
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 const MAX_EDGE: usize = 192;
 
@@ -62,7 +62,9 @@ impl HitMask {
         let column = (x * self.columns as f64) as usize;
         let row = (y * self.rows as f64) as usize;
         let pixel = row * self.columns + column;
-        self.bits[pixel / 32] & (1 << (pixel % 32)) != 0
+        self.bits
+            .get(pixel / 32)
+            .is_some_and(|bits| bits & (1 << (pixel % 32)) != 0)
     }
 }
 
@@ -87,29 +89,36 @@ fn cursor_in_window(
     ))
 }
 
-pub fn start(window: WebviewWindow, host: Arc<Host>) {
+pub fn start(app: AppHandle, host: Arc<Host>) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("buddy-overlay-hit-test".into())
         .spawn(move || {
             // Only one poll can be queued at a time. The native cursor remains
             // observable while the WebView window passes through mouse events.
-            let mut ignored = true;
+            let mut last = None;
             while !host.exiting.load(Ordering::Acquire) {
                 let unavailable = host.controller.lock().unwrap().mode == Mode::Hidden
                     || !host.overlay_ready.load(Ordering::Acquire);
                 if unavailable {
                     host.track_follow_cursor(None);
-                    if ignored {
+                    if last.is_none_or(|(_, ignored)| ignored) {
                         host.hit_test_wake.wait(None);
                         continue;
                     }
                 }
                 let (sender, receiver) = mpsc::sync_channel(1);
-                let overlay = window.clone();
+                let handle = app.clone();
                 let poll_host = host.clone();
-                if window
+                if app
                     .run_on_main_thread(move || {
                         let host = poll_host;
+                        let Some(overlay) = handle.get_webview_window("overlay") else {
+                            let _ = sender.send((None, 16));
+                            return;
+                        };
+                        let generation = host.recovery.lock().unwrap().generation;
+                        let ignored = last
+                            .is_none_or(|(previous, ignored)| previous != generation || ignored);
                         let (mode, follow) = {
                             let controller = host.controller.lock().unwrap();
                             (
@@ -131,7 +140,7 @@ pub fn start(window: WebviewWindow, host: Arc<Host>) {
                                 None
                             };
                         host.track_follow_cursor(if follow { cursor } else { None });
-                        let (mut next, delay) = if !available {
+                        let (next, delay) = if !available {
                             (true, 0)
                         } else if mode == Mode::Editing || button_down || menu_open {
                             // Preserve whichever window received the press until
@@ -146,10 +155,10 @@ pub fn start(window: WebviewWindow, host: Arc<Host>) {
                         } else {
                             (true, 16)
                         };
-                        if next != ignored && overlay.set_ignore_cursor_events(next).is_err() {
-                            next = ignored;
-                        }
-                        let _ = sender.send((next, delay));
+                        let state = Some((generation, next));
+                        let updated =
+                            state == last || overlay.set_ignore_cursor_events(next).is_ok();
+                        let _ = sender.send((if updated { state } else { last }, delay));
                     })
                     .is_err()
                 {
@@ -158,12 +167,12 @@ pub fn start(window: WebviewWindow, host: Arc<Host>) {
                 let Ok((next, delay)) = receiver.recv() else {
                     break;
                 };
-                ignored = next;
+                last = next;
                 host.hit_test_wake
                     .wait((!unavailable).then_some(Duration::from_millis(delay)));
             }
         })
-        .expect("overlay hit test worker creation");
+        .map(|_| ())
 }
 
 #[cfg(test)]

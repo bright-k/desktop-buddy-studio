@@ -133,7 +133,7 @@ impl InputSession {
         signal: WakeSignal,
         targets: Vec<usize>,
     ) -> Result<Self, String> {
-        let (sender, receiver) = queue::bounded_with_signal(1024, signal);
+        let (sender, receiver) = queue::bounded_with_signal(1024, signal.clone());
         let status = Arc::new(Mutex::new(options.status(
             permission_state(),
             CaptureState::Stopped,
@@ -143,6 +143,8 @@ impl InputSession {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker_status = status.clone();
         let worker_stop = stop.clone();
+        #[cfg(target_os = "windows")]
+        let reservation = windows::reserve_raw_input()?;
         let worker = std::thread::Builder::new()
             .name("buddy-native-input".into())
             .spawn(move || {
@@ -156,19 +158,23 @@ impl InputSession {
                     targets,
                 );
                 #[cfg(target_os = "windows")]
-                windows::run(
-                    options,
-                    sender,
-                    worker_status,
-                    worker_stop,
-                    ready_tx,
-                    targets,
-                );
+                {
+                    let _reservation = reservation;
+                    windows::run(
+                        options,
+                        sender,
+                        worker_status,
+                        worker_stop,
+                        ready_tx,
+                        targets,
+                    );
+                }
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
                     let _ = (options, sender, worker_status, worker_stop, targets);
                     let _ = ready_tx.send(());
                 }
+                signal.wake();
             })
             .map_err(|e| e.to_string())?;
         if ready_rx
@@ -197,10 +203,16 @@ impl InputSession {
     pub fn poll_captured(&mut self) -> Option<CapturedInput> {
         self.receiver.poll_captured()
     }
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+    pub fn is_finished(&self) -> bool {
+        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+    }
 }
 impl Drop for InputSession {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.request_stop();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

@@ -5,6 +5,7 @@ fn main() {
             "read_render_frame",
             "read_reaction_audio",
             "subscribe_character_state",
+            "overlay_heartbeat",
             "ack_character_frame",
             "set_character_hit_mask",
             "get_runtime_status",

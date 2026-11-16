@@ -75,7 +75,7 @@ async function startOverlay() {
       void overlayInvoke("ack_character_frame", { ack })
         .then(() => {
           warmSound();
-          if (ack.outcome === "drawn" || generation === 0) firstFramePending = false;
+          if (ack.outcome === "drawn") firstFramePending = false;
           renderer.setVisible(hostVisible && (firstFramePending || !document.hidden));
           playDrawnSound();
         })
@@ -127,13 +127,20 @@ async function startOverlay() {
   window.addEventListener("resize", resizeCanvas);
   let lastSeq: number | null = null;
   let hostVisible = true;
+  let heartbeatPending = false;
+  const sendHeartbeat = () => {
+    if (heartbeatPending) return;
+    heartbeatPending = true;
+    void overlayInvoke("overlay_heartbeat", { seen: lastSeq, paintBlocked: renderer.paintBlocked })
+      .catch(onOverlayError)
+      .finally(() => { heartbeatPending = false; });
+  };
   const cancelGesture = installCharacterDrag(canvas, overlayInvoke, onOverlayError, hitMask.contains, () => canvasScale);
   const channel = new Channel<WireState>();
   channel.onmessage = (message) => {
     const distance = lastSeq === null ? 1 : (message.seq - lastSeq) >>> 0;
     if (distance === 0 || distance > 0x7fffffff) return;
     if (lastSeq === null && generation !== 0) restoredAction = actionKey(message.state);
-    lastSeq = message.seq;
     if (!message.visible) cancelGesture();
     if (!message.visible || latest?.state.epoch !== message.state.epoch ||
         latest.state.actionInstanceId !== message.state.actionInstanceId) sound.stop();
@@ -156,6 +163,7 @@ async function startOverlay() {
       void sound.prepare(cue.resource);
     rendered = message;
     renderer.update(message.state, message.seq);
+    lastSeq = message.seq;
     if (!firstFramePending) warmSound();
   };
   document.addEventListener("visibilitychange", () => {
@@ -165,16 +173,20 @@ async function startOverlay() {
       sound.stop();
     }
     else {
+      sendHeartbeat();
       void sound.activate();
       playDrawnSound();
     }
   });
+  const heartbeatTimer = window.setInterval(sendHeartbeat, 5000);
   window.addEventListener("pagehide", () => {
+    window.clearInterval(heartbeatTimer);
     renderer.dispose();
     sound.dispose();
     canvas.width = canvas.height = 0;
   }, { once: true });
   await overlayInvoke("subscribe_character_state", { channel });
+  sendHeartbeat();
   canvas.oncontextmenu = (event) => {
     event.preventDefault();
     if (hitMask.contains(event)) {
