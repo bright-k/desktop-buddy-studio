@@ -190,13 +190,14 @@ fn a_gif_uses_one_visible_crop_for_the_entire_selected_motion() {
 #[test]
 fn decoded_budget_and_resource_path_escape_are_rejected() {
     let bytes = gif();
-    let mut budget = 256 * 1024 * 1024 - 2 * 16 * 16 * 4;
+    let limit = 512 * 1024 * 1024;
+    let mut budget = limit - 2 * 16 * 16 * 4;
     let mut assets = BTreeMap::new();
     decode_media(&bytes, &mut budget, &mut assets).unwrap();
-    assert_eq!(budget, 256 * 1024 * 1024);
+    assert_eq!(budget, limit);
     assert!(decode_media(&bytes, &mut budget, &mut assets)
         .unwrap_err()
-        .contains("256 MiB"));
+        .contains("512 MiB"));
     let dir = fixture();
     let manifest = dir.path().join("character/manifest.json");
     let mut c: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();

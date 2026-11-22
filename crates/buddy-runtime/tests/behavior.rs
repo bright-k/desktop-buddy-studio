@@ -1826,6 +1826,102 @@ fn timer_completion_waits_for_click_and_drag_and_uses_motion_variations() {
 }
 
 #[test]
+fn timer_start_keeps_playing_when_input_capture_resumes_after_the_popup() {
+    let mut project = data(json!([
+        {"id":"start","trigger":{"type":"timerStarted","phase":"countdown"},"effect":{
+            "type":"playAnimation","animation":"jump","durationMs":300
+        }},
+        shot("key", "KeyA", "click", 50),
+    ]));
+    project.project.timer = Some(TimerDefaults {
+        enabled: true,
+        ..Default::default()
+    });
+    project.project.bindings[0].sound = Some(SoundCue {
+        resource: "cue".into(),
+        volume: 1.0,
+    });
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 800.0,
+    };
+    let mut buddy = Runtime::new(
+        project,
+        bounds,
+        Point::default(),
+        Point { x: 100.0, y: 100.0 },
+    );
+    let enabled = Controls {
+        keyboard: true,
+        mouse: true,
+        ..buddy.controls()
+    };
+    let popup_open = Controls {
+        keyboard: false,
+        mouse: false,
+        ..enabled
+    };
+    let countdown = Some(TimerPhase::Countdown);
+    let start = InputEvent::TimerStarted {
+        phase: TimerPhase::Countdown,
+    };
+
+    buddy.set_controls(0, enabled);
+    buddy.set_controls(10, popup_open);
+    buddy.set_timer_phase(20, countdown);
+    buddy.handle(20, start.clone());
+    buddy.tick(20);
+    let playing = buddy.state();
+    assert_eq!(playing.animation, "jump");
+    assert_eq!(playing.sound.as_ref().unwrap().resource, "cue");
+
+    buddy.set_controls(30, enabled);
+    buddy.handle(30, InputEvent::Reset);
+    buddy.handle(
+        30,
+        InputEvent::Rearm {
+            keys: vec!["KeyA".into()],
+            buttons: vec![],
+        },
+    );
+    let resumed = buddy.state();
+    assert_eq!(resumed.animation, "jump");
+    assert_eq!(resumed.epoch, playing.epoch);
+    assert_eq!(resumed.action_instance_id, playing.action_instance_id);
+    assert_eq!(resumed.animation_elapsed_ms, 10.0);
+    assert_eq!(resumed.sound.as_ref().unwrap().resource, "cue");
+    buddy.tick(319);
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.tick(320);
+    assert_eq!(buddy.state().animation, "idle");
+    down(&mut buddy, 321, "KeyA");
+    assert_eq!(buddy.state().animation, "idle");
+    up(&mut buddy, 322, "KeyA");
+
+    buddy.set_timer_phase(330, None);
+    buddy.set_timer_phase(340, countdown);
+    buddy.handle(340, start);
+    buddy.tick(340);
+    assert_eq!(buddy.state().animation, "jump");
+    buddy.set_controls(
+        350,
+        Controls {
+            active: false,
+            ..enabled
+        },
+    );
+    assert_eq!(buddy.state().animation, "idle");
+
+    buddy.set_controls(360, enabled);
+    down(&mut buddy, 370, "KeyA");
+    assert_eq!(buddy.state().animation, "click");
+    buddy.set_controls(380, popup_open);
+    assert_eq!(buddy.state().animation, "idle");
+}
+
+#[test]
 fn timer_group_uses_directional_idle_after_start_hold_and_drag() {
     let mut project = data(json!([
         {"id":"start","trigger":{"type":"timerStarted","phase":"countdown","alternatives":["focus"]},"effect":{"type":"playAnimation","animation":"jump","durationMs":100}},

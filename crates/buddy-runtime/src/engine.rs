@@ -415,17 +415,30 @@ impl Runtime {
         self.controls
     }
     pub fn reset(&mut self, now: u64) {
-        self.diagnostics.epoch_resets = self.diagnostics.epoch_resets.saturating_add(1);
+        self.reset_inputs(now, false);
+    }
+    fn reset_inputs(&mut self, now: u64, keep_timer_reaction: bool) {
         self.now = self.now.max(now);
-        if self.one_shot.is_some() {
-            self.performance.end(
-                self.now,
-                self.epoch,
-                self.action_instance,
-                ReactionEnd::Cancelled,
-            );
+        let keep_playing = keep_timer_reaction
+            && self.controls.active
+            && self.one_shot.as_ref().is_some_and(|shot| {
+                matches!(
+                    self.data.project.bindings[shot.binding].trigger,
+                    Trigger::TimerStarted { .. } | Trigger::TimerCompleted { .. }
+                )
+            });
+        if !keep_playing {
+            if self.one_shot.take().is_some() {
+                self.performance.end(
+                    self.now,
+                    self.epoch,
+                    self.action_instance,
+                    ReactionEnd::Cancelled,
+                );
+            }
+            self.diagnostics.epoch_resets = self.diagnostics.epoch_resets.saturating_add(1);
+            self.epoch = self.epoch.wrapping_add(1);
         }
-        self.epoch = self.epoch.wrapping_add(1);
         self.blocked.extend(self.held.iter().cloned());
         self.held.clear();
         for button in self.mouse_held.drain(..) {
@@ -446,13 +459,12 @@ impl Runtime {
                 *last_start = None;
             }
         }
-        self.one_shot = None;
         self.shot_release = None;
         self.dragging = false;
         self.cursor = None;
         self.continuous_binding = None;
         self.moving = false;
-        self.sync_display(true);
+        self.sync_display(!keep_playing);
     }
     pub fn set_controls(&mut self, now: u64, controls: Controls) {
         self.advance(now);
@@ -460,11 +472,14 @@ impl Runtime {
             || self.controls.keyboard != controls.keyboard
             || self.controls.mouse != controls.mouse
         {
+            // Closing the timer popup can reconnect capture after the reaction
+            // has started. Keep its playback and sound identity in that case.
+            let capture_only = self.controls.active && controls.active;
             self.controls = controls;
             if !controls.active {
                 self.pending_show = None;
             }
-            self.reset(now);
+            self.reset_inputs(now, capture_only);
         } else {
             if self.controls.movement_enabled != controls.movement_enabled {
                 self.move_blocked.extend(self.held.iter().cloned());
@@ -664,7 +679,7 @@ impl Runtime {
             self.shot_release = None;
         }
         if let InputEvent::Rearm { keys, buttons } = event {
-            self.reset(now);
+            self.reset_inputs(now, true);
             self.blocked = keys
                 .into_iter()
                 .filter(|code| is_supported_key(code))
@@ -674,7 +689,7 @@ impl Runtime {
             return None;
         }
         if matches!(event, InputEvent::Reset) {
-            self.reset(now);
+            self.reset_inputs(now, true);
             return None;
         }
         if let InputEvent::KeyUp { code } = &event {

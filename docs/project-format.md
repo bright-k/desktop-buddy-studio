@@ -215,7 +215,7 @@ repeat는 keyDown에서만 허용하며 기본 false다. true이면 최초 down�
 아래는 v1 검증 한도다. 실측으로 변경이 필요하면 ADR·스키마·fixture를 함께 갱신한다.
 
 - JSON은 UTF-8, 각 JSON 최대 1 MiB, 중복 JSON 필드 금지, 총 매핑 최대 256개다. license 텍스트도 UTF-8, 파일당 1 MiB 이하로 제한한다.
-- 기본 스프라이트와 앱 아이콘은 PNG다. 추가 resources는 PNG/JPEG/GIF/정적 WebP/BMP를 지원한다. 파일 1개 16 MiB, 한 변 4096 px, 프로젝트 전체 디코딩 RGBA 256 MiB, 참조 자산 합계 64 MiB 이하로 제한한다. GIF는 최대 256프레임이며 애니메이션 WebP/APNG·SVG는 거부한다.
+- 기본 스프라이트와 앱 아이콘은 PNG다. 추가 resources는 PNG/JPEG/GIF/정적 WebP/BMP를 지원한다. 파일 1개 16 MiB, 한 변 4096 px, 프로젝트 전체 디코딩 RGBA 512 MiB, 참조 자산 합계 64 MiB 이하로 제한한다. GIF는 최대 256프레임이며 애니메이션 WebP/APNG·SVG는 거부한다.
 - 프레임 한 변 16~512 px, frameCount 1~256, 시트의 실제 이미지 크기와 선언값이 일치해야 한다.
 - 시트 크기는 프레임 크기의 정수 배이며 `1 <= frameCount <= (width / frameWidth) * (height / frameHeight)`다. 모든 인덱스는 `0 <= index < frameCount`를 만족한다. 미사용 셀은 허용하되 참조하지 않는다.
 - 절대 경로·상위 경로 탈출·루트 밖 symlink·원격 URL·실행 파일·HTML·스크립트는 프로젝트 자산으로 허용하지 않는다.
