@@ -1,0 +1,521 @@
+{
+  "bindings": [
+    {
+      "effect": {
+        "animation": "flying",
+        "type": "sustainAnimation"
+      },
+      "followCursor": true,
+      "id": "drag",
+      "trigger": {
+        "type": "drag"
+      }
+    },
+    {
+      "effect": {
+        "animation": "banana-attack",
+        "cooldownMs": 0,
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "key-enter",
+      "trigger": {
+        "code": "Enter",
+        "modifiers": [],
+        "repeat": false,
+        "type": "keyDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "attack",
+        "cooldownMs": 0,
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "mouse-click",
+      "trigger": {
+        "inputs": [
+          {
+            "button": "primary",
+            "type": "mouseDown"
+          },
+          {
+            "button": "secondary",
+            "type": "mouseDown"
+          }
+        ],
+        "type": "mouseInput"
+      }
+    },
+    {
+      "effect": {
+        "animation": "bbuu",
+        "cooldownMs": 0,
+        "priority": 100,
+        "retrigger": "restart",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "timer-complete",
+      "sound": {
+        "resource": "sound-1",
+        "volume": 0.7
+      },
+      "trigger": {
+        "alternatives": [
+          "focus",
+          "shortBreak",
+          "longBreak"
+        ],
+        "phase": "countdown",
+        "type": "timerCompleted"
+      }
+    },
+    {
+      "effect": {
+        "animation": "clap",
+        "cooldownMs": 0,
+        "priority": 75,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "keyword-clap",
+      "trigger": {
+        "alternatives": [
+          {
+            "keyword": "박수",
+            "layout": "ko-KR-2set"
+          },
+          {
+            "keyword": "잘했",
+            "layout": "ko-KR-2set"
+          }
+        ],
+        "keyword": "짝짝",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 5000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "ddushi",
+        "cooldownMs": 0,
+        "priority": 75,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "keyword-ddushi",
+      "trigger": {
+        "alternatives": [
+          {
+            "keyword": "뚜쉬",
+            "layout": "ko-KR-2set"
+          },
+          {
+            "keyword": "씨발",
+            "layout": "ko-KR-2set"
+          },
+          {
+            "keyword": "시발",
+            "layout": "ko-KR-2set"
+          },
+          {
+            "keyword": "tq",
+            "layout": "en-US-qwerty"
+          }
+        ],
+        "keyword": "뚜시",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 1200,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "move-fairy",
+        "cooldownMs": 0,
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "mouse-scroll",
+      "trigger": {
+        "inputs": [
+          {
+            "direction": "up",
+            "type": "wheel"
+          },
+          {
+            "direction": "down",
+            "type": "wheel"
+          },
+          {
+            "direction": "left",
+            "type": "wheel"
+          },
+          {
+            "direction": "right",
+            "type": "wheel"
+          }
+        ],
+        "type": "mouseInput"
+      }
+    },
+    {
+      "effect": {
+        "animation": "dance",
+        "cooldownMs": 0,
+        "priority": 75,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "keyword-merong",
+      "trigger": {
+        "keyword": "메롱",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 1200,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "cine",
+        "cooldownMs": 0,
+        "priority": 75,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "keyword-cine",
+      "trigger": {
+        "alternatives": [
+          {
+            "keyword": "죽여",
+            "layout": "ko-KR-2set"
+          },
+          {
+            "keyword": "시네",
+            "layout": "ko-KR-2set"
+          },
+          {
+            "keyword": "die",
+            "layout": "en-US-qwerty"
+          }
+        ],
+        "keyword": "죽어",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 1500,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "tada",
+        "cooldownMs": 0,
+        "priority": 75,
+        "retrigger": "restart",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "keyword-tada",
+      "trigger": {
+        "alternatives": [
+          {
+            "keyword": "tada",
+            "layout": "en-US-qwerty"
+          }
+        ],
+        "keyword": "짜잔",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 2000,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "roll",
+        "type": "sustainAnimation"
+      },
+      "followCursor": true,
+      "id": "typing-slow",
+      "trigger": {
+        "maxKps": 5,
+        "minKps": 0.5,
+        "type": "typingRate"
+      }
+    },
+    {
+      "effect": {
+        "animation": "roll-fast",
+        "type": "sustainAnimation"
+      },
+      "followCursor": true,
+      "id": "typing-fast",
+      "trigger": {
+        "minKps": 5,
+        "type": "typingRate"
+      }
+    },
+    {
+      "effect": {
+        "animation": "bbang",
+        "cooldownMs": 0,
+        "priority": 65,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "keyword-bbang",
+      "trigger": {
+        "keyword": "빵",
+        "layout": "ko-KR-2set",
+        "timeoutMs": 1200,
+        "type": "keySequence"
+      }
+    },
+    {
+      "effect": {
+        "animation": "magic-attack",
+        "cooldownMs": 0,
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "key-backspace",
+      "trigger": {
+        "code": "Backspace",
+        "modifiers": [],
+        "repeat": false,
+        "type": "keyDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "rain-attack",
+        "cooldownMs": 0,
+        "priority": 50,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "key-esc",
+      "trigger": {
+        "code": "Escape",
+        "modifiers": [],
+        "repeat": false,
+        "type": "keyDown"
+      }
+    },
+    {
+      "effect": {
+        "animation": "timer-start",
+        "cooldownMs": 0,
+        "priority": 90,
+        "retrigger": "restart",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "timer-start",
+      "sound": {
+        "resource": "sound-2",
+        "volume": 1
+      },
+      "trigger": {
+        "phase": "countdown",
+        "type": "timerStarted"
+      }
+    },
+    {
+      "effect": {
+        "animation": "focus-timer-start",
+        "cooldownMs": 0,
+        "priority": 90,
+        "retrigger": "restart",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "focus-timer-start",
+      "sound": {
+        "resource": "sound-4",
+        "volume": 1
+      },
+      "trigger": {
+        "phase": "focus",
+        "type": "timerStarted"
+      }
+    },
+    {
+      "effect": {
+        "animation": "rest-once",
+        "cooldownMs": 0,
+        "priority": 90,
+        "retrigger": "restart",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": true,
+      "id": "rest-timer-start",
+      "sound": {
+        "resource": "sound-6",
+        "volume": 0.7
+      },
+      "trigger": {
+        "alternatives": [
+          "longBreak"
+        ],
+        "phase": "shortBreak",
+        "type": "timerStarted"
+      }
+    },
+    {
+      "effect": {
+        "animation": "run-once",
+        "cooldownMs": 0,
+        "priority": 75,
+        "retrigger": "ignore",
+        "stopOnRelease": false,
+        "type": "playAnimation"
+      },
+      "followCursor": false,
+      "id": "click-buddy",
+      "sound": {
+        "resource": "sound-3",
+        "volume": 1
+      },
+      "trigger": {
+        "holdMs": 300,
+        "type": "buddyLongPress"
+      }
+    }
+  ],
+  "build": {
+    "signing": {
+      "macos": "ad-hoc",
+      "windows": "none"
+    },
+    "targets": [
+      "windows-x64",
+      "macos-arm64"
+    ]
+  },
+  "character": "character/manifest.json",
+  "cursorFollow": {
+    "bands": [
+      {
+        "animation": "run",
+        "minDistanceDip": 0,
+        "speedDipPerSecond": 500
+      }
+    ],
+    "enabled": false,
+    "priority": 80,
+    "stopDistanceDip": 60
+  },
+  "defaults": {
+    "alwaysOnTop": true,
+    "displayHeightDip": 128,
+    "input": {
+      "keyboard": true,
+      "mouse": true
+    },
+    "movementEnabled": false,
+    "position": {
+      "anchor": "bottomRight",
+      "marginDip": 24,
+      "monitor": "primary"
+    },
+    "scale": 1,
+    "timing": {
+      "idleTimeoutMs": 1200,
+      "rateEvaluationMs": 50,
+      "rateStabilityMs": 200,
+      "rateWindowMs": 2000
+    }
+  },
+  "idle": {
+    "cursorEnabled": false,
+    "directions": {}
+  },
+  "idleGroups": [
+    {
+      "animation": "idle-resource-12",
+      "cursorMode": "custom",
+      "id": "idle-group-1",
+      "states": [
+        "countdown"
+      ]
+    },
+    {
+      "animation": "rest",
+      "cursorMode": "custom",
+      "directions": {
+        "center": {
+          "mirror": true
+        }
+      },
+      "id": "idle-group-2",
+      "states": [
+        "shortBreak",
+        "longBreak"
+      ]
+    },
+    {
+      "animation": "clap-loop",
+      "cursorMode": "custom",
+      "id": "idle-group-3",
+      "states": [
+        "focus"
+      ]
+    }
+  ],
+  "product": {
+    "icon": "assets/app-icon.png",
+    "identifier": "com.bright.k.desktop.buddy.usagi.v1",
+    "name": "먼작버 우사기",
+    "slug": "usagi-buddy-v1",
+    "version": "1.0.0"
+  },
+  "projectId": "af566717-4bfd-487f-a188-b72ab7321687",
+  "schemaVersion": 1,
+  "timer": {
+    "countdownPresets": [
+      300,
+      900,
+      1800
+    ],
+    "countdownSeconds": 900,
+    "enabled": true,
+    "mode": "countdown",
+    "pomodoro": {
+      "focusMinutes": 25,
+      "longBreakMinutes": 15,
+      "rounds": 3,
+      "shortBreakMinutes": 5
+    }
+  }
+}

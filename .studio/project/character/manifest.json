@@ -1,0 +1,595 @@
+{
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "animations": {
+    "attack": {
+      "anchorX": 0.5,
+      "fps": 12,
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ],
+      "loop": false,
+      "resource": "resource-5",
+      "scalePercent": 165,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "banana-attack": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-6",
+      "scalePercent": 175,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "bbang": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-19",
+      "scalePercent": 125,
+      "sourceFacing": "left",
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "bbuu": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-16",
+      "scalePercent": 135,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "cine": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-11",
+      "scalePercent": 125,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "clap": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-7",
+      "scalePercent": 110,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "clap-loop": {
+      "fps": 12,
+      "frames": [],
+      "loop": true,
+      "resource": "resource-18",
+      "scalePercent": 110,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "dance": {
+      "fps": 12,
+      "frames": [
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40
+      ],
+      "loop": false,
+      "resource": "resource-10",
+      "scalePercent": 125,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "ddushi": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-8",
+      "scalePercent": 125,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "flying": {
+      "fps": 12,
+      "frames": [],
+      "loop": true,
+      "resource": "resource-3",
+      "scalePercent": 125,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "focus-timer-start": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-23",
+      "scalePercent": 150,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "idle-resource-1": {
+      "fps": 12,
+      "frames": [
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59
+      ],
+      "loop": true,
+      "resource": "resource-1",
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "idle-resource-12": {
+      "fps": 12,
+      "frames": [
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ],
+      "loop": true,
+      "resource": "resource-12",
+      "scalePercent": 105,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "magic-attack": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-20",
+      "scalePercent": 130,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "move-fairy": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-14",
+      "scalePercent": 105,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "rain-attack": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-21",
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "rest": {
+      "fps": 12,
+      "frames": [],
+      "loop": true,
+      "resource": "resource-13",
+      "scalePercent": 96,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "rest-once": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-13",
+      "scalePercent": 95,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "roll": {
+      "fps": 18,
+      "frames": [
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87
+      ],
+      "loop": true,
+      "resource": "resource-17",
+      "scalePercent": 115,
+      "useSourceTiming": false,
+      "regions": []
+    },
+    "roll-fast": {
+      "fps": 30,
+      "frames": [
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87
+      ],
+      "loop": true,
+      "resource": "resource-17",
+      "scalePercent": 115,
+      "useSourceTiming": false,
+      "regions": []
+    },
+    "run": {
+      "fps": 12,
+      "frames": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "loop": true,
+      "resource": "resource-2",
+      "scalePercent": 155,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "run-once": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-2",
+      "scalePercent": 170,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "tada": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-15",
+      "scalePercent": 175,
+      "useSourceTiming": true,
+      "regions": []
+    },
+    "timer-start": {
+      "fps": 12,
+      "frames": [],
+      "loop": false,
+      "resource": "resource-22",
+      "scalePercent": 125,
+      "useSourceTiming": true,
+      "regions": []
+    }
+  },
+  "defaultAnimation": "idle-resource-1",
+  "id": "character",
+  "license": "LICENSE.txt",
+  "name": "먼작버 우사기",
+  "resources": {
+    "resource-1": {
+      "image": "resources/510a788a82927ff43966bec26531fa424c414c9f33f296cbd8fb71c64ff607f9.gif",
+      "name": "sleep_usagi"
+    },
+    "resource-10": {
+      "image": "resources/2c54f831a16ab0732198d6b2c39921ca94833b3351b63b432fbef3fd17065365.gif",
+      "name": "dance"
+    },
+    "resource-11": {
+      "image": "resources/e8f848784cd8f781de883c8f78a9baa19b3284a0f20eae9ce84cdfb4da5c2a78.gif",
+      "name": "cine"
+    },
+    "resource-12": {
+      "image": "resources/315937028b4baa4ef40f64fb08f45ab10e2ed7a04412dc1a4aa4a6be929d679c.gif",
+      "name": "dj"
+    },
+    "resource-13": {
+      "image": "resources/14a024edf62885c7be2cada39b0da8607f7cffee3fcfd123d2b4810c705b4fd1.gif",
+      "name": "rest"
+    },
+    "resource-14": {
+      "image": "resources/20b6fe364240cd70f5e3553e748baf137864d179cb9ee9da078aaf2730ea5a94.gif",
+      "name": "move-fairy"
+    },
+    "resource-15": {
+      "image": "resources/9a1210f20c0c9bbf84bec9eafe9297f87cbede9886170e69c3de29da7ff5acc1.gif",
+      "name": "tada"
+    },
+    "resource-16": {
+      "image": "resources/674499bcdb069d81c2dae6d2adadff8f33df5e66bfd1a77a7eed7ca4aa91d56f.gif",
+      "name": "bbuu"
+    },
+    "resource-17": {
+      "image": "resources/bdfdc91caea8eb516391580cab842a7398c54b29282f620bd0f1f2fea4357398.gif",
+      "name": "roll"
+    },
+    "resource-18": {
+      "image": "resources/9728ead9b55c0e1fbd65806ec2868fb08f273a4357f5812652022e276576f55b.gif",
+      "name": "clap-loop"
+    },
+    "resource-19": {
+      "image": "resources/f89454710daa19594129ff7b6c84fc16d063b328e2c629ca78955ffc2cddbe2a.gif",
+      "name": "bbang"
+    },
+    "resource-2": {
+      "image": "resources/27e2498d62c821bd654fa879d6fab9c06c567b4f427ad6fc19937017bb19a33c.gif"
+    },
+    "resource-20": {
+      "image": "resources/0f915bd2d333e3e94583006c84299fcb23ebb2fd98408e7ce225d1ade2cc2002.gif",
+      "name": "magic-attack"
+    },
+    "resource-21": {
+      "image": "resources/5f692b037d014591e82f941e319c2b366a873b064b314a315b404970d18b2490.gif",
+      "name": "rain-attack"
+    },
+    "resource-22": {
+      "image": "resources/3b8c57276f4d2d0269f6af5813696a38aa27fa846ba6c897939203ecdbfce91f.gif"
+    },
+    "resource-23": {
+      "image": "resources/5a870edaa7e7d1a5746a2d0d9958203b1279875d332517e07e97964ae961ba03.gif"
+    },
+    "resource-3": {
+      "image": "resources/c92e64e84231ad5041eeb5fbaea1c542e3c772d7ecad3f0a432296d76158bd6a.gif",
+      "name": "flying"
+    },
+    "resource-5": {
+      "image": "resources/8d8d5f0bdd09527828fbd94db436182d98fa5f5ae6a2e41a3f6dbee70d96f243.gif",
+      "name": "attack"
+    },
+    "resource-7": {
+      "image": "resources/ef356366ccd13c1f93fa41f90d099c36821d2a286fe2b4d3b8701ebfcf343f27.gif",
+      "name": "clap"
+    },
+    "resource-8": {
+      "image": "resources/4f812730de34f6ff5f9a9d82c21b2f75f30daa21ef1258cf389ddb8c8b1439c3.gif",
+      "name": "ddushi"
+    },
+    "resource-6": {
+      "image": "resources/256c75e885ef6c449adfcde9b6d402f9de32f8ebfdf4cfaa26884baa036f6638.gif"
+    }
+  },
+  "schemaVersion": 1,
+  "sheet": {
+    "frameCount": 1,
+    "frameHeight": 256,
+    "frameWidth": 256,
+    "height": 256,
+    "width": 256
+  },
+  "sounds": {
+    "sound-1": {
+      "audio": "resources/88c1de5b5ad52fe595fb60a3f06c155cc363e7db7d05b6e5d061fc13b6ed3845.wav",
+      "name": "뿌릿"
+    },
+    "sound-2": {
+      "audio": "resources/ba82de7d2794b58c4d9785fe77ca7b0bc615348cd4f2672155c8512c1cac817e.wav"
+    },
+    "sound-3": {
+      "audio": "resources/e0f9f789ea2f2b5fcfb7fccfb72f16591ac2042b46a7bb3841b681c4b5f10b03.wav"
+    },
+    "sound-4": {
+      "audio": "resources/fdd48ae87092ae12a6928dc5b85f78cdc428d12222bee21d3288d73547237f60.wav"
+    },
+    "sound-5": {
+      "audio": "resources/d889bf20551867e0a4a470bba6f810592fda07107376498aa81fe09faa4dc2a0.wav"
+    },
+    "sound-6": {
+      "audio": "resources/af48d201c0d410ac117cd44bed43e45b4108d619712a896d10c8523fb04a7523.wav"
+    },
+    "sound-7": {
+      "audio": "resources/1d3fb6f4107c469365b9894c47d2bb3fd03600df1088ca4071dc85c8e0d55658.wav"
+    }
+  }
+}
