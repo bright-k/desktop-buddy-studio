@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "id": "sample-mascot",
+  "name": "Sample Mascot",
+  "license": "LICENSE.txt",
+  "image": "sprite.png",
+  "sheet": {
+    "width": 1024,
+    "height": 1024,
+    "frameWidth": 256,
+    "frameHeight": 256,
+    "frameCount": 16
+  },
+  "anchor": {
+    "x": 0.5,
+    "y": 1.0
+  },
+  "defaultAnimation": "idle",
+  "animations": {
+    "idle": {
+      "frames": [
+        0,
+        1
+      ],
+      "fps": 2,
+      "loop": true
+    },
+    "typing": {
+      "frames": [
+        2,
+        3
+      ],
+      "fps": 12,
+      "loop": true
+    },
+    "typingFast": {
+      "frames": [
+        14,
+        15
+      ],
+      "fps": 24,
+      "loop": true
+    },
+    "click": {
+      "frames": [
+        4,
+        5
+      ],
+      "fps": 12,
+      "loop": false
+    },
+    "jump": {
+      "frames": [
+        6,
+        7,
+        8,
+        9
+      ],
+      "fps": 12,
+      "loop": false
+    },
+    "walk": {
+      "frames": [
+        10,
+        11,
+        12,
+        13
+      ],
+      "fps": 8,
+      "loop": true
+    },
+    "celebrate": {
+      "frames": [
+        6,
+        7,
+        8,
+        9
+      ],
+      "fps": 12,
+      "loop": false
+    }
+  }
+}
